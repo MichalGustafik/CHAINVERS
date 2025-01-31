@@ -1,6 +1,26 @@
 <?php
+session_start();
 include('background.php');
+
+// Skontrolovať, či je používateľ prihlásený
+if (!isset($_SESSION['user_address'])) {
+    echo "<p>Prosím, prihláste sa pred výberom obrázka.</p>";
+    exit;
+}
+
+$directory = "images"; // Priečinok s obrázkami
+$allowedExtensions = ['jpg', 'jpeg', 'png', 'gif', 'webp']; // Povolené formáty
+
+// Skontrolovať, či priečinok existuje
+if (!is_dir($directory)) {
+    echo "<p>Priečinok <strong>$directory</strong> neexistuje!</p>";
+    exit;
+}
+
+// Získať zoznam súborov v priečinku
+$files = scandir($directory);
 ?>
+
 <!DOCTYPE html>
 <html lang="sk">
 <head>
@@ -58,29 +78,30 @@ include('background.php');
         <h1>Vyber si obrázok</h1>
         <div class="gallery">
             <?php
-            session_start();
-            // Zabezpečiť, že používateľ je prihlásený
-            if (!isset($_SESSION['user_address'])) {
-                echo "<p>Prosím, prihláste sa pred výberom obrázka.</p>";
-                exit;
-            }
-
-            $directory = "images"; // Priečinok s obrázkami
-            $allowedExtensions = ['jpg', 'jpeg', 'png', 'gif', 'webp']; // Povolené formáty
-
-            // Získať zoznam súborov v priečinku
-            $files = scandir($directory);
+            $foundImages = false;
 
             foreach ($files as $file) {
+                // Preskočiť "." a ".."
+                if ($file === '.' || $file === '..') continue;
+
                 // Overiť, či má súbor povolenú príponu
                 $fileExtension = pathinfo($file, PATHINFO_EXTENSION);
                 if (in_array(strtolower($fileExtension), $allowedExtensions)) {
-                    // Skontrolujte správnosť cesty k obrázkom
-                    $filePath = "$directory/$file";
+                    $filePath = "$directory/$file"; // Relatívna cesta
+
+                    // Skontrolovať, či súbor existuje
+                    if (!file_exists($filePath)) continue;
+
                     echo "<a href='crop.php?image=" . urlencode($file) . "'>
                             <img src='$filePath' alt='$file'>
                           </a>";
+                    $foundImages = true;
                 }
+            }
+
+            // Ak neboli nájdené žiadne obrázky
+            if (!$foundImages) {
+                echo "<p>Žiadne obrázky neboli nájdené.</p>";
             }
             ?>
         </div>
