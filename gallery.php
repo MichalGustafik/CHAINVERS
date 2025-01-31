@@ -8,7 +8,7 @@ if (!isset($_SESSION['user_address'])) {
     exit;
 }
 
-$directory = "images"; // Priečinok s obrázkami
+$directory = "/images"; // Priečinok s obrázkami
 $allowedExtensions = ['jpg', 'jpeg', 'png', 'gif', 'webp']; // Povolené formáty
 
 // Skontrolovať, či priečinok existuje
