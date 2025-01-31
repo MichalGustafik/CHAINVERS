@@ -101,7 +101,7 @@ $files = scandir($directory);
 
             // Ak neboli nájdené žiadne obrázky
             if (!$foundImages) {
-                echo "<p>Žiadne obrázky neboli nájdené....</p>";
+                echo "<p>Žiadne obrázky neboli nájdené.</p>";
             }
             ?>
         </div>
