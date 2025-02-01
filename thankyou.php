@@ -1,5 +1,4 @@
 <?php
-// Začať reláciu
 session_start();
 
 // Skontrolovať, či je prítomné ID platby v URL
