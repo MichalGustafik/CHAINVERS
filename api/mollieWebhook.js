@@ -1,17 +1,18 @@
 // api/mollieWebhook.js
+
 export default async function handler(req, res) {
     if (req.method === "POST") {
         const data = req.body;  // Údaje z webhooku Mollie
+        
+        console.log("Webhook prijatý: ", data);  // Logovanie dát pre kontrolu
 
-        // Pridaj logovanie na kontrolu dát
-        console.log("Webhook prijatý: ", data);
-
-        // Skontroluj platbu
         if (data && data.status === "paid") {
-            // Tu môžeš pridať logiku, ako spracovať platbu (napr. ukladať do databázy, vykonať akciu)
+            // Ak platba prebehla úspešne
             console.log("Platba bola úspešne zaplatená.");
+            // Tu môžeš pridať logiku, ako spracovať platbu (napr. ukladať do databázy)
             res.status(200).json({ status: "OK" });
         } else {
+            // Ak platba neprešla
             console.log("Chyba pri platbe: ", data);
             res.status(400).json({ status: "Chyba" });
         }
