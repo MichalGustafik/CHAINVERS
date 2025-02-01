@@ -1,10 +1,16 @@
 <?php
 
 // API kľúč Mollie
-$apiKey = 'test_9G42azBgKQ83x68sQV65AH6sSVjseS';
+$apiKey = 'test_9G42azBgKQ83x68sQV65AH6sSVjseS'; // Skontroluj správnosť kľúča
 
 // Prijatie údajov z InfintyFree (presnejšie z front-endu alebo ako JSON payload)
 $data = json_decode(file_get_contents('php://input'), true);
+
+// Skontroluj, či prišli dáta
+if (!$data) {
+    echo json_encode(['error' => 'Žiadne údaje na vytvorenie platby']);
+    exit();
+}
 
 // Údaje platby
 $paymentData = [
@@ -39,6 +45,6 @@ if (isset($responseData['id'])) {
     $paymentUrl = $responseData['_links']['checkout']['href'];
     echo json_encode(['payment_url' => $paymentUrl]);
 } else {
-    echo json_encode(['error' => 'Chyba pri vytváraní platby.']);
+    echo json_encode(['error' => 'Chyba pri vytváraní platby. Detaily: ' . $response]);
 }
 ?>
