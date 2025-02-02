@@ -12,19 +12,24 @@ export default async function handler(req, res) {
     const mollieApiKey = "test_9G42azBgKQ83x68sQV65AH6sSVjseS";
     const mollieUrl = `https://api.mollie.com/v2/payments/${paymentId}`;
 
-    const response = await fetch(mollieUrl, {
-        method: "GET",
-        headers: { "Authorization": `Bearer ${mollieApiKey}` }
-    });
+    try {
+        const response = await fetch(mollieUrl, {
+            method: "GET",
+            headers: { "Authorization": `Bearer ${mollieApiKey}` }
+        });
 
-    const paymentData = await response.json();
+        const paymentData = await response.json();
 
-    if (paymentData.status === "paid") {
-        // Môžeš tu uložiť do databázy, že platba prebehla
-        console.log(`✅ Platba ${paymentId} bola úspešne dokončená.`);
-    } else {
-        console.log(`❌ Platba ${paymentId} nebola dokončená. Stav: ${paymentData.status}`);
+        if (paymentData.status === "paid") {
+            // Platba bola úspešná, presmerujeme na thankyou.php a odovzdáme ID platby
+            const redirectUrl = `https://chainvers.free.nf/thankyou.php?payment_id=${paymentId}`;
+            return res.redirect(redirectUrl);
+        } else {
+            console.log(`❌ Platba ${paymentId} nebola dokončená. Stav: ${paymentData.status}`);
+            return res.status(200).send("Platba nebola úspešná.");
+        }
+    } catch (error) {
+        console.error('Chyba pri komunikácii s Mollie API:', error);
+        return res.status(500).send("Chyba pri spracovaní platby.");
     }
-
-    res.status(200).send("OK");
 }
