@@ -24,6 +24,9 @@ export default async function handler(req, res) {
             // Platba bola úspešná, presmerujeme na thankyou.php a odovzdáme ID platby
             const redirectUrl = `https://chainvers.free.nf/thankyou.php?payment_id=${paymentId}`;
             return res.redirect(redirectUrl);
+        } else if (paymentData.status === "open" || paymentData.status === "pending") {
+            // Platba ešte nie je dokončená, počkáme
+            return res.status(200).send("Platba čaká na dokončenie. Skúste neskôr.");
         } else {
             console.log(`❌ Platba ${paymentId} nebola dokončená. Stav: ${paymentData.status}`);
             return res.status(200).send("Platba nebola úspešná.");
