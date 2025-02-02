@@ -20,16 +20,11 @@ export default async function handler(req, res) {
     const paymentData = await response.json();
 
     if (paymentData.status === "paid") {
-        // Môžeš tu uložiť do databázy, že platba prebehla
         console.log(`✅ Platba ${paymentId} bola úspešne dokončená.`);
     } else {
         console.log(`❌ Platba ${paymentId} nebola dokončená. Stav: ${paymentData.status}`);
     }
 
-    // Ak je platba úspešná, presmerujeme späť na thankyou.php s payment_id
-    if (paymentData.status === "paid") {
-        return res.redirect(`https://chainvers.free.nf/thankyou.php?payment_id=${paymentId}`);
-    } else {
-        return res.status(400).json({ error: "Platba nebola úspešná." });
-    }
+    // Poslať späť odpoveď
+    res.status(200).send("OK");
 }

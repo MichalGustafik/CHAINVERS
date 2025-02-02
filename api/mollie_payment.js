@@ -25,7 +25,7 @@ export default async function handler(req, res) {
     const data = await response.json();
 
     if (data.id) {
-        res.json({ payment_url: data._links.checkout.href });
+        res.json({ payment_url: data._links.checkout.href, payment_id: data.id });
     } else {
         res.status(400).json({ error: "Chyba pri vytváraní platby", detail: data.detail });
     }
