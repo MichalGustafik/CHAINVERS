@@ -1,32 +1,32 @@
+// api/mollie_payment.js
+
 export default async function handler(req, res) {
-    if (req.method !== "POST") {
-        return res.status(405).json({ error: "Method Not Allowed" });
-    }
+    if (req.method === "POST") {
+        const { id, status } = req.body;
 
-    const { amount, currency, description } = req.body;
+        // Overenie platby cez Mollie API
+        const mollieApiKey = "test_9G42azBgKQ83x68sQV65AH6sSVjseS";
+        const url = `https://api.mollie.com/v2/payments/${id}`;
 
-    const mollieApiKey = "test_9G42azBgKQ83x68sQV65AH6sSVjseS";
-    const mollieUrl = "https://api.mollie.com/v2/payments";
+        try {
+            const paymentResponse = await fetch(url, {
+                method: "GET",
+                headers: {
+                    "Authorization": `Bearer ${mollieApiKey}`,
+                },
+            });
+            const paymentData = await paymentResponse.json();
 
-    const response = await fetch(mollieUrl, {
-        method: "POST",
-        headers: {
-            "Authorization": `Bearer ${mollieApiKey}`,
-            "Content-Type": "application/json"
-        },
-        body: JSON.stringify({
-            amount: { currency, value: amount },
-            description,
-            redirectUrl: `https://chainvers.free.nf/thankyou.php?payment_id={payment_id}`,
-            webhookUrl: "https://chainvers.vercel.app/api/mollie_webhook"
-        })
-    });
-
-    const data = await response.json();
-
-    if (data.id) {
-        res.json({ payment_url: data._links.checkout.href });
-    } else {
-        res.status(400).json({ error: "Chyba pri vytváraní platby", detail: data.detail });
+            // Ak je platba úspešná
+            if (paymentData.status === 'paid') {
+                // Presmerovanie na 'thankyou.php' na InfinityFree
+                return res.redirect(`https://yourdomain.infinityfreeapp.com/thankyou.php?payment_id=${id}`);
+            } else {
+                // Ak platba nie je úspešná, môžete to spracovať inak
+                return res.status(400).json({ error: 'Platba nebola úspešná' });
+            }
+        } catch (error) {
+            return res.status(500).json({ error: 'Chyba pri spracovaní platby' });
+        }
     }
 }
