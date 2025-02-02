@@ -1,10 +1,9 @@
-// api/mollie_payment.js
+// api/mollie_webhook.js na Vercel
 
 export default async function handler(req, res) {
     if (req.method === "POST") {
         const { id, status } = req.body;
 
-        // Overenie platby cez Mollie API
         const mollieApiKey = "test_9G42azBgKQ83x68sQV65AH6sSVjseS";
         const url = `https://api.mollie.com/v2/payments/${id}`;
 
@@ -17,12 +16,11 @@ export default async function handler(req, res) {
             });
             const paymentData = await paymentResponse.json();
 
-            // Ak je platba úspešná
-            if (paymentData.status === 'paid') {
-                // Presmerovanie na 'thankyou.php' na InfinityFree
+            if (paymentData.status === "paid") {
+                // Presmerovanie na thankyou.php na InfinityFree s ID platby
                 return res.redirect(`https://yourdomain.infinityfreeapp.com/thankyou.php?payment_id=${id}`);
             } else {
-                // Ak platba nie je úspešná, môžete to spracovať inak
+                // Ak platba nebola úspešná
                 return res.status(400).json({ error: 'Platba nebola úspešná' });
             }
         } catch (error) {
