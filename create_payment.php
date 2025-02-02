@@ -1,7 +1,7 @@
 <?php
 
 // API kľúč Mollie
-$apiKey = 'test_9G42azBgKQ83x68sQV65AH6sSVjseS'; // Skontroluj správnosť kľúča
+$apiKey = 'test_9G42azBgKQ83x68sQV65AH6sSVjseS'; // Uisti sa, že je správny
 
 // Prijatie údajov z InfintyFree (presnejšie z front-endu alebo ako JSON payload)
 $data = json_decode(file_get_contents('php://input'), true);
