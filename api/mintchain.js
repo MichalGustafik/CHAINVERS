@@ -10,17 +10,17 @@ module.exports = async function handler(req, res) {
     try {
         const { metadataURI, crop_id, wallet } = req.body;
 
-        // Overíme, že máme správnu BASE_URL
-        const baseUrl = process.env.BASE_URL;
+        const baseUrl = process.env.BASE_URL;  // Musí byť nastavené v Vercel
         if (!baseUrl) {
             log("❌ [MINTCHAIN] BASE_URL nie je nastavené.");
             return res.status(500).json({ error: "BASE_URL nie je nastavené" });
         }
 
+        // Nastavíme URL na API volanie
         const mintchainUrl = `${baseUrl}/api/mintchain`;
         log("🔗 [API] Volanie na:", mintchainUrl);
 
-        // Posielame požiadavku na Vercel API
+        // Posielame dáta na endpoint Vercel API
         const response = await fetch(mintchainUrl, {
             method: "POST",
             headers: {
@@ -29,7 +29,7 @@ module.exports = async function handler(req, res) {
             body: JSON.stringify({
                 metadataURI,
                 crop_id,
-                wallet
+                wallet,
             }),
         });
 
