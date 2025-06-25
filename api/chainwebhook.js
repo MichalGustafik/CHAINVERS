@@ -78,35 +78,27 @@ export default async function handler(req, res) {
 
         const metadataURI = `ipfs://${metadataResult.IpfsHash}`;
 
-        // === 3. Volanie kontraktu ===
-        log("🚀 [ETHERS] Príprava volania kontraktu...");
+        // === 3. Volanie mintchain ===
+        log("🚀 [CHAIN] Volanie mintchain...");
 
-        const rpcUrl = process.env.PROVIDER_URL;
-        if (!rpcUrl) throw new Error("❌ PROVIDER_URL nie je nastavený!");
+        const mintCall = await fetch(`${process.env.NEXT_PUBLIC_BASE_URL}/api/mintchain`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ metadataURI, crop_id, wallet })
+        });
 
-        const provider = new ethers.JsonRpcProvider(rpcUrl);
-        const signer = new ethers.Wallet(process.env.PRIVATE_KEY, provider);
+        const mintResult = await mintCall.json();
 
-        const contract = new ethers.Contract(
-            process.env.CONTRACT_ADDRESS,
-            [
-                "function createOriginal(string memory imageURI, string memory cropId, address to) public"
-            ],
-            signer
-        );
-
-        log("📤 [ETHERS] Odosielanie transakcie createOriginal...");
-        const tx = await contract.createOriginal(metadataURI, crop_id, wallet);
-        log("⏳ [ETHERS] Čakám na potvrdenie transakcie...");
-        const receipt = await tx.wait();
-
-        log("✅ [ETHERS] Transakcia potvrdená:", receipt.transactionHash);
+        if (!mintResult.success) {
+            log("❌ [CHAIN] Mint zlyhal:", mintResult);
+            return res.status(500).json({ error: "Mintovanie zlyhalo", detail: mintResult });
+        }
 
         return res.status(200).json({
             success: true,
             message: "NFT vytvorený",
             metadata_cid: metadataResult.IpfsHash,
-            txHash: receipt.transactionHash
+            txHash: mintResult.txHash
         });
 
     } catch (err) {
