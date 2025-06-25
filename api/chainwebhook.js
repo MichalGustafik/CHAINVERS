@@ -1,4 +1,4 @@
-import { ethers } from "ethers";
+import { mintchain } from "./mintchain";
 
 export default async function handler(req, res) {
     const now = new Date().toISOString();
@@ -24,7 +24,7 @@ export default async function handler(req, res) {
 
         const buffer = Buffer.from(image_base64, "base64");
 
-        // === 1. Upload obrázka na Pinatu ===
+        // 1. Obrázok na Pinata
         log("📡 [PINATA] Nahrávanie obrázka...");
         const formData = new FormData();
         formData.append("file", new Blob([buffer]), `${crop_id}.png`);
@@ -39,15 +39,13 @@ export default async function handler(req, res) {
 
         const imageResult = await imageUpload.json();
         log("🖼️ [PINATA] Výsledok obrázka:", imageResult);
-
         if (!imageResult.IpfsHash) {
-            log("❌ [PINATA] Obrázok sa nepodarilo nahrať.");
             return res.status(500).json({ error: "Nepodarilo sa nahrať obrázok", detail: imageResult });
         }
 
         const imageURI = `ipfs://${imageResult.IpfsHash}`;
 
-        // === 2. Upload metadát ===
+        // 2. Metadáta na Pinata
         const metadata = {
             name: `Chainvers NFT ${crop_id}`,
             description: "NFT z CHAINVERS",
@@ -63,52 +61,30 @@ export default async function handler(req, res) {
                 "Content-Type": "application/json"
             },
             body: JSON.stringify({
-                pinataMetadata: {
-                    name: `chainvers-metadata-${crop_id}`
-                },
+                pinataMetadata: { name: `chainvers-metadata-${crop_id}` },
                 pinataContent: metadata
             })
         });
 
         const metadataResult = await metadataUpload.json();
         log("📄 [PINATA] Výsledok metadát:", metadataResult);
-
         if (!metadataResult.IpfsHash) {
-            log("❌ [PINATA] Nepodarilo sa nahrať metadáta.");
             return res.status(500).json({ error: "Nepodarilo sa nahrať metadáta", detail: metadataResult });
         }
 
-        const metadataURI = `ipfs://${metadataResult.IpfsHash}`;
-
-        // === 3. Volanie kontraktu ===
-        log("🚀 [ETHERS] Príprava volania kontraktu...");
-
-        const rpcUrl = process.env.PROVIDER_URL;
-        if (!rpcUrl) throw new Error("❌ PROVIDER_URL nie je nastavený!");
-
-        const provider = new ethers.JsonRpcProvider(rpcUrl);
-        const signer = new ethers.Wallet(process.env.PRIVATE_KEY, provider);
-
-        const contract = new ethers.Contract(
-            process.env.CONTRACT_ADDRESS,
-            [
-                "function createOriginal(string memory imageURI, string memory cropId, address to) public"
-            ],
-            signer
+        // 3. Mint cez externú funkciu
+        log("🚀 [CHAIN] Volanie mintchain...");
+        const result = await mintchain(
+            `ipfs://${metadataResult.IpfsHash}`,
+            crop_id,
+            wallet
         );
-
-        log("📤 [ETHERS] Odosielanie transakcie createOriginal...");
-        const tx = await contract.createOriginal(metadataURI, crop_id, wallet);
-        log("⏳ [ETHERS] Čakám na potvrdenie transakcie...");
-        const receipt = await tx.wait();
-
-        log("✅ [ETHERS] Transakcia potvrdená:", receipt.transactionHash);
 
         return res.status(200).json({
             success: true,
             message: "NFT vytvorený",
             metadata_cid: metadataResult.IpfsHash,
-            txHash: receipt.transactionHash
+            txHash: result.txHash
         });
 
     } catch (err) {
