@@ -1,5 +1,3 @@
-import { ethers } from "ethers";
-
 export default async function handler(req, res) {
     const now = new Date().toISOString();
     const log = (...args) => console.log(`[${now}]`, ...args);
