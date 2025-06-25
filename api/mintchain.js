@@ -1,4 +1,4 @@
-const { ethers } = require("ethers");
+const fetch = require('node-fetch');
 
 module.exports = async function handler(req, res) {
     const now = new Date().toISOString();
@@ -12,31 +12,86 @@ module.exports = async function handler(req, res) {
     try {
         const { metadataURI, crop_id, wallet } = req.body;
 
-        log("📊 [ETHERS] Inicializácia providera...");
-        const provider = new ethers.JsonRpcProvider(process.env.PROVIDER_URL);
-        const signer = new ethers.Wallet(process.env.PRIVATE_KEY, provider);
+        // === Inicializácia providera cez Infura ===
+        log("📊 [INFURA] Inicializácia providera...");
 
-        const balance = await provider.getBalance(signer.address);
-        log("💰 [BALANCE] Peňaženka má:", ethers.formatEther(balance), "ETH");
+        const providerUrl = process.env.PROVIDER_URL; // Infura URL
+        const privateKey = process.env.PRIVATE_KEY;
+        const contractAddress = process.env.CONTRACT_ADDRESS;
 
-        if (balance.lte(ethers.parseEther("0.0001"))) {
+        // === Získanie zostatku peňaženky ===
+        const balanceData = {
+            jsonrpc: "2.0",
+            id: 1,
+            method: "eth_getBalance",
+            params: [wallet, "latest"]
+        };
+
+        const balanceResponse = await fetch(providerUrl, {
+            method: "POST",
+            headers: {
+                "Content-Type": "application/json"
+            },
+            body: JSON.stringify(balanceData)
+        });
+        const balanceResult = await balanceResponse.json();
+        const balance = parseInt(balanceResult.result, 16); // Previesť hex na číslo
+        log("💰 [BALANCE] Peňaženka má:", balance / 1e18, "ETH");
+
+        if (balance <= 100000000000000) { // Ak je zostatok menší než 0.0001 ETH
             return res.status(400).json({ error: "Nedostatočný zostatok pre gas" });
         }
 
-        const contract = new ethers.Contract(
-            process.env.CONTRACT_ADDRESS,
-            [
-                "function createOriginal(string memory imageURI, string memory cropId, address to) public"
-            ],
-            signer
-        );
+        // === Príprava transakcie ===
+        const gasPriceResponse = await fetch(providerUrl, {
+            method: "POST",
+            headers: {
+                "Content-Type": "application/json"
+            },
+            body: JSON.stringify({
+                jsonrpc: "2.0",
+                id: 2,
+                method: "eth_gasPrice",
+                params: []
+            })
+        });
+        const gasPriceResult = await gasPriceResponse.json();
+        const gasPrice = gasPriceResult.result;
 
-        log("📤 [ETHERS] Odosielam transakciu createOriginal...");
-        const tx = await contract.createOriginal(metadataURI, crop_id, wallet);
-        const receipt = await tx.wait();
-        log("✅ [ETHERS] Transakcia potvrdená:", receipt.transactionHash);
+        const txData = {
+            jsonrpc: "2.0",
+            id: 3,
+            method: "eth_sendTransaction",
+            params: [{
+                from: wallet,
+                to: contractAddress,
+                gas: "0x5208", // Gas limit
+                gasPrice: gasPrice,
+                data: `0x${metadataURI}${crop_id}${wallet}`, // Prispôsobte podľa požiadaviek kontraktu
+            }]
+        };
 
-        return res.status(200).json({ success: true, txHash: receipt.transactionHash });
+        // === Odoslanie transakcie ===
+        const txResponse = await fetch(providerUrl, {
+            method: "POST",
+            headers: {
+                "Content-Type": "application/json"
+            },
+            body: JSON.stringify(txData)
+        });
+
+        const txResult = await txResponse.json();
+        log("📤 [INFURA] Odoslaná transakcia:", txResult.result);
+
+        if (txResult.error) {
+            log("❌ [INFURA] Chyba transakcie:", txResult.error.message);
+            return res.status(500).json({ error: txResult.error.message });
+        }
+
+        return res.status(200).json({
+            success: true,
+            txHash: txResult.result
+        });
 
     } catch (err) {
         log("❌ [MINTCHAIN ERROR]", err.message);
