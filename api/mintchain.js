@@ -1,112 +1,73 @@
+// Importujeme potrebné moduly
 export default async function handler(req, res) {
     const now = new Date().toISOString();
     const log = (...args) => console.log(`[${now}]`, ...args);
 
+    // Skontrolujeme, či je požiadavka POST
     if (req.method !== "POST") {
         log("❌ [CHYBA] Nepodporovaná HTTP metóda:", req.method);
         return res.status(405).json({ error: "Method Not Allowed" });
     }
 
     try {
-        // Extrahovanie parametrov z požiadavky
-        const { metadataURI, walletAddress } = req.body;
+        // Získame dáta z tela požiadavky
+        const { metadataURI, walletAddress, crop_id } = req.body;
 
-        if (!metadataURI || !walletAddress) {
-            log("⚠️ [MINTCHAIN] Chýbajú parametre metadataURI alebo walletAddress.");
+        // Skontrolujeme, či sú všetky potrebné parametre
+        if (!metadataURI || !walletAddress || !crop_id) {
+            log("⚠️ [MINTCHAIN] Chýbajú parametre metadataURI, walletAddress alebo crop_id.");
             return res.status(400).json({ error: "Missing required parameters" });
         }
 
-        // Infura API URL pre Sepolia alebo iné Ethereum testovacie siete
-        const providerUrl = `https://sepolia.infura.io/v3/${process.env.INFURA_PROJECT_ID}`;
-        const privateKey = process.env.PRIVATE_KEY;
-        const contractAddress = process.env.CONTRACT_ADDRESS;
+        // Získanie environmentálnych premenných
+        const providerUrl = process.env.PROVIDER_URL; // URL na Infura alebo Alchemy
+        const privateKey = process.env.PRIVATE_KEY; // Privátny kľúč peňaženky
+        const contractAddress = process.env.CONTRACT_ADDRESS; // Adresa smart kontraktu
 
         if (!providerUrl || !privateKey || !contractAddress) {
-            log("⚠️ [MINTCHAIN] Chýbajú environment variables.");
+            log("⚠️ [MINTCHAIN] Chýbajú potrebné environmentálne premenné.");
             return res.status(400).json({ error: "Missing environment variables" });
         }
 
         log("📊 [INFURA] Inicializácia providera...");
 
-        // Vytvorenie transakcie pomocou HTTP POST
-        const nonce = await getNonce(providerUrl, privateKey);
-        const gasPrice = await getGasPrice(providerUrl);
+        // Inicializácia pripojenia cez Infura (alebo Alchemy)
+        const provider = new ethers.JsonRpcProvider(providerUrl);
+        const signer = new ethers.Wallet(privateKey, provider);
 
-        const data = {
-            to: contractAddress,
-            gasLimit: "0x100000", // Prispôsob si podľa potreby
-            gasPrice: gasPrice,
-            nonce: nonce,
-            data: `0x` + encodeMintFunction(metadataURI, walletAddress)
-        };
+        // Získanie aktuálneho zostatku peňaženky
+        const balance = await provider.getBalance(signer.address);
+        log("💰 [BALANCE] Peňaženka má:", ethers.utils.formatEther(balance), "ETH");
 
-        const tx = await sendTransaction(providerUrl, privateKey, data);
-        log("📊 [TRANSAKCE] Transakcia odoslaná:", tx);
+        // Skontrolovanie, či je dostatok ETH na zaplatenie poplatkov za gas
+        if (balance.lte(ethers.utils.parseEther("0.0001"))) {
+            return res.status(400).json({ error: "Nedostatočný zostatok pre gas" });
+        }
 
-        return res.status(200).json({ success: true, txHash: tx.transactionHash });
+        // Definovanie ABI pre smart kontrakt
+        const contractABI = [
+            "function createOriginal(string memory imageURI, string memory cropId, address to) public"
+        ];
+
+        // Vytvorenie inštancie smart kontraktu
+        const contract = new ethers.Contract(contractAddress, contractABI, signer);
+
+        log("📤 [ETHERS] Odosielam transakciu na mintovanie...");
+
+        // Odoslanie transakcie na blockchain
+        const tx = await contract.createOriginal(metadataURI, crop_id, walletAddress);
+
+        log("📊 [ETHERS] Transakcia odoslaná, čakám na potvrdenie...");
+
+        // Čakanie na potvrdenie transakcie
+        const receipt = await tx.wait();
+
+        log("✅ [ETHERS] Transakcia potvrdená:", receipt.transactionHash);
+
+        // Vrátenie transakčného hashu ako odpoveď
+        return res.status(200).json({ success: true, txHash: receipt.transactionHash });
     } catch (err) {
         log("❌ [MINTCHAIN ERROR]", err.message);
         return res.status(500).json({ success: false, error: err.message });
     }
-}
-
-// Získať nonce (číslovanie transakcií peňaženky)
-async function getNonce(providerUrl, privateKey) {
-    const response = await fetch(providerUrl, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-            jsonrpc: "2.0",
-            method: "eth_getTransactionCount",
-            params: [privateKey, "latest"],
-            id: 1
-        })
-    });
-    const data = await response.json();
-    return data.result;
-}
-
-// Získať aktuálnu cenu gas
-async function getGasPrice(providerUrl) {
-    const response = await fetch(providerUrl, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-            jsonrpc: "2.0",
-            method: "eth_gasPrice",
-            params: [],
-            id: 1
-        })
-    });
-    const data = await response.json();
-    return data.result;
-}
-
-// Kód pre zakódovanie funkcie mintovania (pre `createOriginal` funkciu v smart kontrakte)
-function encodeMintFunction(metadataURI, walletAddress) {
-    const functionSignature = "createOriginal(string,string,address)"; // Názov funkcie a jej typy
-    const data = web3.utils.soliditySha3(functionSignature).substring(2);
-    return data + metadataURI.slice(2) + walletAddress.slice(2); // Prispôsob správne formátovanie parametrov
-}
-
-// Posielanie transakcie na Ethereum sieť
-async function sendTransaction(providerUrl, privateKey, data) {
-    const response = await fetch(providerUrl, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-            jsonrpc: "2.0",
-            method: "eth_sendTransaction",
-            params: [{
-                from: privateKey,
-                to: data.to,
-                gas: data.gasLimit,
-                gasPrice: data.gasPrice,
-                nonce: data.nonce,
-                data: data.data
-            }],
-            id: 1
-        })
-    });
-    return await response.json();
 }
