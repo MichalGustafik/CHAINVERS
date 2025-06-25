@@ -24,7 +24,7 @@ export default async function handler(req, res) {
 
         const buffer = Buffer.from(image_base64, "base64");
 
-        // === 1. Upload na Pinatu ===
+        // === 1. Upload obrázka na Pinatu ===
         log("🔄 Nahrávanie obrázka na Pinatu...");
         const formData = new FormData();
         formData.append("file", new Blob([buffer]), `${crop_id}.png`);
@@ -46,7 +46,7 @@ export default async function handler(req, res) {
 
         const imageURI = `ipfs://${imageResult.IpfsHash}`;
 
-        // === 2. Metadata ===
+        // === 2. Upload metadát na Pinatu ===
         const metadata = {
             name: `Chainvers NFT ${crop_id}`,
             description: "NFT z CHAINVERS",
@@ -61,7 +61,12 @@ export default async function handler(req, res) {
                 Authorization: `Bearer ${process.env.PINATA_JWT}`,
                 "Content-Type": "application/json"
             },
-            body: JSON.stringify(metadata)
+            body: JSON.stringify({
+                pinataMetadata: {
+                    name: `chainvers-metadata-${crop_id}`
+                },
+                pinataContent: metadata
+            })
         });
 
         const metadataResult = await metadataUpload.json();
@@ -75,7 +80,11 @@ export default async function handler(req, res) {
 
         // === 3. Volanie smart kontraktu ===
         log("🚀 Volanie kontraktu...");
-        const provider = new ethers.JsonRpcProvider(process.env.INFURA_URL);
+
+        const rpcUrl = process.env.PROVIDER_URL;
+        if (!rpcUrl) throw new Error("❌ PROVIDER_URL nie je nastavený!");
+
+        const provider = new ethers.JsonRpcProvider(rpcUrl);
         const signer = new ethers.Wallet(process.env.PRIVATE_KEY, provider);
 
         const contract = new ethers.Contract(
@@ -88,7 +97,7 @@ export default async function handler(req, res) {
 
         const tx = await contract.createOriginal(metadataURI, crop_id, wallet);
         const receipt = await tx.wait();
-        log("✅ Transakcia:", receipt.transactionHash);
+        log("✅ Transakcia dokončená:", receipt.transactionHash);
 
         res.status(200).json({
             success: true,
