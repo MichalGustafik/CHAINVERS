@@ -1,4 +1,4 @@
-import { ethers } from "ethers";
+import fetch from "node-fetch"; // využívame node-fetch pre HTTP požiadavky
 
 export async function mintNFT({ crop_id, wallet, image_base64 }) {
     const now = new Date().toISOString();
@@ -63,29 +63,39 @@ export async function mintNFT({ crop_id, wallet, image_base64 }) {
 
         const metadataURI = `ipfs://${metadataResult.IpfsHash}`;
 
-        // === 3. Volanie kontraktu ===
+        // === 3. Volanie smart kontraktu cez RPC ===
         log("🚀 [ETHERS] Príprava volania kontraktu...");
 
         const rpcUrl = process.env.PROVIDER_URL;
         if (!rpcUrl) throw new Error("❌ PROVIDER_URL nie je nastavený!");
 
-        const provider = new ethers.JsonRpcProvider(rpcUrl);
-        const signer = new ethers.Wallet(process.env.PRIVATE_KEY, provider);
+        // Volanie kontraktu cez RPC
+        const txData = {
+            to: process.env.CONTRACT_ADDRESS,
+            data: `0x${process.env.CONTRACT_ABI}...`, // Zadajte ABI a údaje pre volanie funkcie
+            value: "0x0" // Ak potrebujete poslať ETH, nastavte správnu hodnotu
+        };
 
-        const contract = new ethers.Contract(
-            process.env.CONTRACT_ADDRESS,
-            [
-                "function createOriginal(string memory imageURI, string memory cropId, address to) public"
-            ],
-            signer
-        );
+        const txResponse = await fetch(rpcUrl, {
+            method: "POST",
+            headers: {
+                "Content-Type": "application/json"
+            },
+            body: JSON.stringify({
+                jsonrpc: "2.0",
+                id: 1,
+                method: "eth_sendTransaction",
+                params: [txData]
+            })
+        });
 
-        log("📤 [ETHERS] Odosielanie transakcie createOriginal...");
-        const tx = await contract.createOriginal(metadataURI, crop_id, wallet);
-        log("⏳ [ETHERS] Čakám na potvrdenie transakcie...");
-        const receipt = await tx.wait();
+        const txReceipt = await txResponse.json();
+        log("📤 [ETHERS] Transakcia odoslaná:", txReceipt);
 
-        log("✅ [ETHERS] Transakcia potvrdená:", receipt.transactionHash);
+        if (!txReceipt.result) {
+            log("❌ [ETHERS] Transakcia zlyhala.");
+            throw new Error("Transakcia zlyhala");
+        }
 
         return metadataURI;
 
