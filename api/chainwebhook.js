@@ -1,4 +1,4 @@
-import { mintchain } from "./mintchain";
+const { mintNFT } = require("./mintchain");
 
 export default async function handler(req, res) {
     const now = new Date().toISOString();
@@ -74,7 +74,7 @@ export default async function handler(req, res) {
 
         // 3. Mint cez externú funkciu
         log("🚀 [CHAIN] Volanie mintchain...");
-        const result = await mintchain(
+        const result = await mintNFT(
             `ipfs://${metadataResult.IpfsHash}`,
             crop_id,
             wallet
