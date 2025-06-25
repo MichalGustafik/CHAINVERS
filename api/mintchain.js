@@ -1,95 +1,105 @@
-// Tento skript mintuje NFT cez Infura bez použitia balíka ethers, čisto cez JS a ručne podpísanú transakciu
+export default async function handler(req, res) {
+    const now = new Date().toISOString();
+    const log = (...args) => console.log(`[${now}]`, ...args);
 
-const crypto = require("crypto"); const secp256k1 = require("secp256k1"); const rlp = require("rlp"); const { keccak256 } = require("js-sha3");
+    if (req.method !== "POST") {
+        log("❌ [MINTCHAIN] Nepodporovaná metóda:", req.method);
+        return res.status(405).json({ error: "Method Not Allowed" });
+    }
 
-module.exports = async function handler(req, res) { const now = new Date().toISOString(); const log = (...args) => console.log([${now}], ...args);
+    try {
+        const { metadataURI, crop_id, wallet } = req.body;
+        log("📥 [MINTCHAIN] Prijaté údaje:", {
+            metadataURI,
+            crop_id,
+            wallet
+        });
 
-if (req.method !== "POST") { log("❌ [MINTCHAIN] Nepodporovaná metóda:", req.method); return res.status(405).json({ error: "Method Not Allowed" }); }
+        // Získame environment variables
+        const infuraUrl = process.env.INFURA_URL; // Infura RPC URL
+        const privateKey = process.env.PRIVATE_KEY; // Private key pre podpisovanie transakcií
+        const contractAddress = process.env.CONTRACT_ADDRESS; // Adresa smart kontraktu
 
-try { const { wallet, metadataURI } = req.body; log("📥 [MINTCHAIN] Dáta:", req.body);
+        if (!infuraUrl || !privateKey || !contractAddress) {
+            log("⚠️ [MINTCHAIN] Chýbajú potrebné environment variables.");
+            return res.status(400).json({ error: "Chýbajú potrebné environment variables." });
+        }
 
-const PRIVATE_KEY = process.env.PRIVATE_KEY.replace(/^0x/, "");
-const PROVIDER_URL = process.env.PROVIDER_URL;
-const CONTRACT_ADDRESS = process.env.CONTRACT_ADDRESS;
-const CHAIN_ID = 84532;
+        log("📡 [INFURA] Infura URL:", infuraUrl);
+        log("🔑 [PRIVATE_KEY] Používame private key pre podpisovanie transakcie.");
+        
+        // Pripravíme údaje pre transakciu
+        const nonce = await getNonce(wallet, infuraUrl);  // Musíme získať nonce pre adresu
+        const gasPrice = await getGasPrice(infuraUrl);  // Získame cenu za plyn z Infura
 
-const pk = Buffer.from(PRIVATE_KEY, "hex");
-const address = "0x" + secp256k1.publicKeyCreate(pk, false).slice(1).toString("hex").slice(-40);
+        // Vytvoríme transakciu
+        const transaction = {
+            to: contractAddress,
+            gasLimit: 2000000, // predpokladaná hodnota
+            gasPrice: gasPrice,
+            data: createTransactionData(metadataURI, crop_id, wallet), // Skladáme dáta pre smart kontrakt
+            nonce: nonce,
+            chainId: 3 // Testovacia sieť (Ropsten), zmeňte na správnu pre Mainnet alebo iné testovacie siete
+        };
 
-// 1. Ziskaj nonce a gasPrice
-const rpcFetch = async (method, params) => {
-  const res = await fetch(PROVIDER_URL, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ jsonrpc: "2.0", id: 1, method, params })
-  });
-  const json = await res.json();
-  return json.result;
-};
+        // Podpíšeme transakciu s privátnym kľúčom
+        const signedTx = await signTransaction(transaction, privateKey);
 
-const [nonce, gasPrice] = await Promise.all([
-  rpcFetch("eth_getTransactionCount", [address, "latest"]),
-  rpcFetch("eth_gasPrice", [])
-]);
+        // Odoslanie transakcie na Infura
+        const response = await sendTransaction(signedTx, infuraUrl);
+        
+        log("✅ [MINTCHAIN] Transakcia odoslaná:", response);
 
-// 2. Priprav inputy kontraktu
-const methodId = "0x2f745c59"; // createOriginal(address,string)
-const paddedAddress = wallet.toLowerCase().replace("0x", "").padStart(64, "0");
-const encodedMetadata = Buffer.from(metadataURI, "utf8").toString("hex");
-const length = encodedMetadata.length / 2;
-const offset = (32).toString(16).padStart(64, "0");
-const lenHex = length.toString(16).padStart(64, "0");
-const data = methodId + paddedAddress + offset + lenHex + encodedMetadata.padEnd(Math.ceil(length / 32) * 64, "0");
+        return res.status(200).json({
+            success: true,
+            message: "NFT vytvorené",
+            txHash: response.result
+        });
 
-// 3. Zostav transakciu
-const tx = [
-  nonce,
-  gasPrice,
-  "0x5208", // gasLimit 21000
-  CONTRACT_ADDRESS,
-  "0x0",
-  data,
-  CHAIN_ID,
-  "0x",
-  "0x"
-];
+    } catch (err) {
+        log("❌ [MINTCHAIN ERROR]", err.message);
+        return res.status(500).json({ success: false, error: err.message });
+    }
+}
 
-const rlpEncoded = rlp.encode(tx);
-const msgHash = Buffer.from(keccak256.update(rlpEncoded).digest());
-const sig = secp256k1.ecdsaSign(msgHash, pk);
+async function getNonce(wallet, infuraUrl) {
+    const url = `${infuraUrl}/eth_getTransactionCount?params=["${wallet}", "latest"]`;
+    const response = await fetch(url, { method: "POST" });
+    const data = await response.json();
+    return parseInt(data.result, 16); // prevod na číselnú hodnotu
+}
 
-const v = CHAIN_ID * 2 + 35 + sig.recid;
-const r = sig.signature.slice(0, 32);
-const s = sig.signature.slice(32, 64);
+async function getGasPrice(infuraUrl) {
+    const url = `${infuraUrl}/eth_gasPrice`;
+    const response = await fetch(url, { method: "POST" });
+    const data = await response.json();
+    return data.result;
+}
 
-const signedTx = rlp.encode([
-  nonce,
-  gasPrice,
-  "0x5208",
-  CONTRACT_ADDRESS,
-  "0x0",
-  data,
-  "0x" + v.toString(16),
-  "0x" + Buffer.from(r).toString("hex"),
-  "0x" + Buffer.from(s).toString("hex")
-]);
+function createTransactionData(metadataURI, crop_id, wallet) {
+    const functionSignature = "createOriginal(string,string,address)"; // Funkcia v smart kontrakte
+    const encodedData = encodeParameters(functionSignature, [metadataURI, crop_id, wallet]);
+    return encodedData;
+}
 
-// 4. Odosli
-const txRes = await fetch(PROVIDER_URL, {
-  method: "POST",
-  headers: { "Content-Type": "application/json" },
-  body: JSON.stringify({
-    jsonrpc: "2.0",
-    method: "eth_sendRawTransaction",
-    params: ["0x" + signedTx.toString("hex")],
-    id: 1
-  })
-});
+// Toto je na zakódovanie dát, ktoré sa odosielajú do smart kontraktu
+function encodeParameters(functionSignature, params) {
+    const abi = new ethers.utils.AbiCoder();
+    return abi.encode([functionSignature], params);
+}
 
-const result = await txRes.json();
-if (result.error) throw new Error("Chyba RPC: " + JSON.stringify(result.error));
+async function signTransaction(transaction, privateKey) {
+    const web3 = new Web3();
+    const signedTx = await web3.eth.accounts.signTransaction(transaction, privateKey);
+    return signedTx.rawTransaction;
+}
 
-return res.status(200).json({ success: true, txHash: result.result });
-
-} catch (err) { log("❌ [MINTCHAIN ERROR]", err.message); return res.status(500).json({ success: false, error: err.message }); } };
-
+async function sendTransaction(signedTx, infuraUrl) {
+    const url = `${infuraUrl}/eth_sendRawTransaction`;
+    const response = await fetch(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ jsonrpc: "2.0", method: "eth_sendRawTransaction", params: [signedTx], id: 1 })
+    });
+    return response.json();
+}
