@@ -1,3 +1,5 @@
+const fetch = require('node-fetch');
+
 export default async function handler(req, res) {
     const now = new Date().toISOString();
     const log = (...args) => console.log(`[${now}]`, ...args);
@@ -9,97 +11,51 @@ export default async function handler(req, res) {
 
     try {
         const { metadataURI, crop_id, wallet } = req.body;
-        log("📥 [MINTCHAIN] Prijaté údaje:", {
-            metadataURI,
-            crop_id,
-            wallet
-        });
 
-        // Získame environment variables
-        const infuraUrl = process.env.INFURA_URL; // Infura RPC URL
-        const privateKey = process.env.PRIVATE_KEY; // Private key pre podpisovanie transakcií
-        const contractAddress = process.env.CONTRACT_ADDRESS; // Adresa smart kontraktu
-
-        if (!infuraUrl || !privateKey || !contractAddress) {
-            log("⚠️ [MINTCHAIN] Chýbajú potrebné environment variables.");
-            return res.status(400).json({ error: "Chýbajú potrebné environment variables." });
+        if (!process.env.PROVIDER_URL) {
+            log("❌ [MINTCHAIN] Chýbajú environmentálne premenné.");
+            return res.status(500).json({ error: "Chýbajú environmentálne premenné." });
         }
 
-        log("📡 [INFURA] Infura URL:", infuraUrl);
-        log("🔑 [PRIVATE_KEY] Používame private key pre podpisovanie transakcie.");
-        
-        // Pripravíme údaje pre transakciu
-        const nonce = await getNonce(wallet, infuraUrl);  // Musíme získať nonce pre adresu
-        const gasPrice = await getGasPrice(infuraUrl);  // Získame cenu za plyn z Infura
+        // Vytvorenie RPC URL (INFURA_URL)
+        const rpcUrl = process.env.PROVIDER_URL;
+        const privateKey = process.env.PRIVATE_KEY;  // Získajte privátny kľúč
 
-        // Vytvoríme transakciu
-        const transaction = {
-            to: contractAddress,
-            gasLimit: 2000000, // predpokladaná hodnota
-            gasPrice: gasPrice,
-            data: createTransactionData(metadataURI, crop_id, wallet), // Skladáme dáta pre smart kontrakt
-            nonce: nonce,
-            chainId: 3 // Testovacia sieť (Ropsten), zmeňte na správnu pre Mainnet alebo iné testovacie siete
-        };
+        log("📊 [INFURA] Inicializácia providera...");
 
-        // Podpíšeme transakciu s privátnym kľúčom
-        const signedTx = await signTransaction(transaction, privateKey);
-
-        // Odoslanie transakcie na Infura
-        const response = await sendTransaction(signedTx, infuraUrl);
-        
-        log("✅ [MINTCHAIN] Transakcia odoslaná:", response);
-
-        return res.status(200).json({
-            success: true,
-            message: "NFT vytvorené",
-            txHash: response.result
+        const provider = new fetch(rpcUrl, { 
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'Authorization': `Bearer ${process.env.INFURA_KEY}`  // Ak používate Infura key
+            },
+            body: JSON.stringify({
+                jsonrpc: "2.0",
+                id: 1,
+                method: "eth_call",
+                params: [
+                    {
+                        to: process.env.CONTRACT_ADDRESS,  // Adresa vášho smart kontraktu
+                        data: `0x${metadataURI}`  // Dáta pre vaše NFT, generované pomocou IPFS
+                    }
+                ]
+            })
         });
+
+        const response = await provider.json();
+        log("📈 [INFURA] Odpoveď z Infura:", response);
+
+        if (!response.result) {
+            return res.status(500).json({ error: "Chyba pri volaní Infura", detail: response });
+        }
+
+        log("✅ [MINTCHAIN] Úspešné volanie kontraktu.");
+
+        // Vrátenie odpovede so spracovaním údajov.
+        return res.status(200).json({ success: true, message: "NFT vytvorené", metadataURI });
 
     } catch (err) {
         log("❌ [MINTCHAIN ERROR]", err.message);
-        return res.status(500).json({ success: false, error: err.message });
+        return res.status(500).json({ error: "Interná chyba servera", detail: err.message });
     }
-}
-
-async function getNonce(wallet, infuraUrl) {
-    const url = `${infuraUrl}/eth_getTransactionCount?params=["${wallet}", "latest"]`;
-    const response = await fetch(url, { method: "POST" });
-    const data = await response.json();
-    return parseInt(data.result, 16); // prevod na číselnú hodnotu
-}
-
-async function getGasPrice(infuraUrl) {
-    const url = `${infuraUrl}/eth_gasPrice`;
-    const response = await fetch(url, { method: "POST" });
-    const data = await response.json();
-    return data.result;
-}
-
-function createTransactionData(metadataURI, crop_id, wallet) {
-    const functionSignature = "createOriginal(string,string,address)"; // Funkcia v smart kontrakte
-    const encodedData = encodeParameters(functionSignature, [metadataURI, crop_id, wallet]);
-    return encodedData;
-}
-
-// Toto je na zakódovanie dát, ktoré sa odosielajú do smart kontraktu
-function encodeParameters(functionSignature, params) {
-    const abi = new ethers.utils.AbiCoder();
-    return abi.encode([functionSignature], params);
-}
-
-async function signTransaction(transaction, privateKey) {
-    const web3 = new Web3();
-    const signedTx = await web3.eth.accounts.signTransaction(transaction, privateKey);
-    return signedTx.rawTransaction;
-}
-
-async function sendTransaction(signedTx, infuraUrl) {
-    const url = `${infuraUrl}/eth_sendRawTransaction`;
-    const response = await fetch(url, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ jsonrpc: "2.0", method: "eth_sendRawTransaction", params: [signedTx], id: 1 })
-    });
-    return response.json();
 }
