@@ -1,5 +1,4 @@
 import { ethers } from "ethers";
-import fetch from "node-fetch";
 
 export default async function handler(req, res) {
     const now = new Date().toISOString();
@@ -97,6 +96,7 @@ export default async function handler(req, res) {
             metadata_cid: metadataResult.IpfsHash,
             txHash: receipt.transactionHash
         });
+
     } catch (err) {
         log("❌ Chyba:", err.message);
         res.status(500).json({ error: "Interná chyba servera", detail: err.message });
