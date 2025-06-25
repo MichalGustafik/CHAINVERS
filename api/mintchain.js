@@ -1,59 +1,46 @@
-import { ethers } from "ethers"; // ak si vo Vercel, potrebuješ mať ethers ako závislosť v balíku
+// VERCEL-COMPATIBLE MINTCHAIN.JS USING VIEM (lightweight, no Ethers)
 
-export default async function handler(req, res) {
-  const now = new Date().toISOString();
-  const log = (...args) => console.log(`[${now}]`, ...args);
+import { createWalletClient, custom, encodeFunctionData, http } from 'viem'; import { baseSepolia } from 'viem/chains';
 
-  if (req.method !== "POST") {
-    log("❌ [CHYBA] Nepodporovaná HTTP metóda:", req.method);
-    return res.status(405).json({ error: "Method Not Allowed" });
-  }
+export default async function handler(req, res) { const now = new Date().toISOString(); const log = (...args) => console.log([${now}], ...args);
 
-  try {
-    const { metadataURI, walletAddress, crop_id } = req.body;
-    log("📥 [MINTCHAIN] Prijaté údaje:", { metadataURI, walletAddress, crop_id });
+if (req.method !== 'POST') { log('❌ [CHYBA] Nepodporovaná HTTP metóda:', req.method); return res.status(405).json({ error: 'Method Not Allowed' }); }
 
-    if (!metadataURI || !walletAddress || !crop_id) {
-      log("⚠️ [MINTCHAIN] Chýbajú parametre metadataURI, walletAddress alebo crop_id.");
-      return res.status(400).json({ error: "Missing required parameters" });
-    }
+const { metadataURI, walletAddress, crop_id } = req.body; if (!metadataURI || !walletAddress || !crop_id) { log('⚠️ [MINTCHAIN] Chýbajú parametre metadataURI, walletAddress alebo crop_id.'); return res.status(400).json({ error: 'Missing required parameters' }); }
 
-    const providerUrl = process.env.PROVIDER_URL;
-    const privateKey = process.env.PRIVATE_KEY;
-    const contractAddress = process.env.CONTRACT_ADDRESS;
+const providerUrl = process.env.PROVIDER_URL; const privateKey = process.env.PRIVATE_KEY; const contractAddress = process.env.CONTRACT_ADDRESS;
 
-    if (!providerUrl || !privateKey || !contractAddress) {
-      log("⚠️ [MINTCHAIN] Chýbajú environment variables.");
-      return res.status(400).json({ error: "Missing environment variables" });
-    }
+if (!providerUrl || !privateKey || !contractAddress) { log('⚠️ [MINTCHAIN] Chýbajú environment variables.'); return res.status(400).json({ error: 'Missing environment variables' }); }
 
-    const provider = new ethers.JsonRpcProvider(providerUrl);
-    const signer = new ethers.Wallet(privateKey, provider);
+try { const client = createWalletClient({ chain: baseSepolia, transport: http(providerUrl), account: privateKey, });
 
-    const balance = await provider.getBalance(signer.address);
-    log("💰 [BALANCE] Peňaženka má:", ethers.formatEther(balance), "ETH");
-
-    if (balance.lte(ethers.parseEther("0.0001"))) {
-      return res.status(400).json({ error: "Nedostatočný zostatok pre gas" });
-    }
-
-    const contract = new ethers.Contract(
-      contractAddress,
-      [
-        "function createOriginal(string memory imageURI, string memory cropId, address to) public",
+const calldata = encodeFunctionData({
+  abi: [
+    {
+      type: 'function',
+      name: 'createOriginal',
+      stateMutability: 'nonpayable',
+      inputs: [
+        { name: 'imageURI', type: 'string' },
+        { name: 'cropId', type: 'string' },
+        { name: 'to', type: 'address' },
       ],
-      signer
-    );
+      outputs: [],
+    },
+  ],
+  functionName: 'createOriginal',
+  args: [metadataURI, crop_id, walletAddress],
+});
 
-    log("📤 [ETHERS] Odosielam transakciu createOriginal...");
-    const tx = await contract.createOriginal(metadataURI, crop_id, walletAddress);
-    const receipt = await tx.wait();
+log('📤 [VIEM] Odosielam transakciu...');
+const hash = await client.sendTransaction({
+  to: contractAddress,
+  data: calldata,
+  chain: baseSepolia,
+});
 
-    log("✅ [ETHERS] Transakcia potvrdená:", receipt.transactionHash);
+log('✅ [MINTCHAIN] Transakcia hash:', hash);
+return res.status(200).json({ success: true, txHash: hash });
 
-    return res.status(200).json({ success: true, txHash: receipt.transactionHash });
-  } catch (err) {
-    log("❌ [MINTCHAIN ERROR]", err.message);
-    return res.status(500).json({ success: false, error: err.message });
-  }
-}
+} catch (err) { log('❌ [MINTCHAIN ERROR]', err.message); return res.status(500).json({ error: err.message }); } }
+
