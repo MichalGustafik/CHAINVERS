@@ -1,4 +1,4 @@
-import { ethers } from "ethers";
+import { ethers } from "ethers"; // ak si vo Vercel, potrebuješ mať ethers ako závislosť v balíku
 
 export default async function handler(req, res) {
   const now = new Date().toISOString();
@@ -10,12 +10,11 @@ export default async function handler(req, res) {
   }
 
   try {
-    const { metadataURI, wallet, crop_id } = req.body;
+    const { metadataURI, walletAddress, crop_id } = req.body;
+    log("📥 [MINTCHAIN] Prijaté údaje:", { metadataURI, walletAddress, crop_id });
 
-    log("📨 [INPUT] Prijaté parametre:", { metadataURI, wallet, crop_id });
-
-    if (!metadataURI || !wallet || !crop_id) {
-      log("⚠️ [MINTCHAIN] Chýbajú parametre metadataURI, wallet alebo crop_id.");
+    if (!metadataURI || !walletAddress || !crop_id) {
+      log("⚠️ [MINTCHAIN] Chýbajú parametre metadataURI, walletAddress alebo crop_id.");
       return res.status(400).json({ error: "Missing required parameters" });
     }
 
@@ -24,11 +23,10 @@ export default async function handler(req, res) {
     const contractAddress = process.env.CONTRACT_ADDRESS;
 
     if (!providerUrl || !privateKey || !contractAddress) {
-      log("⚠️ [MINTCHAIN] Chýbajú potrebné environment variables.");
+      log("⚠️ [MINTCHAIN] Chýbajú environment variables.");
       return res.status(400).json({ error: "Missing environment variables" });
     }
 
-    log("🔌 [PROVIDER] Pripájam sa k RPC...");
     const provider = new ethers.JsonRpcProvider(providerUrl);
     const signer = new ethers.Wallet(privateKey, provider);
 
@@ -42,22 +40,18 @@ export default async function handler(req, res) {
     const contract = new ethers.Contract(
       contractAddress,
       [
-        "function createOriginal(string memory imageURI, string memory cropId, address to) public"
+        "function createOriginal(string memory imageURI, string memory cropId, address to) public",
       ],
       signer
     );
 
-    log("🚀 [MINT] Volám createOriginal...");
-    const tx = await contract.createOriginal(metadataURI, crop_id, wallet);
+    log("📤 [ETHERS] Odosielam transakciu createOriginal...");
+    const tx = await contract.createOriginal(metadataURI, crop_id, walletAddress);
     const receipt = await tx.wait();
 
     log("✅ [ETHERS] Transakcia potvrdená:", receipt.transactionHash);
 
-    return res.status(200).json({
-      success: true,
-      txHash: receipt.transactionHash
-    });
-
+    return res.status(200).json({ success: true, txHash: receipt.transactionHash });
   } catch (err) {
     log("❌ [MINTCHAIN ERROR]", err.message);
     return res.status(500).json({ success: false, error: err.message });

@@ -72,12 +72,16 @@ export default async function handler(req, res) {
 
     const metadataURI = `ipfs://${metadataResult.IpfsHash}`;
 
-    // ✅ Volanie mintchain.js pomocou nastavenej adresy
+    // ✅ POSIELAME SPRÁVNE NÁZVY PREMENNÝCH
     log("🚀 [CHAIN] Volanie mintchain...");
     const mintCall = await fetch(process.env.MINTCHAIN_API_URL, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ metadataURI, crop_id, wallet }),
+      body: JSON.stringify({
+        metadataURI,
+        crop_id,
+        walletAddress: wallet, // <- správne premenované
+      }),
     });
 
     const mintResult = await mintCall.json();
