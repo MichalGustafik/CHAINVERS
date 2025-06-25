@@ -1,55 +1,89 @@
-export default async function handler(req, res) {
-    const now = new Date().toISOString();
-    const log = (...args) => console.log(`[${now}]`, ...args);
+export default async function handler(req, res) export default async function handler(req, res) {
+  const now = new Date().toISOString();
+  const log = (...args) => console.log(`[${now}]`, ...args);
 
-    if (req.method !== "POST") {
-        log("❌ [MINTCHAIN] Nepodporovaná HTTP metóda:", req.method);
-        return res.status(405).json({ error: "Method Not Allowed" });
+  if (req.method !== "POST") {
+    log("❌ [MINTCHAIN] Nepodporovaná metóda:", req.method);
+    return res.status(405).json({ error: "Method Not Allowed" });
+  }
+
+  try {
+    const { metadataURI, crop_id, wallet } = req.body;
+    log("📨 [MINTCHAIN] Prijaté dáta:", { metadataURI, crop_id, wallet });
+
+    const CONTRACT_ADDRESS = process.env.CONTRACT_ADDRESS;
+    const PRIVATE_KEY = process.env.PRIVATE_KEY;
+    const PROVIDER_URL = process.env.PROVIDER_URL;
+
+    if (!CONTRACT_ADDRESS || !PRIVATE_KEY || !PROVIDER_URL) {
+      throw new Error("❌ Chýbajú environmentálne premenné");
     }
 
-    try {
-        const { metadataURI, crop_id, wallet } = req.body;
+    const abi = [{
+      "inputs": [
+        { "internalType": "string", "name": "imageURI", "type": "string" },
+        { "internalType": "string", "name": "cropId", "type": "string" },
+        { "internalType": "address", "name": "to", "type": "address" }
+      ],
+      "name": "createOriginal",
+      "outputs": [],
+      "stateMutability": "nonpayable",
+      "type": "function"
+    }];
 
-        if (!metadataURI || !crop_id || !wallet) {
-            log("⚠️ [VALIDÁCIA] Neúplné vstupné údaje.");
-            return res.status(400).json({ error: "Chýbajú údaje" });
-        }
+    // Web3-like low-level call to Infura
+    const callData = encodeCreateOriginal(metadataURI, crop_id, wallet);
 
-        log("📊 [ETHERS] Inicializácia providera...");
-        const provider = new ethers.JsonRpcProvider(process.env.PROVIDER_URL);
-        const signer = new ethers.Wallet(process.env.PRIVATE_KEY, provider);
+    const txParams = {
+      to: CONTRACT_ADDRESS,
+      data: callData,
+      gas: "500000", // Optional: adjust based on actual need
+      chainId: 84532
+    };
 
-        const balance = await provider.getBalance(signer.address);
-        log("💰 [BALANCE] Peňaženka má:", ethers.formatEther(balance), "ETH");
+    // Send raw transaction via Infura
+    const response = await fetch(PROVIDER_URL, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id: 1,
+        method: "eth_sendTransaction",
+        params: [txParams]
+      })
+    });
 
-        if (balance.lte(ethers.parseEther("0.0001"))) {
-            log("❌ [BALANCE] Nedostatočný zostatok pre gas.");
-            return res.status(400).json({ error: "Nedostatočný zostatok pre gas" });
-        }
+    const txJson = await response.json();
 
-        const contract = new ethers.Contract(
-            process.env.CONTRACT_ADDRESS,
-            [
-                "function createOriginal(string memory imageURI, string memory cropId, address to) public"
-            ],
-            signer
-        );
-
-        log("📤 [ETHERS] Odosielam transakciu createOriginal...");
-        const tx = await contract.createOriginal(metadataURI, crop_id, wallet);
-        log("⏳ [ETHERS] Čakám na potvrdenie transakcie...");
-        const receipt = await tx.wait();
-
-        log("✅ [ETHERS] Transakcia potvrdená:", receipt.transactionHash);
-
-        return res.status(200).json({
-            success: true,
-            message: "NFT vytvorené",
-            txHash: receipt.transactionHash
-        });
-
-    } catch (err) {
-        log("❌ [MINTCHAIN ERROR]", err.message);
-        return res.status(500).json({ success: false, error: err.message });
+    if (txJson.error) {
+      log("❌ [INFURA] Chyba:", txJson.error);
+      return res.status(500).json({ success: false, error: txJson.error.message });
     }
+
+    log("✅ [INFURA] Tx hash:", txJson.result);
+
+    return res.status(200).json({
+      success: true,
+      txHash: txJson.result
+    });
+
+  } catch (err) {
+    log("❌ [MINTCHAIN] Výnimka:", err.message);
+    return res.status(500).json({ success: false, error: err.message });
+  }
+}
+
+// Minimalistický encoder - sem môžeš vložiť ABI encoder (napr. z Remixu)
+function encodeCreateOriginal(imageURI, cropId, to) {
+  const Web3 = require("web3");
+  const web3 = new Web3(); // iba na encoding
+  return web3.eth.abi.encodeFunctionCall({
+    name: "createOriginal",
+    type: "function",
+    inputs: [
+      { type: "string", name: "imageURI" },
+      { type: "string", name: "cropId" },
+      { type: "address", name: "to" }
+    ]
+  }, [imageURI, cropId, to]);
 }
