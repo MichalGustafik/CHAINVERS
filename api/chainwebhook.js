@@ -1,118 +1,118 @@
-import { writeFileSync } from "fs";
-import path from "path";
 import { ethers } from "ethers";
 
-const pinataApi = "https://api.pinata.cloud/pinning/";
-const JWT = process.env.PINATA_JWT;
-const PROVIDER_URL = process.env.PROVIDER_URL;
-const PRIVATE_KEY = process.env.PRIVATE_KEY;
-const CONTRACT_ADDRESS = process.env.CONTRACT_ADDRESS;
-const CONTRACT_ABI = [ // zjednodušený ABI, doplň skutočný podľa potreby
-  {
-    "inputs": [
-      { "internalType": "address", "name": "to", "type": "address" },
-      { "internalType": "string", "name": "tokenURI", "type": "string" },
-      { "internalType": "string", "name": "cropId", "type": "string" }
-    ],
-    "name": "createOriginal",
-    "outputs": [],
-    "stateMutability": "nonpayable",
-    "type": "function"
-  }
-];
-
 export default async function handler(req, res) {
-  try {
+    const now = new Date().toISOString();
+    const log = (...args) => console.log(`[${now}]`, ...args);
+
     if (req.method !== "POST") {
-      return res.status(405).json({ error: "Method Not Allowed" });
+        log("❌ [CHYBA] Nepodporovaná HTTP metóda:", req.method);
+        return res.status(405).json({ error: "Method Not Allowed" });
     }
 
-    const { crop_id, wallet, image_base64 } = req.body;
-    console.log("➡️ Prijaté údaje:", {
-      crop_id,
-      wallet,
-      image_base64_length: image_base64?.length,
-    });
+    try {
+        const { crop_id, wallet, image_base64 } = req.body;
+        log("📥 [VSTUP] Prijaté údaje:", {
+            crop_id,
+            wallet,
+            image_base64_length: image_base64?.length || 0
+        });
 
-    if (!crop_id || !wallet || !image_base64) {
-      return res.status(400).json({ error: "Chýbajúce dáta" });
-    }
-
-    // 🔄 1. Upload obrázka na Pinata
-    console.log("🔄 Nahrávanie obrázka na Pinatu...");
-    const imageResponse = await fetch(`${pinataApi}pinFileToIPFS`, {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${JWT}`,
-        "Content-Type": "application/json"
-      },
-      body: JSON.stringify({
-        file: image_base64,
-        options: {
-          cidVersion: 1,
-          metadata: {
-            name: `${crop_id}.png`
-          }
+        if (!crop_id || !wallet || !image_base64) {
+            log("⚠️ [VALIDÁCIA] Neúplné vstupné údaje.");
+            return res.status(400).json({ error: "Chýbajú údaje" });
         }
-      })
-    });
-    const imageData = await imageResponse.json();
-    console.log("🖼️ Výsledok obrázka:", imageData);
 
-    const imageCID = imageData.IpfsHash;
+        const buffer = Buffer.from(image_base64, "base64");
 
-    // 📦 2. Upload metadát
-    console.log("📦 Upload metadát...");
-    const metadata = {
-      name: `CHAINVERS NFT ${crop_id}`,
-      description: "CHAINVERS: Vesmírny výrez transformovaný do NFT",
-      image: `ipfs://${imageCID}`,
-      attributes: [{ trait_type: "Crop ID", value: crop_id }]
-    };
+        // === 1. Upload obrázka na Pinatu ===
+        log("📡 [PINATA] Nahrávanie obrázka...");
+        const formData = new FormData();
+        formData.append("file", new Blob([buffer]), `${crop_id}.png`);
 
-    const metadataResponse = await fetch(`${pinataApi}pinJSONToIPFS`, {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${JWT}`,
-        "Content-Type": "application/json"
-      },
-      body: JSON.stringify({
-        pinataMetadata: {
-          name: `chainvers-metadata-${crop_id}`
-        },
-        pinataContent: metadata
-      })
-    });
+        const imageUpload = await fetch("https://api.pinata.cloud/pinning/pinFileToIPFS", {
+            method: "POST",
+            headers: {
+                Authorization: `Bearer ${process.env.PINATA_JWT}`
+            },
+            body: formData
+        });
 
-    const metadataData = await metadataResponse.json();
-    console.log("📄 Výsledok metadát:", metadataData);
+        const imageResult = await imageUpload.json();
+        log("🖼️ [PINATA] Výsledok obrázka:", imageResult);
 
-    const metadataCID = metadataData.IpfsHash;
+        if (!imageResult.IpfsHash) {
+            log("❌ [PINATA] Obrázok sa nepodarilo nahrať.");
+            return res.status(500).json({ error: "Nepodarilo sa nahrať obrázok", detail: imageResult });
+        }
 
-    // 🚀 3. Volanie kontraktu
-    console.log("🚀 Volanie kontraktu...");
-    const provider = new ethers.JsonRpcProvider(PROVIDER_URL);
-    const walletSigner = new ethers.Wallet(PRIVATE_KEY, provider);
-    const balance = await provider.getBalance(walletSigner.address);
+        const imageURI = `ipfs://${imageResult.IpfsHash}`;
 
-    if (balance < ethers.parseEther("0.002")) {
-      throw new Error(
-        `❌ Nedostatočný zostatok: ${ethers.formatEther(balance)} ETH`
-      );
+        // === 2. Upload metadát ===
+        const metadata = {
+            name: `Chainvers NFT ${crop_id}`,
+            description: "NFT z CHAINVERS",
+            image: imageURI,
+            attributes: [{ trait_type: "Crop ID", value: crop_id }]
+        };
+
+        log("📦 [PINATA] Nahrávanie metadát...");
+        const metadataUpload = await fetch("https://api.pinata.cloud/pinning/pinJSONToIPFS", {
+            method: "POST",
+            headers: {
+                Authorization: `Bearer ${process.env.PINATA_JWT}`,
+                "Content-Type": "application/json"
+            },
+            body: JSON.stringify({
+                pinataMetadata: {
+                    name: `chainvers-metadata-${crop_id}`
+                },
+                pinataContent: metadata
+            })
+        });
+
+        const metadataResult = await metadataUpload.json();
+        log("📄 [PINATA] Výsledok metadát:", metadataResult);
+
+        if (!metadataResult.IpfsHash) {
+            log("❌ [PINATA] Nepodarilo sa nahrať metadáta.");
+            return res.status(500).json({ error: "Nepodarilo sa nahrať metadáta", detail: metadataResult });
+        }
+
+        const metadataURI = `ipfs://${metadataResult.IpfsHash}`;
+
+        // === 3. Volanie kontraktu ===
+        log("🚀 [ETHERS] Príprava volania kontraktu...");
+
+        const rpcUrl = process.env.PROVIDER_URL;
+        if (!rpcUrl) throw new Error("❌ PROVIDER_URL nie je nastavený!");
+
+        const provider = new ethers.JsonRpcProvider(rpcUrl);
+        const signer = new ethers.Wallet(process.env.PRIVATE_KEY, provider);
+
+        const contract = new ethers.Contract(
+            process.env.CONTRACT_ADDRESS,
+            [
+                "function createOriginal(string memory imageURI, string memory cropId, address to) public"
+            ],
+            signer
+        );
+
+        log("📤 [ETHERS] Odosielanie transakcie createOriginal...");
+        const tx = await contract.createOriginal(metadataURI, crop_id, wallet);
+        log("⏳ [ETHERS] Čakám na potvrdenie transakcie...");
+        const receipt = await tx.wait();
+
+        log("✅ [ETHERS] Transakcia potvrdená:", receipt.transactionHash);
+
+        return res.status(200).json({
+            success: true,
+            message: "NFT vytvorený",
+            metadata_cid: metadataResult.IpfsHash,
+            txHash: receipt.transactionHash
+        });
+
+    } catch (err) {
+        log("❌ [VÝNIMKA]", err.message);
+        return res.status(500).json({ error: "Interná chyba servera", detail: err.message });
     }
-
-    const contract = new ethers.Contract(CONTRACT_ADDRESS, CONTRACT_ABI, walletSigner);
-    const tx = await contract.createOriginal(
-      wallet,
-      `ipfs://${metadataCID}`,
-      crop_id
-    );
-    await tx.wait();
-
-    console.log(`✅ Transakcia dokončená: ${tx.hash}`);
-    res.status(200).json({ success: true, tx: tx.hash });
-  } catch (error) {
-    console.error("❌ Chyba:", error);
-    res.status(500).json({ error: error.message || "Neznáma chyba" });
-  }
 }
