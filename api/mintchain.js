@@ -10,15 +10,9 @@ module.exports = async function handler(req, res) {
     try {
         const { metadataURI, crop_id, wallet } = req.body;
 
-        log("📊 [ETHERS] Inicializácia providera...");
+        // Tu nastavíme priamo URL pre API
+        const providerUrl = 'https://chainvers.vercel.app/api/mintchain'; // Priame URL
 
-        const baseUrl = process.env.BASE_URL;  // BASE_URL environmentálna premenná
-        if (!baseUrl) {
-            log("❌ [MINTCHAIN] BASE_URL nie je nastavené!");
-            return res.status(500).json({ error: "BASE_URL nie je nastavené!" });
-        }
-
-        const providerUrl = `${baseUrl}/api/mintchain`; // Volanie API cez BASE_URL
         log("📡 [CHAIN] Smerovanie na API URL:", providerUrl);
 
         const provider = new ethers.JsonRpcProvider(process.env.PROVIDER_URL);
