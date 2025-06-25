@@ -1,80 +1,118 @@
-// CHAINVERS/api/chainwebhook.js
+import { writeFileSync } from "fs";
+import path from "path";
+import { ethers } from "ethers";
 
-import { writeFile } from "fs/promises"; import { createRequire } from "module"; const require = createRequire(import.meta.url); const { ethers } = require("ethers");
+const pinataApi = "https://api.pinata.cloud/pinning/";
+const JWT = process.env.PINATA_JWT;
+const PROVIDER_URL = process.env.PROVIDER_URL;
+const PRIVATE_KEY = process.env.PRIVATE_KEY;
+const CONTRACT_ADDRESS = process.env.CONTRACT_ADDRESS;
+const CONTRACT_ABI = [ // zjednodušený ABI, doplň skutočný podľa potreby
+  {
+    "inputs": [
+      { "internalType": "address", "name": "to", "type": "address" },
+      { "internalType": "string", "name": "tokenURI", "type": "string" },
+      { "internalType": "string", "name": "cropId", "type": "string" }
+    ],
+    "name": "createOriginal",
+    "outputs": [],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  }
+];
 
-const PROVIDER_URL = process.env.PROVIDER_URL; const PRIVATE_KEY = process.env.PRIVATE_KEY; const CONTRACT_ADDRESS = process.env.CONTRACT_ADDRESS; const CONTRACT_ABI = require("../../abi.json"); const PINATA_JWT = process.env.PINATA_JWT;
+export default async function handler(req, res) {
+  try {
+    if (req.method !== "POST") {
+      return res.status(405).json({ error: "Method Not Allowed" });
+    }
 
-export default async function handler(req, res) { if (req.method !== "POST") { return res.status(405).json({ error: "Method Not Allowed" }); }
+    const { crop_id, wallet, image_base64 } = req.body;
+    console.log("➡️ Prijaté údaje:", {
+      crop_id,
+      wallet,
+      image_base64_length: image_base64?.length,
+    });
 
-try { const { crop_id, wallet, image_base64 } = req.body; console.log("[➡️ Prijaté údaje:", { crop_id, wallet, image_base64_length: image_base64.length, });
+    if (!crop_id || !wallet || !image_base64) {
+      return res.status(400).json({ error: "Chýbajúce dáta" });
+    }
 
-// === 1. Uloženie obrázka na disk (voliteľné logovanie/debug)
-const imageBuffer = Buffer.from(image_base64, "base64");
-const imageName = `${crop_id}.png`;
-await writeFile(`/tmp/${imageName}`, imageBuffer);
+    // 🔄 1. Upload obrázka na Pinata
+    console.log("🔄 Nahrávanie obrázka na Pinatu...");
+    const imageResponse = await fetch(`${pinataApi}pinFileToIPFS`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${JWT}`,
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({
+        file: image_base64,
+        options: {
+          cidVersion: 1,
+          metadata: {
+            name: `${crop_id}.png`
+          }
+        }
+      })
+    });
+    const imageData = await imageResponse.json();
+    console.log("🖼️ Výsledok obrázka:", imageData);
 
-// === 2. Upload na Pinata ===
-console.log("[🔄 Nahrávanie obrázka na Pinatu...");
-const imgRes = await fetch("https://api.pinata.cloud/pinning/pinFileToIPFS", {
-  method: "POST",
-  headers: {
-    Authorization: `Bearer ${PINATA_JWT}`,
-  },
-  body: (() => {
-    const form = new FormData();
-    form.append("file", new Blob([imageBuffer]), imageName);
-    return form;
-  })(),
-});
-const imgData = await imgRes.json();
-console.log("[🖼️ Výsledok obrázka:", imgData);
+    const imageCID = imageData.IpfsHash;
 
-// === 3. Metadáta ===
-console.log("[📦 Upload metadát...");
-const metadata = {
-  name: `CHAINVERS Crop #${crop_id}`,
-  description: `NFT výrez pre ${wallet}`,
-  image: `ipfs://${imgData.IpfsHash}`,
-  crop_id: crop_id,
-};
+    // 📦 2. Upload metadát
+    console.log("📦 Upload metadát...");
+    const metadata = {
+      name: `CHAINVERS NFT ${crop_id}`,
+      description: "CHAINVERS: Vesmírny výrez transformovaný do NFT",
+      image: `ipfs://${imageCID}`,
+      attributes: [{ trait_type: "Crop ID", value: crop_id }]
+    };
 
-const metaRes = await fetch("https://api.pinata.cloud/pinning/pinJSONToIPFS", {
-  method: "POST",
-  headers: {
-    "Content-Type": "application/json",
-    Authorization: `Bearer ${PINATA_JWT}`,
-  },
-  body: JSON.stringify({
-    pinataMetadata: { name: `chainvers-metadata-${crop_id}` },
-    pinataContent: metadata,
-  }),
-});
-const metaDataRes = await metaRes.json();
-console.log("[📄 Výsledok metadát:", metaDataRes);
+    const metadataResponse = await fetch(`${pinataApi}pinJSONToIPFS`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${JWT}`,
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({
+        pinataMetadata: {
+          name: `chainvers-metadata-${crop_id}`
+        },
+        pinataContent: metadata
+      })
+    });
 
-// === 4. Kontrakt ===
-console.log("[🚀 Volanie kontraktu...");
-const provider = new ethers.JsonRpcProvider(PROVIDER_URL);
-const walletSigner = new ethers.Wallet(PRIVATE_KEY, provider);
+    const metadataData = await metadataResponse.json();
+    console.log("📄 Výsledok metadát:", metadataData);
 
-const balance = await provider.getBalance(walletSigner.address);
-const balanceEth = ethers.formatEther(balance);
-if (balance < ethers.parseEther("0.002")) {
-  throw new Error(`❌ Nedostatočný zostatok: ${balanceEth} ETH`);
+    const metadataCID = metadataData.IpfsHash;
+
+    // 🚀 3. Volanie kontraktu
+    console.log("🚀 Volanie kontraktu...");
+    const provider = new ethers.JsonRpcProvider(PROVIDER_URL);
+    const walletSigner = new ethers.Wallet(PRIVATE_KEY, provider);
+    const balance = await provider.getBalance(walletSigner.address);
+
+    if (balance < ethers.parseEther("0.002")) {
+      throw new Error(
+        `❌ Nedostatočný zostatok: ${ethers.formatEther(balance)} ETH`
+      );
+    }
+
+    const contract = new ethers.Contract(CONTRACT_ADDRESS, CONTRACT_ABI, walletSigner);
+    const tx = await contract.createOriginal(
+      wallet,
+      `ipfs://${metadataCID}`,
+      crop_id
+    );
+    await tx.wait();
+
+    console.log(`✅ Transakcia dokončená: ${tx.hash}`);
+    res.status(200).json({ success: true, tx: tx.hash });
+  } catch (error) {
+    console.error("❌ Chyba:", error);
+    res.status(500).json({ error: error.message || "Neznáma chyba" });
+  }
 }
-
-const contract = new ethers.Contract(CONTRACT_ADDRESS, CONTRACT_ABI, walletSigner);
-const tx = await contract.createOriginal(
-  wallet,
-  `ipfs://${metaDataRes.IpfsHash}`,
-  crop_id
-);
-
-console.log("✅ Transakcia odoslaná:", tx.hash);
-await tx.wait();
-console.log("✅ Transakcia potvrdená:", tx.hash);
-
-return res.status(200).json({ success: true, txHash: tx.hash });
-
-} catch (err) { console.error("[❌ Chyba:", err); return res.status(500).json({ error: err.message || "Neznáma chyba" }); } }
-
