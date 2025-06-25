@@ -1,100 +1,125 @@
-const fetch = require('node-fetch');
+import { v4 as uuidv4 } from "uuid";
 
-module.exports = async function handler(req, res) {
+// Funkcia na zobrazenie logov s timestampom
+const log = (message, ...args) => {
     const now = new Date().toISOString();
-    const log = (...args) => console.log(`[${now}]`, ...args);
+    console.log(`[${now}]`, message, ...args);
+};
 
+export default async function handler(req, res) {
     if (req.method !== "POST") {
-        log("❌ [MINTCHAIN] Nepodporovaná metóda:", req.method);
+        log("❌ [CHAINWEBHOOK] Nepodporovaná HTTP metóda:", req.method);
         return res.status(405).json({ error: "Method Not Allowed" });
     }
 
     try {
-        const { metadataURI, crop_id, wallet } = req.body;
+        const { crop_id, wallet, image_base64 } = req.body;
 
-        // === Inicializácia providera cez Infura ===
-        log("📊 [INFURA] Inicializácia providera...");
-
-        const providerUrl = process.env.PROVIDER_URL; // Infura URL
-        const privateKey = process.env.PRIVATE_KEY;
-        const contractAddress = process.env.CONTRACT_ADDRESS;
-
-        // === Získanie zostatku peňaženky ===
-        const balanceData = {
-            jsonrpc: "2.0",
-            id: 1,
-            method: "eth_getBalance",
-            params: [wallet, "latest"]
-        };
-
-        const balanceResponse = await fetch(providerUrl, {
-            method: "POST",
-            headers: {
-                "Content-Type": "application/json"
-            },
-            body: JSON.stringify(balanceData)
-        });
-        const balanceResult = await balanceResponse.json();
-        const balance = parseInt(balanceResult.result, 16); // Previesť hex na číslo
-        log("💰 [BALANCE] Peňaženka má:", balance / 1e18, "ETH");
-
-        if (balance <= 100000000000000) { // Ak je zostatok menší než 0.0001 ETH
-            return res.status(400).json({ error: "Nedostatočný zostatok pre gas" });
+        // Overenie prítomnosti povinných údajov
+        if (!crop_id || !wallet || !image_base64) {
+            log("⚠️ [CHAINWEBHOOK] Neúplné údaje:", req.body);
+            return res.status(400).json({ error: "Chýbajú údaje" });
         }
 
-        // === Príprava transakcie ===
-        const gasPriceResponse = await fetch(providerUrl, {
+        log("📥 [CHAINWEBHOOK] Prijaté údaje:", { crop_id, wallet, image_base64_length: image_base64.length });
+
+        // === 1. Upload obrázka na Pinata ===
+        log("📡 [PINATA] Nahrávanie obrázka...");
+        const buffer = Buffer.from(image_base64, "base64");
+
+        const formData = new FormData();
+        formData.append("file", new Blob([buffer]), `${crop_id}.png`);
+
+        const imageUpload = await fetch("https://api.pinata.cloud/pinning/pinFileToIPFS", {
+            method: "POST",
+            headers: {
+                Authorization: `Bearer ${process.env.PINATA_JWT}`
+            },
+            body: formData
+        });
+
+        const imageResult = await imageUpload.json();
+        log("🖼️ [PINATA] Výsledok obrázka:", imageResult);
+
+        if (!imageResult.IpfsHash) {
+            log("❌ [PINATA] Obrázok sa nepodarilo nahrať.", imageResult);
+            return res.status(500).json({ error: "Nepodarilo sa nahrať obrázok", detail: imageResult });
+        }
+
+        const imageURI = `ipfs://${imageResult.IpfsHash}`;
+
+        // === 2. Upload metadát ===
+        const metadata = {
+            name: `Chainvers NFT ${crop_id}`,
+            description: "NFT z CHAINVERS",
+            image: imageURI,
+            attributes: [{ trait_type: "Crop ID", value: crop_id }]
+        };
+
+        log("📦 [PINATA] Nahrávanie metadát...");
+        const metadataUpload = await fetch("https://api.pinata.cloud/pinning/pinJSONToIPFS", {
+            method: "POST",
+            headers: {
+                Authorization: `Bearer ${process.env.PINATA_JWT}`,
+                "Content-Type": "application/json"
+            },
+            body: JSON.stringify({
+                pinataMetadata: {
+                    name: `chainvers-metadata-${crop_id}`
+                },
+                pinataContent: metadata
+            })
+        });
+
+        const metadataResult = await metadataUpload.json();
+        log("📄 [PINATA] Výsledok metadát:", metadataResult);
+
+        if (!metadataResult.IpfsHash) {
+            log("❌ [PINATA] Nepodarilo sa nahrať metadáta.", metadataResult);
+            return res.status(500).json({ error: "Nepodarilo sa nahrať metadáta", detail: metadataResult });
+        }
+
+        const metadataURI = `ipfs://${metadataResult.IpfsHash}`;
+
+        // === 3. Volanie mintchain.js (presmerovanie na správnu URL) ===
+        log("🚀 [CHAINWEBHOOK] Príprava na volanie mintchain.js...");
+
+        // Získame URL podľa BASE_URL (musí byť nastavená vo Vercel environment variables)
+        const mintchainURL = process.env.BASE_URL ? `${process.env.BASE_URL}/api/mintchain` : `http://localhost:3000/api/mintchain`;
+
+        log("🔗 [CHAINWEBHOOK] Volanie na URL:", mintchainURL);
+
+        // Volanie API na mintchain.js
+        const mintResponse = await fetch(mintchainURL, {
             method: "POST",
             headers: {
                 "Content-Type": "application/json"
             },
             body: JSON.stringify({
-                jsonrpc: "2.0",
-                id: 2,
-                method: "eth_gasPrice",
-                params: []
+                metadataURI,
+                crop_id,
+                wallet
             })
         });
-        const gasPriceResult = await gasPriceResponse.json();
-        const gasPrice = gasPriceResult.result;
 
-        const txData = {
-            jsonrpc: "2.0",
-            id: 3,
-            method: "eth_sendTransaction",
-            params: [{
-                from: wallet,
-                to: contractAddress,
-                gas: "0x5208", // Gas limit
-                gasPrice: gasPrice,
-                data: `0x${metadataURI}${crop_id}${wallet}`, // Prispôsobte podľa požiadaviek kontraktu
-            }]
-        };
+        const mintResult = await mintResponse.json();
+        log("📤 [CHAINWEBHOOK] Výsledok mintchain.js:", mintResult);
 
-        // === Odoslanie transakcie ===
-        const txResponse = await fetch(providerUrl, {
-            method: "POST",
-            headers: {
-                "Content-Type": "application/json"
-            },
-            body: JSON.stringify(txData)
-        });
-
-        const txResult = await txResponse.json();
-        log("📤 [INFURA] Odoslaná transakcia:", txResult.result);
-
-        if (txResult.error) {
-            log("❌ [INFURA] Chyba transakcie:", txResult.error.message);
-            return res.status(500).json({ error: txResult.error.message });
+        if (!mintResult.success) {
+            log("❌ [CHAINWEBHOOK] Chyba pri mintovaní NFT:", mintResult);
+            return res.status(500).json({ error: "Chyba pri mintovaní NFT", detail: mintResult });
         }
+
+        log("✅ [CHAINWEBHOOK] NFT úspešne vytvorené, transakcia:", mintResult.txHash);
 
         return res.status(200).json({
             success: true,
-            txHash: txResult.result
+            message: "NFT vytvorené",
+            txHash: mintResult.txHash
         });
 
     } catch (err) {
-        log("❌ [MINTCHAIN ERROR]", err.message);
-        return res.status(500).json({ success: false, error: err.message });
+        log("❌ [CHAINWEBHOOK ERROR]", err.message);
+        return res.status(500).json({ error: "Interná chyba servera", detail: err.message });
     }
-};
+}
