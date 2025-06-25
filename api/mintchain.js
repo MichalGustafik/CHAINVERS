@@ -14,12 +14,13 @@ module.exports = async function handler(req, res) {
         log("📊 [INFURA] Inicializácia providera...");
 
         const infuraUrl = process.env.PROVIDER_URL;
-        if (!infuraUrl) {
-            throw new Error("❌ PROVIDER_URL nie je nastavený!");
+        const infuraApiKey = process.env.INFURA_API_KEY;  // Infura API kľúč
+        if (!infuraUrl || !infuraApiKey) {
+            throw new Error("❌ Infura URL alebo API kľúč nie je nastavený!");
         }
 
         const provider = new URL(infuraUrl);
-        const balance = await getBalance(provider, wallet);
+        const balance = await getBalance(provider, wallet, infuraApiKey);
         log("💰 [BALANCE] Peňaženka má:", balance, "ETH");
 
         // Overenie, či je dostatočný zostatok na gas
@@ -27,18 +28,18 @@ module.exports = async function handler(req, res) {
             return res.status(400).json({ error: "Nedostatočný zostatok pre gas" });
         }
 
-        // === 2. Volanie smart kontraktu ===
+        // === 2. Vytvorenie transakcie ===
         log("🚀 [INFURA] Volanie kontraktu...");
 
         const contractAddress = process.env.CONTRACT_ADDRESS;
         const privateKey = process.env.PRIVATE_KEY;
-        const txData = createTransactionData(metadataURI, crop_id, wallet, contractAddress);
 
-        const tx = await sendTransaction(provider, privateKey, txData);
+        const txData = await createTransactionData(metadataURI, crop_id, wallet, contractAddress, privateKey);
+        const tx = await sendTransaction(provider, infuraApiKey, txData);
         log("✅ [ETHERS] Transakcia potvrdená:", tx.transactionHash);
 
         // === 3. Nahrávanie metadát na Pinatu ===
-        const imageURI = 'https://ipfs.io/ipfs/' + metadataURI; // Predpokladáme, že metadata obsahuje IPFS URL
+        const imageURI = `https://ipfs.io/ipfs/${metadataURI}`;  // Predpokladáme, že metadata obsahuje IPFS URL
 
         const metadata = {
             name: `Chainvers NFT ${crop_id}`,
@@ -66,7 +67,7 @@ module.exports = async function handler(req, res) {
 };
 
 // Funkcia na získanie balance peňaženky z Infura
-async function getBalance(provider, wallet) {
+async function getBalance(provider, wallet, infuraApiKey) {
     const data = {
         jsonrpc: "2.0",
         id: 1,
@@ -74,7 +75,7 @@ async function getBalance(provider, wallet) {
         params: [wallet, "latest"]
     };
 
-    const response = await fetch(provider.href, {
+    const response = await fetch(`${provider.href}?apiKey=${infuraApiKey}`, {
         method: "POST",
         headers: {
             "Content-Type": "application/json"
@@ -88,20 +89,19 @@ async function getBalance(provider, wallet) {
 }
 
 // Funkcia na odoslanie transakcie do Infura
-async function sendTransaction(provider, privateKey, txData) {
+async function sendTransaction(provider, infuraApiKey, txData) {
     const data = {
         jsonrpc: "2.0",
         id: 1,
         method: "eth_sendTransaction",
         params: [{
             ...txData,
-            from: privateKey,
             gas: "0x5208", // 21000 v hex
             gasPrice: "0x09184e72a000", // Nízka cena gasu pre testovaciu sieť
         }]
     };
 
-    const response = await fetch(provider.href, {
+    const response = await fetch(`${provider.href}?apiKey=${infuraApiKey}`, {
         method: "POST",
         headers: {
             "Content-Type": "application/json"
@@ -114,10 +114,11 @@ async function sendTransaction(provider, privateKey, txData) {
 }
 
 // Funkcia na vytvorenie dát pre transakciu
-function createTransactionData(metadataURI, crop_id, wallet, contractAddress) {
+async function createTransactionData(metadataURI, crop_id, wallet, contractAddress, privateKey) {
+    // Vytvorte správnu štruktúru dát pre transakciu
     return {
         to: contractAddress,
-        data: `0x...` // Vytvorenie dát na volanie kontraktu
+        data: `0x...` // Tu bude vytvorený správny dáta pre volanie kontraktu
     };
 }
 
