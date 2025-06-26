@@ -1,10 +1,5 @@
-import crypto from 'crypto';
-import https from 'https';
-import rlp from 'rlp';
-import sha3 from 'js-sha3';
-import secp256k1 from 'secp256k1';
-
-const { keccak256 } = sha3;
+import fetch from 'node-fetch'; // Pre HTTP požiadavky
+import { ethers } from 'ethers'; // Pre pomocné funkcie ako hex a utils
 
 const log = (...args) => console.log(`[${new Date().toISOString()}]`, ...args);
 
@@ -12,63 +7,44 @@ function isValidAddress(addr) {
   return /^0x[a-fA-F0-9]{40}$/.test(addr);
 }
 
-const jsonRpcRequest = (method, params) => {
-  return new Promise((resolve, reject) => {
-    const body = JSON.stringify({ jsonrpc: '2.0', id: 1, method, params });
-    const url = new URL(process.env.PROVIDER_URL);
-    const options = {
-      hostname: url.hostname,
-      path: url.pathname + url.search,
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Content-Length': Buffer.byteLength(body)
-      }
-    };
-
-    const req = https.request(options, (res) => {
-      let raw = '';
-      res.on('data', chunk => raw += chunk);
-      res.on('end', () => {
-        try {
-          const parsed = JSON.parse(raw);
-          if (parsed.error) return reject(new Error(parsed.error.message));
-          log('📨 RPC odpoveď:', parsed.result);
-          resolve(parsed.result);
-        } catch (e) {
-          log('❌ [CHYBA] Neplatný JSON z RPC:', raw.slice(0, 80));
-          reject(new Error('Invalid JSON response from RPC'));
-        }
-      });
-    });
-
-    req.on('error', (err) => {
-      log('❌ [CHYBA] RPC pripojenie zlyhalo:', err.message);
-      reject(err);
-    });
-
-    req.write(body);
-    req.end();
+// Funkcia na volanie Infura RPC API
+async function jsonRpcRequest(method, params) {
+  const url = process.env.PROVIDER_URL; // Infura RPC URL
+  const body = JSON.stringify({
+    jsonrpc: '2.0',
+    id: 1,
+    method,
+    params,
   });
-};
 
-function encodeFunctionCall(uri, crop, to) {
-  const methodID = '0x0f1320cb'; // createOriginal(string,string,address)
-  const uriHex = Buffer.from(uri, 'utf8').toString('hex').padEnd(64, '0');
-  const cropHex = Buffer.from(crop, 'utf8').toString('hex').padEnd(64, '0');
-  const addrHex = to.toLowerCase().replace(/^0x/, '').padStart(64, '0');
-  const fullData = methodID + uriHex + cropHex + addrHex;
+  const response = await fetch(url, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body,
+  });
 
-  log('🧬 encodeFunctionCall():');
-  log('   - metadataURI (hex):', uriHex);
-  log('   - crop_id     (hex):', cropHex);
-  log('   - address     (hex):', addrHex);
-  log('   → Encoded data:', fullData);
+  const jsonResponse = await response.json();
+  if (jsonResponse.error) {
+    throw new Error(jsonResponse.error.message);
+  }
 
-  return fullData;
+  return jsonResponse.result;
 }
 
-export default async function handler(req, res) {
+// Funkcia na encodeovanie funkcie mintovania (RLP)
+function encodeFunctionCall(uri, crop, to) {
+  const methodID = '0x0f1320cb'; // Keccak256 funkcia "createOriginal(string,string,address)" => prvé 4 bajty
+  const uriHex = ethers.utils.hexlify(ethers.utils.toUtf8Bytes(uri)).padEnd(66, '0'); // URI
+  const cropHex = ethers.utils.hexlify(ethers.utils.toUtf8Bytes(crop)).padEnd(66, '0'); // Crop ID
+  const addr = to.toLowerCase().replace(/^0x/, '').padStart(64, '0'); // Adresa zákazníka
+
+  return methodID + uriHex + cropHex + addr;
+}
+
+// Hlavná funkcia na mintovanie NFT pomocou Infura
+export default async function mintNFT(req, res) {
   log('=============================================');
   log('🔗 MINTCHAIN AKTIVOVANÝ');
 
@@ -85,7 +61,7 @@ export default async function handler(req, res) {
   log('   - walletAddress:', walletAddress);
 
   if (!metadataURI || !crop_id || !walletAddress) {
-    log('⚠️ Neúplné vstupné údaje');
+    log('⚠️ Neúplné údaje');
     return res.status(400).json({ error: 'Missing metadataURI, crop_id or walletAddress' });
   }
 
@@ -94,98 +70,43 @@ export default async function handler(req, res) {
     return res.status(400).json({ error: 'Invalid wallet address format' });
   }
 
-  const PRIVATE_KEY = process.env.PRIVATE_KEY?.replace(/^0x/, '');
-  const FROM = process.env.FROM_ADDRESS;
-  const TO = process.env.CONTRACT_ADDRESS;
   const PROVIDER_URL = process.env.PROVIDER_URL;
+  const CONTRACT_ADDRESS = process.env.CONTRACT_ADDRESS;
 
-  if (!PRIVATE_KEY || !FROM || !TO || !PROVIDER_URL) {
-    log('❌ Chýbajú environment variables');
+  if (!PROVIDER_URL || !CONTRACT_ADDRESS) {
+    log('❌ Chýbajú environment premenné');
     return res.status(500).json({ error: 'Missing environment variables' });
   }
 
-  log('🌍 ENV nastavenia:');
-  log('   - FROM_ADDRESS:', FROM);
-  log('   - CONTRACT_ADDRESS:', TO);
-  log('   - PROVIDER_URL:', PROVIDER_URL.slice(0, 40) + '...');
-
   try {
-    const nonce = await jsonRpcRequest('eth_getTransactionCount', [FROM, 'latest']);
+    // Získanie nonce a gas ceny
+    const nonce = await jsonRpcRequest('eth_getTransactionCount', [walletAddress, 'latest']);
     const gasPrice = await jsonRpcRequest('eth_gasPrice', []);
-
+    
     log('⛽️ PLYN (Gas):');
     log('   - nonce:', nonce);
     log('   - gasPrice (wei):', gasPrice);
-    log('   - gasPrice (gwei):', parseInt(gasPrice, 16) / 1e9);
 
     const data = encodeFunctionCall(metadataURI, crop_id, walletAddress);
 
-    const tx = [
-      nonce,                   // nonce
-      gasPrice,                // gasPrice
-      '0x493e0',               // gasLimit (300000)
-      TO,                      // to
-      '0x0',                   // value
-      data,                    // data
-      '0x6f',                  // chainId (Base Sepolia = 111)
-      '0x',                    // r
-      '0x'                     // s
-    ];
+    const tx = {
+      nonce: ethers.BigNumber.from(nonce),
+      gasPrice: ethers.BigNumber.from(gasPrice),
+      gasLimit: ethers.BigNumber.from(300000),  // Maximálny gas limit
+      to: CONTRACT_ADDRESS,
+      value: ethers.BigNumber.from(0),
+      data: data,
+      chainId: 84532, // Base Sepolia (testovacia sieť)
+    };
 
-    const encodedTx = rlp.encode(tx);
-    const txHash = Buffer.from(keccak256.arrayBuffer(encodedTx));
+    // Posielanie transakcie pomocou Infura (Infura automaticky podpíše transakciu)
+    const txHash = await jsonRpcRequest('eth_sendTransaction', [tx]);
 
-    const privKeyBuf = Buffer.from(PRIVATE_KEY, 'hex');
-    const { signature, recid } = secp256k1.ecdsaSign(txHash, privKeyBuf);
+    log('✅ Transakcia potvrdená:', txHash);
 
-    const r = '0x' + Buffer.from(signature.slice(0, 32)).toString('hex');
-    const s = '0x' + Buffer.from(signature.slice(32, 64)).toString('hex');
-    const v = 111 * 2 + 35 + recid; // Base Sepolia
-
-    const signedTx = rlp.encode([
-      tx[0],              // nonce
-      tx[1],              // gasPrice
-      tx[2],              // gasLimit
-      tx[3],              // to
-      tx[4],              // value
-      tx[5],              // data
-      '0x' + v.toString(16), // v (as hex)
-      r,
-      s
-    ]);
-
-    const rawTxHex = '0x' + signedTx.toString('hex');
-
-    log('🚀 Posielam transakciu...');
-    const txHashFinal = await jsonRpcRequest('eth_sendRawTransaction', [rawTxHex]);
-    log('✅ TX hash:', txHashFinal);
-
-    log('⏳ Čakanie na potvrdenie...');
-    let receipt = null;
-    for (let i = 0; i < 30; i++) {
-      await new Promise(r => setTimeout(r, 2000));
-      receipt = await jsonRpcRequest('eth_getTransactionReceipt', [txHashFinal]);
-      if (receipt) break;
-    }
-
-    if (!receipt) {
-      log('⚠️ Transakcia nepotvrdená po 60s');
-    } else {
-      log('📦 Potvrdená: blockNumber =', receipt.blockNumber);
-    }
-
-    log('🏁 MINT dokončený');
-    log('=============================================');
-
-    return res.status(200).json({
-      success: true,
-      txHash: txHashFinal,
-      metadataURI,
-      recipient: walletAddress,
-      receipt
-    });
+    return res.status(200).json({ success: true, txHash: txHash });
   } catch (err) {
-    log('❌ Výnimka:', err.message);
+    log('❌ [MINTCHAIN ERROR]', err.message);
     return res.status(500).json({ error: err.message });
   }
 }
