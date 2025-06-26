@@ -1,29 +1,42 @@
-import fetch from 'node-fetch';
-import { ethers } from 'ethers';
+import { ethers } from "ethers";
+import crypto from "crypto";
+import https from "https";
 
-// Funkcia na získanie ceny plynu z Infura Gas API
-async function getGasPrice() {
-  const url = process.env.INFURA_GAS_API;
+// Získaj poskytovateľa a nastav RPC URL
+const provider = new ethers.JsonRpcProvider(process.env.PROVIDER_URL);
 
-  try {
-    const response = await fetch(url);
-    const data = await response.json();
+// Funkcia na logovanie s timestampom
+const log = (...args) => console.log(`[${new Date().toISOString()}]`, ...args);
 
-    if (data && data.result && data.result.ProposeGasPrice) {
-      const gasPriceInGwei = data.result.ProposeGasPrice;
-      console.log("[INFO] Aktuálna cena plynu (Gwei):", gasPriceInGwei);
-      return gasPriceInGwei; // Vráti cenu plynu
-    } else {
-      console.error("[ERROR] Chyba pri získavaní ceny plynu z Infura Gas API");
-    }
-  } catch (error) {
-    console.error("[ERROR] Chyba pri volaní Infura Gas API:", error);
-  }
+// Skontroluj, či je adresa platná
+function isValidAddress(addr) {
+  return ethers.utils.isAddress(addr);
 }
 
-// Funkcia na podpisovanie a odosielanie transakcie
-export default async function handler(req, res) {
-  const log = (...args) => console.log(`[${new Date().toISOString()}]`, ...args);
+// Funkcia na získanie poplatkov za gas
+async function getGasFees() {
+  const feeData = await provider.getFeeData();
+  return {
+    gasLimit: 250000, // Môžeš nastaviť vlastný limit podľa potreby
+    maxFeePerGas: feeData.maxFeePerGas,
+    maxPriorityFeePerGas: feeData.maxPriorityFeePerGas,
+  };
+}
+
+// Funkcia na kódovanie dát pre smart kontrakt
+function encodeFunctionCall(uri, crop, to) {
+  const methodID = '0x0f1320cb';
+  const uriHex = ethers.utils.hexlify(ethers.utils.toUtf8Bytes(uri)).padEnd(66, '0');
+  const cropHex = ethers.utils.hexlify(ethers.utils.toUtf8Bytes(crop)).padEnd(66, '0');
+  const addrHex = to.toLowerCase().replace(/^0x/, '').padStart(64, '0');
+  const fullData = methodID + uriHex + cropHex + addrHex;
+  log('Encoded data:', fullData);
+  return fullData;
+}
+
+export default async function (req, res) {
+  log('=============================================');
+  log('🔗 MINTCHAIN INIT...');
 
   if (req.method !== 'POST') {
     log('❌ Nepodporovaná HTTP metóda:', req.method);
@@ -31,7 +44,11 @@ export default async function handler(req, res) {
   }
 
   const { metadataURI, crop_id, walletAddress } = req.body;
-  log('📥 PRIJATÉ PARAMETRE:', { metadataURI, crop_id, walletAddress });
+  
+  log('📥 PRIJATÉ PARAMETRE:');
+  log('   - metadataURI:', metadataURI);
+  log('   - crop_id:', crop_id);
+  log('   - walletAddress:', walletAddress);
 
   if (!metadataURI || !crop_id || !walletAddress) {
     log('⚠️ Neúplné údaje');
@@ -43,77 +60,65 @@ export default async function handler(req, res) {
     return res.status(400).json({ error: 'Invalid wallet address format' });
   }
 
+  // Načítanie kľúčov a ďalších premenných z ENV
   const PRIVATE_KEY = process.env.PRIVATE_KEY?.replace(/^0x/, '');
   const FROM = process.env.FROM_ADDRESS;
   const TO = process.env.CONTRACT_ADDRESS;
-  const PROVIDER_URL = process.env.PROVIDER_URL;
 
-  if (!PRIVATE_KEY || !FROM || !TO || !PROVIDER_URL) {
+  if (!PRIVATE_KEY || !FROM || !TO || !process.env.PROVIDER_URL) {
     log('❌ Chýbajú environment premenné');
     return res.status(500).json({ error: 'Missing environment variables' });
   }
 
-  log('🌍 ENV nastavenia:', { FROM, TO, PROVIDER_URL: PROVIDER_URL.slice(0, 40) + '...' });
+  log('🔐 ENVIRONMENT:');
+  log('   - FROM:', FROM);
+  log('   - TO:', TO);
+  log('   - PROVIDER:', process.env.PROVIDER_URL.slice(0, 40) + '...');
 
   try {
-    const provider = new ethers.JsonRpcProvider(PROVIDER_URL);
-    const signer = new ethers.Wallet(PRIVATE_KEY, provider);
-
-    // Získanie ceny plynu z Infura Gas API
-    const gasPrice = await getGasPrice();
-
-    // Získanie nonce pre transakciu
+    // Získanie nonce a poplatkov za gas
     const nonce = await provider.getTransactionCount(FROM, 'latest');
-    log('⛽️ PLYN (Gas):', { nonce, gasPrice });
+    const gasFees = await getGasFees();
+    const gasPrice = gasFees.maxFeePerGas;
 
-    // Zakódovanie funkcie pre mintovanie
+    log('⛽️ PLYN: nonce =', nonce, ', gasPrice =', gasPrice);
+
+    // Kódovanie dát pre funkciu kontraktu
     const data = encodeFunctionCall(metadataURI, crop_id, walletAddress);
-    const gasLimit = 3000000; // Predpokladaný gas limit pre túto transakciu
 
     // Príprava transakcie
     const tx = {
       nonce,
-      gasLimit,
-      gasPrice: ethers.utils.parseUnits(gasPrice.toString(), 'gwei'),
+      gasLimit: gasFees.gasLimit,
+      gasPrice,
       to: TO,
-      value: ethers.BigNumber.from(0),
       data,
-      chainId: 11155111 // Sepolia testnet
+      value: ethers.BigNumber.from(0),
     };
 
-    log('🚀 Posielam transakciu...');
+    // Signovanie transakcie
+    const wallet = new ethers.Wallet(PRIVATE_KEY, provider);
+    const signedTx = await wallet.signTransaction(tx);
 
-    // Podpisovanie a odoslanie transakcie
-    const txResponse = await signer.sendTransaction(tx);
-    log('✅ TX Hash:', txResponse.hash);
+    log('🚀 Posielam transakciu...');
+    const txHash = await provider.sendTransaction(signedTx);
+    log('✅ TX hash:', txHash);
 
     // Čakanie na potvrdenie transakcie
-    const receipt = await txResponse.wait();
-    log('📦 Transakcia potvrdená:', { blockNumber: receipt.blockNumber });
+    log('⏳ Čakanie na potvrdenie...');
+    const receipt = await txHash.wait();
+    log('📦 Potvrdená: blockNumber =', receipt.blockNumber);
 
     return res.status(200).json({
       success: true,
-      txHash: txResponse.hash,
+      txHash: txHash.hash,
+      recipient: walletAddress,
       metadataURI,
-      blockNumber: receipt.blockNumber
+      receipt
     });
+
   } catch (err) {
-    log('❌ Chyba pri spracovaní transakcie:', err.message);
+    log('❌ Výnimka:', err.message);
     return res.status(500).json({ error: err.message });
   }
-}
-
-// Funkcia na kontrolu platnosti adresy
-function isValidAddress(addr) {
-  return /^0x[a-fA-F0-9]{40}$/.test(addr);
-}
-
-// Funkcia na zakódovanie funkcie mintovania
-function encodeFunctionCall(uri, crop, to) {
-  const methodID = '0x0f1320cb'; // Prvé 4 bajty z hash funkcie "createOriginal(string,string,address)"
-  const uriHex = ethers.utils.hexlify(ethers.utils.toUtf8Bytes(uri)).padEnd(66, '0');
-  const cropHex = ethers.utils.hexlify(ethers.utils.toUtf8Bytes(crop)).padEnd(66, '0');
-  const addrHex = to.toLowerCase().replace(/^0x/, '').padStart(64, '0');
-
-  return methodID + uriHex + cropHex + addrHex;
 }
