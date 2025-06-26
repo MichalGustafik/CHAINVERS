@@ -1,41 +1,39 @@
 import Web3 from 'web3';
 
-// Iniciácia web3 providera
-const providerUrl = process.env.PROVIDER_URL; // napr. https://sepolia.infura.io/v3/...
-if (!providerUrl) throw new Error('Missing PROVIDER_URL env var');
-const web3 = new Web3(providerUrl);
+const web3 = new Web3(process.env.PROVIDER_URL);
 
 const log = (...args) => console.log(`[${new Date().toISOString()}]`, ...args);
-function isValidAddress(addr) { return web3.utils.isAddress(addr); }
 
-// Zakóduje volanie funkcie createOriginal(string,string,address)
-function encodeFunctionCall(metadataURI, crop_id, walletAddress) {
+function encodeFunctionCall(metadataURI, cropId, walletAddress) {
   const abi = [{
     type: 'function',
     name: 'createOriginal',
     inputs: [
-      { type:'string', name:'imageURI' },
-      { type:'string', name:'cropId' },
-      { type:'address', name:'to' }
+      { type: 'string', name: 'imageURI' },
+      { type: 'string', name: 'cropId' },
+      { type: 'address', name: 'to' }
     ]
   }];
   const contract = new web3.eth.Contract(abi);
-  return contract.methods.createOriginal(metadataURI, crop_id, walletAddress).encodeABI();
+  return contract.methods.createOriginal(metadataURI, cropId, walletAddress).encodeABI();
+}
+
+function isValidAddress(addr) {
+  return web3.utils.isAddress(addr);
 }
 
 export default async function handler(req, res) {
-  log('===== MINTCHAIN request =====');
+  log('======= MINTCHAIN MINT STARTED =======');
 
   if (req.method !== 'POST') return res.status(405).json({ error: 'Only POST allowed' });
+
   const { metadataURI, crop_id, walletAddress } = req.body;
-  log('Received:', metadataURI, crop_id, walletAddress);
 
   if (!metadataURI || !crop_id || !walletAddress) {
-    log('⚠️ Missing params');
     return res.status(400).json({ error: 'Missing metadataURI, crop_id or walletAddress' });
   }
+
   if (!isValidAddress(walletAddress)) {
-    log('⚠️ Invalid wallet address');
     return res.status(400).json({ error: 'Invalid wallet address' });
   }
 
@@ -43,13 +41,12 @@ export default async function handler(req, res) {
   const FROM = process.env.FROM_ADDRESS;
   const TO = process.env.CONTRACT_ADDRESS;
 
-  if (!PRIVATE_KEY || !FROM || !TO) {
-    log('❌ Missing environment variables');
-    return res.status(500).json({ error: 'Missing env vars' });
+  if (!PRIVATE_KEY || !FROM || !TO || !process.env.PROVIDER_URL) {
+    return res.status(500).json({ error: 'Missing environment variables' });
   }
+
   if (!isValidAddress(FROM) || !isValidAddress(TO)) {
-    log('❌ Invalid FROM or CONTRACT_ADDRESS');
-    return res.status(500).json({ error: 'Invalid contract or from address' });
+    return res.status(500).json({ error: 'Invalid FROM or CONTRACT_ADDRESS address' });
   }
 
   try {
@@ -58,7 +55,24 @@ export default async function handler(req, res) {
     const data = encodeFunctionCall(metadataURI, crop_id, walletAddress);
     const gasLimit = await web3.eth.estimateGas({ from: FROM, to: TO, data });
 
-    log('TX params:', { nonce, gasPrice, gasLimit });
+    const gasCost = web3.utils.toBN(gasPrice).mul(web3.utils.toBN(gasLimit));
+    const balance = await web3.eth.getBalance(FROM);
+    const balanceBN = web3.utils.toBN(balance);
+
+    log('⛽️ GAZ INFO:');
+    log(`   nonce = ${nonce}`);
+    log(`   gasPrice = ${web3.utils.fromWei(gasPrice, 'gwei')} gwei`);
+    log(`   gasLimit = ${gasLimit}`);
+    log(`   total cost = ${web3.utils.fromWei(gasCost.toString())} ETH`);
+    log(`   balance = ${web3.utils.fromWei(balance)} ETH`);
+
+    if (balanceBN.lt(gasCost)) {
+      return res.status(400).json({
+        error: 'Insufficient ETH for gas fees',
+        requiredETH: web3.utils.fromWei(gasCost.toString()),
+        walletBalance: web3.utils.fromWei(balance),
+      });
+    }
 
     const tx = {
       from: FROM,
@@ -71,19 +85,20 @@ export default async function handler(req, res) {
     };
 
     const signed = await web3.eth.accounts.signTransaction(tx, PRIVATE_KEY);
-    log('Signed:', signed.transactionHash);
-
     const receipt = await web3.eth.sendSignedTransaction(signed.rawTransaction);
-    log('Receipt:', receipt.transactionHash, receipt.blockNumber);
+
+    log('✅ TRANSACTION SENT:');
+    log(`   txHash = ${receipt.transactionHash}`);
+    log(`   blockNumber = ${receipt.blockNumber}`);
 
     return res.status(200).json({
       success: true,
       txHash: receipt.transactionHash,
-      blockNumber: receipt.blockNumber
+      blockNumber: receipt.blockNumber,
     });
 
   } catch (err) {
     log('❌ ERROR:', err.message || err);
-    return res.status(500).json({ error: err.message || err.toString() });
+    return res.status(500).json({ error: err.message || 'Unexpected error' });
   }
 }
