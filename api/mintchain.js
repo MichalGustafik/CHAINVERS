@@ -1,8 +1,6 @@
 import { ethers } from "ethers";
-import crypto from "crypto";
-import https from "https";
 
-// Získaj poskytovateľa a nastav RPC URL
+// Získaj poskytovateľa RPC
 const provider = new ethers.JsonRpcProvider(process.env.PROVIDER_URL);
 
 // Funkcia na logovanie s timestampom
