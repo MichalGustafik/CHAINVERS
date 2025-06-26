@@ -1,18 +1,17 @@
 import crypto from 'crypto';
 import https from 'https';
 import rlp from 'rlp';
-import pkg from 'js-sha3';
+import sha3 from 'js-sha3';
 import secp256k1 from 'secp256k1';
 
-// 🪵 Logovanie s časovou značkou
+const { keccak256 } = sha3;
+
 const log = (...args) => console.log(`[${new Date().toISOString()}]`, ...args);
 
-// 📬 Kontrola správneho formátu adresy
 function isValidAddress(addr) {
   return /^0x[a-fA-F0-9]{40}$/.test(addr);
 }
 
-// 📡 RPC požiadavka na Infura alebo iný provider
 const jsonRpcRequest = (method, params) => {
   return new Promise((resolve, reject) => {
     const body = JSON.stringify({ jsonrpc: '2.0', id: 1, method, params });
@@ -33,14 +32,11 @@ const jsonRpcRequest = (method, params) => {
       res.on('end', () => {
         try {
           const parsed = JSON.parse(raw);
-          if (parsed.error) {
-            log('❌ [RPC CHYBA]', parsed.error.message);
-            return reject(new Error(parsed.error.message));
-          }
+          if (parsed.error) return reject(new Error(parsed.error.message));
           log('📨 RPC odpoveď:', parsed.result);
           resolve(parsed.result);
         } catch (e) {
-          log('❌ [CHYBA] Neplatný JSON:', raw.slice(0, 80));
+          log('❌ [CHYBA] Neplatný JSON z RPC:', raw.slice(0, 80));
           reject(new Error('Invalid JSON response from RPC'));
         }
       });
@@ -56,9 +52,8 @@ const jsonRpcRequest = (method, params) => {
   });
 };
 
-// 🎛️ Funkcia na zakódovanie mintovania
 function encodeFunctionCall(uri, crop, to) {
-  const methodID = '0x0f1320cb'; // Keccak256("createOriginal(string,string,address)").slice(0,10)
+  const methodID = '0x0f1320cb'; // createOriginal(string,string,address)
   const uriHex = Buffer.from(uri, 'utf8').toString('hex').padEnd(64, '0');
   const cropHex = Buffer.from(crop, 'utf8').toString('hex').padEnd(64, '0');
   const addrHex = to.toLowerCase().replace(/^0x/, '').padStart(64, '0');
@@ -79,7 +74,7 @@ export default async function handler(req, res) {
 
   if (req.method !== 'POST') {
     log('❌ Nepodporovaná HTTP metóda:', req.method);
-    return res.status(405).json({ error: 'Only POST supported' });
+    return res.status(405).json({ error: 'Only POST allowed' });
   }
 
   const { metadataURI, crop_id, walletAddress } = req.body;
@@ -90,10 +85,12 @@ export default async function handler(req, res) {
   log('   - walletAddress:', walletAddress);
 
   if (!metadataURI || !crop_id || !walletAddress) {
-    return res.status(400).json({ error: 'Missing required parameters' });
+    log('⚠️ Neúplné vstupné údaje');
+    return res.status(400).json({ error: 'Missing metadataURI, crop_id or walletAddress' });
   }
 
   if (!isValidAddress(walletAddress)) {
+    log('⚠️ Neplatná adresa:', walletAddress);
     return res.status(400).json({ error: 'Invalid wallet address format' });
   }
 
@@ -102,17 +99,17 @@ export default async function handler(req, res) {
   const TO = process.env.CONTRACT_ADDRESS;
   const PROVIDER_URL = process.env.PROVIDER_URL;
 
-  log('🌍 ENV nastavenia:');
-  log('   - FROM_ADDRESS:', FROM);
-  log('   - CONTRACT_ADDRESS:', TO);
-  log('   - PROVIDER_URL:', PROVIDER_URL?.slice(0, 40) + '...');
-
   if (!PRIVATE_KEY || !FROM || !TO || !PROVIDER_URL) {
+    log('❌ Chýbajú environment variables');
     return res.status(500).json({ error: 'Missing environment variables' });
   }
 
+  log('🌍 ENV nastavenia:');
+  log('   - FROM_ADDRESS:', FROM);
+  log('   - CONTRACT_ADDRESS:', TO);
+  log('   - PROVIDER_URL:', PROVIDER_URL.slice(0, 40) + '...');
+
   try {
-    // 🧾 1. Získanie nonce a gasPrice
     const nonce = await jsonRpcRequest('eth_getTransactionCount', [FROM, 'latest']);
     const gasPrice = await jsonRpcRequest('eth_gasPrice', []);
 
@@ -121,39 +118,30 @@ export default async function handler(req, res) {
     log('   - gasPrice (wei):', gasPrice);
     log('   - gasPrice (gwei):', parseInt(gasPrice, 16) / 1e9);
 
-    // 🎛️ 2. Zakódovanie funkcie
     const data = encodeFunctionCall(metadataURI, crop_id, walletAddress);
 
-    // 📦 3. Príprava transakcie
     const tx = [
-      nonce,
-      gasPrice,
-      '0x493e0',     // gasLimit (300000)
-      TO,
-      '0x0',         // value
-      data,
-      '0x6f',        // chainId = 111
-      '0x', '0x'     // r, s
+      nonce,                   // nonce
+      gasPrice,                // gasPrice
+      '0x493e0',               // gasLimit (300000)
+      TO,                      // to
+      '0x0',                   // value
+      data,                    // data
+      '0x6f',                  // chainId (Base Sepolia = 111)
+      '0x',                    // r
+      '0x'                     // s
     ];
 
     const encodedTx = rlp.encode(tx);
     const txHash = Buffer.from(keccak256.arrayBuffer(encodedTx));
 
-    log('🔐 HASH transakcie:', txHash.toString('hex'));
-
-    // ✍️ 4. Podpis
     const privKeyBuf = Buffer.from(PRIVATE_KEY, 'hex');
     const signature = secp256k1.ecdsaSign(txHash, privKeyBuf);
+
     const r = signature.signature.slice(0, 32);
     const s = signature.signature.slice(32, 64);
-    const v = 111 * 2 + 35 + signature.recid;
+    const v = 111 * 2 + 35 + signature.recid; // EIP-155
 
-    log('✍️ Podpis:');
-    log('   - r:', r.toString('hex'));
-    log('   - s:', s.toString('hex'));
-    log('   - v:', v);
-
-    // 🧾 5. RLP podpísaná transakcia
     const signedTx = rlp.encode([
       tx[0], tx[1], tx[2], tx[3], tx[4], tx[5],
       `0x${v.toString(16)}`,
@@ -164,44 +152,35 @@ export default async function handler(req, res) {
     const rawTxHex = '0x' + signedTx.toString('hex');
 
     log('🚀 Posielam transakciu...');
-
-    // 🚀 6. Odošleme transakciu
     const txHashFinal = await jsonRpcRequest('eth_sendRawTransaction', [rawTxHex]);
+    log('✅ TX hash:', txHashFinal);
 
-    log('✅ Transakcia odoslaná:');
-    log('   - txHash:', txHashFinal);
-    log('   - prijímateľ NFT:', walletAddress);
-    log('   - metadata CID:', metadataURI);
-
-    // ⏳ 7. Čakanie na potvrdenie transakcie
-    log('⏳ Čakám na potvrdenie transakcie...');
+    log('⏳ Čakanie na potvrdenie...');
     let receipt = null;
     for (let i = 0; i < 30; i++) {
-      await new Promise(r => setTimeout(r, 2000)); // počkaj 2 sekundy
+      await new Promise(r => setTimeout(r, 2000));
       receipt = await jsonRpcRequest('eth_getTransactionReceipt', [txHashFinal]);
       if (receipt) break;
     }
 
     if (!receipt) {
-      log('⚠️ Transakcia stále nepotvrdená. Skontroluj manuálne neskôr.');
+      log('⚠️ Transakcia nepotvrdená po 60s');
     } else {
-      log('📦 Transakcia potvrdená:');
-      log('   - blockNumber:', receipt.blockNumber);
-      log('   - gasUsed:', receipt.gasUsed);
+      log('📦 Potvrdená: blockNumber =', receipt.blockNumber);
     }
 
+    log('🏁 MINT dokončený');
     log('=============================================');
 
     return res.status(200).json({
       success: true,
       txHash: txHashFinal,
-      recipient: walletAddress,
       metadataURI,
+      recipient: walletAddress,
       receipt
     });
   } catch (err) {
-    log('❌ CHYBA:', err.message);
-    log('=============================================');
-    return res.status(500).json({ error: err.message || 'Unknown error' });
+    log('❌ Výnimka:', err.message);
+    return res.status(500).json({ error: err.message });
   }
 }
