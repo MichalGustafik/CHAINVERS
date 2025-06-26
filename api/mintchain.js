@@ -1,104 +1,99 @@
-import Web3 from 'web3';
+import { ethers } from 'ethers';
 
-const web3 = new Web3(process.env.PROVIDER_URL);
-
-const log = (...args) => console.log(`[${new Date().toISOString()}]`, ...args);
-
-function encodeFunctionCall(metadataURI, cropId, walletAddress) {
-  const abi = [{
-    type: 'function',
-    name: 'createOriginal',
-    inputs: [
-      { type: 'string', name: 'imageURI' },
-      { type: 'string', name: 'cropId' },
-      { type: 'address', name: 'to' }
-    ]
-  }];
-  const contract = new web3.eth.Contract(abi);
-  return contract.methods.createOriginal(metadataURI, cropId, walletAddress).encodeABI();
-}
-
-function isValidAddress(addr) {
-  return web3.utils.isAddress(addr);
-}
+const log = (...args) =>
+  console.log(`[${new Date().toISOString()}]`, ...args);
 
 export default async function handler(req, res) {
-  log('======= MINTCHAIN MINT STARTED =======');
-
-  if (req.method !== 'POST') return res.status(405).json({ error: 'Only POST allowed' });
+  if (req.method !== 'POST') {
+    return res.status(405).json({ error: 'Method Not Allowed' });
+  }
 
   const { metadataURI, crop_id, walletAddress } = req.body;
 
-  if (!metadataURI || !crop_id || !walletAddress) {
-    return res.status(400).json({ error: 'Missing metadataURI, crop_id or walletAddress' });
-  }
+  log('🔗 MINTCHAIN AKTIVOVANÝ');
+  log('📥 Prijaté údaje:\n   - metadataURI:', metadataURI, '\n   - crop_id:', crop_id, '\n   - walletAddress:', walletAddress);
 
-  if (!isValidAddress(walletAddress)) {
-    return res.status(400).json({ error: 'Invalid wallet address' });
-  }
-
-  const PRIVATE_KEY = process.env.PRIVATE_KEY;
   const FROM = process.env.FROM_ADDRESS;
-  const TO = process.env.CONTRACT_ADDRESS;
+  const PRIVATE_KEY = process.env.PRIVATE_KEY;
+  const CONTRACT_ADDRESS = process.env.CONTRACT_ADDRESS;
+  const PROVIDER_URL = process.env.PROVIDER_URL;
+  const INFURA_GAS_API = process.env.INFURA_GAS_API;
 
-  if (!PRIVATE_KEY || !FROM || !TO || !process.env.PROVIDER_URL) {
-    return res.status(500).json({ error: 'Missing environment variables' });
-  }
+  log('🌍 ENV nastavenia:\n   - FROM_ADDRESS:', FROM, '\n   - CONTRACT_ADDRESS:', CONTRACT_ADDRESS, '\n   - PROVIDER_URL:', PROVIDER_URL);
 
-  if (!isValidAddress(FROM) || !isValidAddress(TO)) {
-    return res.status(500).json({ error: 'Invalid FROM or CONTRACT_ADDRESS address' });
+  if (!FROM || !PRIVATE_KEY || !CONTRACT_ADDRESS || !PROVIDER_URL) {
+    return res.status(500).json({ error: 'Chýbajú ENV premenné' });
   }
 
   try {
-    const nonce = await web3.eth.getTransactionCount(FROM);
-    const gasPrice = await web3.eth.getGasPrice();
-    const data = encodeFunctionCall(metadataURI, crop_id, walletAddress);
-    const gasLimit = await web3.eth.estimateGas({ from: FROM, to: TO, data });
+    const provider = new ethers.providers.JsonRpcProvider(PROVIDER_URL);
+    const wallet = new ethers.Wallet(PRIVATE_KEY, provider);
 
-    const gasCost = web3.utils.toBN(gasPrice).mul(web3.utils.toBN(gasLimit));
-    const balance = await web3.eth.getBalance(FROM);
-    const balanceBN = web3.utils.toBN(balance);
+    const balance = await provider.getBalance(FROM);
+    const chainId = await provider.getNetwork();
+    log(`🔎 Chain ID: ${chainId.chainId}`);
+    log(`🏦 Zostatok: ${ethers.utils.formatEther(balance)} ETH`);
 
-    log('⛽️ GAZ INFO:');
-    log(`   nonce = ${nonce}`);
-    log(`   gasPrice = ${web3.utils.fromWei(gasPrice, 'gwei')} gwei`);
-    log(`   gasLimit = ${gasLimit}`);
-    log(`   total cost = ${web3.utils.fromWei(gasCost.toString())} ETH`);
-    log(`   balance = ${web3.utils.fromWei(balance)} ETH`);
-
-    if (balanceBN.lt(gasCost)) {
-      return res.status(400).json({
-        error: 'Insufficient ETH for gas fees',
-        requiredETH: web3.utils.fromWei(gasCost.toString()),
-        walletBalance: web3.utils.fromWei(balance),
+    if (balance.eq(0)) {
+      return res.status(500).json({
+        error: 'Mintovanie zlyhalo',
+        detail: {
+          error: 'Insufficient ETH for gas fees',
+          requiredETH: 'neznáme',
+          walletBalance: '0',
+        },
       });
     }
 
-    const tx = {
-      from: FROM,
-      to: TO,
-      nonce: web3.utils.toHex(nonce),
-      gasPrice: web3.utils.toHex(gasPrice),
-      gas: web3.utils.toHex(gasLimit),
-      value: '0x0',
-      data
-    };
+    const abi = [
+      'function createOriginal(string memory imageURI, string memory cropId, address to) public',
+    ];
 
-    const signed = await web3.eth.accounts.signTransaction(tx, PRIVATE_KEY);
-    const receipt = await web3.eth.sendSignedTransaction(signed.rawTransaction);
+    const contract = new ethers.Contract(CONTRACT_ADDRESS, abi, wallet);
 
-    log('✅ TRANSACTION SENT:');
-    log(`   txHash = ${receipt.transactionHash}`);
-    log(`   blockNumber = ${receipt.blockNumber}`);
+    // Získaj gas price z Infura Gas API
+    let gasPrice;
+    try {
+      const response = await fetch(`${INFURA_GAS_API}`, {
+        method: 'GET',
+        headers: { 'Content-Type': 'application/json' },
+      });
+      const gasData = await response.json();
+      gasPrice = ethers.BigNumber.from(gasData.estimatedPrices[0].price).mul(
+        1e9
+      ); // Gwei -> Wei
+      log('⛽️ Gas price z Infura:', gasPrice.toString());
+    } catch (e) {
+      gasPrice = await provider.getGasPrice();
+      log('⚠️ Infura Gas API zlyhalo, použitý fallback:', gasPrice.toString());
+    }
+
+    const gasEstimate = await contract.estimateGas.createOriginal(
+      metadataURI,
+      crop_id,
+      walletAddress
+    );
+    log('⛽️ Odhadovaný gas:', gasEstimate.toString());
+
+    const tx = await contract.createOriginal(metadataURI, crop_id, walletAddress, {
+      gasLimit: gasEstimate,
+      gasPrice: gasPrice,
+    });
+
+    log('🚀 Transakcia odoslaná:', tx.hash);
+
+    const receipt = await tx.wait();
+    log('✅ Transakcia potvrdená:', receipt.transactionHash);
 
     return res.status(200).json({
       success: true,
       txHash: receipt.transactionHash,
-      blockNumber: receipt.blockNumber,
     });
-
-  } catch (err) {
-    log('❌ ERROR:', err.message || err);
-    return res.status(500).json({ error: err.message || 'Unexpected error' });
+  } catch (error) {
+    log('❌ Výnimka:', error);
+    return res.status(500).json({
+      error: 'Mintovanie zlyhalo',
+      detail: error,
+    });
   }
 }
