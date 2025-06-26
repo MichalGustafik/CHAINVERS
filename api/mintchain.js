@@ -1,113 +1,57 @@
-import { ethers } from 'ethers';
+// mintchain.js import { ethers } from 'ethers';
 
-// Funkcia na získanie nonce a gas ceny z Infura RPC
-async function jsonRpcRequest(method, params) {
-  const url = process.env.PROVIDER_URL; // Infura RPC URL
-  const body = JSON.stringify({
-    jsonrpc: '2.0',
-    id: 1,
-    method,
-    params,
-  });
+const log = (...args) => console.log([${new Date().toISOString()}], ...args);
 
-  const response = await fetch(url, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-    },
-    body,
-  });
+export default async function handler(req, res) { log('============================================='); log('🔗 MINTCHAIN AKTIVOVANÝ');
 
-  const jsonResponse = await response.json();
-  if (jsonResponse.error) {
-    throw new Error(jsonResponse.error.message);
-  }
+if (req.method !== 'POST') { log('❌ Nepodporovaná HTTP metóda:', req.method); return res.status(405).json({ error: 'Only POST method allowed' }); }
 
-  return jsonResponse.result;
-}
+const { metadataURI, crop_id, walletAddress } = req.body;
 
-// Funkcia na encodeovanie funkcie mintovania (RLP)
-function encodeFunctionCall(uri, crop, to) {
-  const methodID = '0x0f1320cb'; // Keccak256 funkcia "createOriginal(string,string,address)" => prvé 4 bajty
-  const uriHex = ethers.utils.hexlify(ethers.utils.toUtf8Bytes(uri)).padEnd(66, '0'); // URI
-  const cropHex = ethers.utils.hexlify(ethers.utils.toUtf8Bytes(crop)).padEnd(66, '0'); // Crop ID
-  const addr = to.toLowerCase().replace(/^0x/, '').padStart(64, '0'); // Adresa zákazníka
+log('📥 Prijaté údaje:'); log('   - metadataURI:', metadataURI); log('   - crop_id:', crop_id); log('   - walletAddress:', walletAddress);
 
-  return methodID + uriHex + cropHex + addr;
-}
+if (!metadataURI || !crop_id || !walletAddress) { log('⚠️ Chýbajú požadované údaje.'); return res.status(400).json({ error: 'Missing metadataURI, crop_id or walletAddress' }); }
 
-// Funkcia na mintovanie NFT
-export default async function mintNFT(req, res) {
-  console.log('=============================================');
-  console.log('🔗 MINTCHAIN AKTIVOVANÝ');
+const PRIVATE_KEY = process.env.PRIVATE_KEY?.replace(/^0x/, ''); const FROM = process.env.FROM_ADDRESS; const TO = process.env.CONTRACT_ADDRESS; const PROVIDER_URL = process.env.PROVIDER_URL;
 
-  if (req.method !== 'POST') {
-    console.log('❌ Nepodporovaná HTTP metóda:', req.method);
-    return res.status(405).json({ error: 'Only POST allowed' });
-  }
+if (!PRIVATE_KEY || !FROM || !TO || !PROVIDER_URL) { log('❌ Chýbajú environment variables'); return res.status(500).json({ error: 'Missing environment variables' }); }
 
-  const { metadataURI, crop_id, walletAddress } = req.body;
+log('🌍 ENV nastavenia:'); log('   - FROM_ADDRESS:', FROM); log('   - CONTRACT_ADDRESS:', TO); log('   - PROVIDER_URL:', PROVIDER_URL.slice(0, 40) + '...');
 
-  console.log('📥 Prijaté údaje:');
-  console.log('   - metadataURI:', metadataURI);
-  console.log('   - crop_id:', crop_id);
-  console.log('   - walletAddress:', walletAddress);
+try { const provider = new ethers.JsonRpcProvider(PROVIDER_URL); const wallet = new ethers.Wallet(PRIVATE_KEY, provider);
 
-  if (!metadataURI || !crop_id || !walletAddress) {
-    console.log('⚠️ Neúplné údaje');
-    return res.status(400).json({ error: 'Missing metadataURI, crop_id or walletAddress' });
-  }
+const contractInterface = new ethers.utils.Interface([
+  'function createOriginal(string memory imageURI, string memory cropId, address to)'
+]);
 
-  if (!/^0x[a-fA-F0-9]{40}$/.test(walletAddress)) {
-    console.log('⚠️ Neplatná adresa:', walletAddress);
-    return res.status(400).json({ error: 'Invalid wallet address format' });
-  }
+const txData = contractInterface.encodeFunctionData('createOriginal', [
+  metadataURI,
+  crop_id,
+  walletAddress
+]);
 
-  const PROVIDER_URL = process.env.PROVIDER_URL;
-  const CONTRACT_ADDRESS = process.env.CONTRACT_ADDRESS;
-  const PRIVATE_KEY = process.env.PRIVATE_KEY?.replace(/^0x/, '');
+const tx = {
+  to: TO,
+  data: txData,
+  value: 0,
+  gasLimit: 300000,
+};
 
-  if (!PROVIDER_URL || !CONTRACT_ADDRESS || !PRIVATE_KEY) {
-    console.log('❌ Chýbajú environment premenné');
-    return res.status(500).json({ error: 'Missing environment variables' });
-  }
+log('🚀 Posielam transakciu...');
+const txResponse = await wallet.sendTransaction(tx);
+log('✅ Transakcia hash:', txResponse.hash);
 
-  try {
-    // Získanie nonce a gas ceny
-    const nonce = await jsonRpcRequest('eth_getTransactionCount', [walletAddress, 'latest']);
-    const gasPrice = await jsonRpcRequest('eth_gasPrice', []);
-    
-    console.log('⛽️ PLYN (Gas):');
-    console.log('   - nonce:', nonce);
-    console.log('   - gasPrice (wei):', gasPrice);
+log('⏳ Čakanie na potvrdenie...');
+const receipt = await txResponse.wait();
+log('📦 Transakcia potvrdená v bloku:', receipt.blockNumber);
 
-    const data = encodeFunctionCall(metadataURI, crop_id, walletAddress);
+return res.status(200).json({
+  success: true,
+  txHash: txResponse.hash,
+  metadataURI,
+  recipient: walletAddress,
+  blockNumber: receipt.blockNumber
+});
 
-    const tx = {
-      nonce: ethers.BigNumber.from(nonce),
-      gasPrice: ethers.BigNumber.from(gasPrice),
-      gasLimit: ethers.BigNumber.from(300000),  // Maximálny gas limit
-      to: CONTRACT_ADDRESS,
-      value: ethers.BigNumber.from(0),
-      data: data,
-      chainId: 111, // Sepolia testnet (môžeš nastaviť na iný chainId pre rôzne siete)
-    };
+} catch (err) { log('❌ Výnimka:', err.message); return res.status(500).json({ error: err.message }); } }
 
-    // Nastavíme providera a signera
-    const provider = new ethers.JsonRpcProvider(PROVIDER_URL);
-    const signer = new ethers.Wallet(PRIVATE_KEY, provider);
-
-    // Podpisujeme transakciu
-    const signedTx = await signer.signTransaction(tx);
-
-    // Posielame transakciu na Infura
-    const txHash = await jsonRpcRequest('eth_sendRawTransaction', [signedTx]);
-
-    console.log('✅ Transakcia potvrdená:', txHash);
-
-    return res.status(200).json({ success: true, txHash: txHash });
-  } catch (err) {
-    console.log('❌ [MINTCHAIN ERROR]', err.message);
-    return res.status(500).json({ error: err.message });
-  }
-}
