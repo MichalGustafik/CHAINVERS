@@ -1,7 +1,7 @@
-import { ethers } from "ethers";
+import { ethers } from 'ethers';  // Opravený import
 
-// Získaj poskytovateľa RPC
-const provider = new ethers.JsonRpcProvider(process.env.PROVIDER_URL);
+// Vytvorenie poskytovateľa RPC
+const provider = new ethers.providers.JsonRpcProvider(process.env.PROVIDER_URL);
 
 // Funkcia na logovanie s timestampom
 const log = (...args) => console.log(`[${new Date().toISOString()}]`, ...args);
