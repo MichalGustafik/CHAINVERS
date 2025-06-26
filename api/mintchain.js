@@ -1,4 +1,4 @@
-import { ethers } from 'ethers';  // Opravený import
+import ethers from 'ethers';  // Použitie predvoleného exportu
 
 // Vytvorenie poskytovateľa RPC
 const provider = new ethers.providers.JsonRpcProvider(process.env.PROVIDER_URL);
