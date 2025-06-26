@@ -14,7 +14,8 @@
     "ethereum",
     "base",
     "raw-sign",
-    "vercel"
+    "vercel",
+    "ethers"
   ],
   "author": "CHAINVERS project",
   "license": "MIT",
