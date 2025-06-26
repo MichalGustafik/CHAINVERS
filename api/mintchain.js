@@ -24,9 +24,12 @@ async function getGasFees() {
 // Funkcia na kódovanie dát pre smart kontrakt
 function encodeFunctionCall(uri, crop, to) {
   const methodID = '0x0f1320cb';
-  const uriHex = ethers.utils.hexlify(ethers.utils.toUtf8Bytes(uri)).padEnd(66, '0');
-  const cropHex = ethers.utils.hexlify(ethers.utils.toUtf8Bytes(crop)).padEnd(66, '0');
+
+  // Odstránenie predpony 0x pred hex kódovaním
+  const uriHex = ethers.utils.hexlify(ethers.utils.toUtf8Bytes(uri)).slice(2).padEnd(64, '0');
+  const cropHex = ethers.utils.hexlify(ethers.utils.toUtf8Bytes(crop)).slice(2).padEnd(64, '0');
   const addrHex = to.toLowerCase().replace(/^0x/, '').padStart(64, '0');
+
   const fullData = methodID + uriHex + cropHex + addrHex;
   log('Encoded data:', fullData);
   return fullData;
