@@ -39,7 +39,7 @@ export default async function handler(req, res) {
   log('   - PROVIDER_URL:', PROVIDER_URL.slice(0, 40) + '...');
 
   try {
-    const provider = new ethers.JsonRpcProvider(PROVIDER_URL);
+    const provider = new ethers.providers.JsonRpcProvider(PROVIDER_URL); // Opravené volanie
     const wallet = new ethers.Wallet(PRIVATE_KEY, provider);
 
     const contractInterface = new ethers.utils.Interface([
