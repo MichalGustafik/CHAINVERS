@@ -136,17 +136,22 @@ export default async function handler(req, res) {
     const txHash = Buffer.from(keccak256.arrayBuffer(encodedTx));
 
     const privKeyBuf = Buffer.from(PRIVATE_KEY, 'hex');
-    const signature = secp256k1.ecdsaSign(txHash, privKeyBuf);
+    const { signature, recid } = secp256k1.ecdsaSign(txHash, privKeyBuf);
 
-    const r = signature.signature.slice(0, 32);
-    const s = signature.signature.slice(32, 64);
-    const v = 111 * 2 + 35 + signature.recid; // EIP-155
+    const r = '0x' + Buffer.from(signature.slice(0, 32)).toString('hex');
+    const s = '0x' + Buffer.from(signature.slice(32, 64)).toString('hex');
+    const v = 111 * 2 + 35 + recid; // Base Sepolia
 
     const signedTx = rlp.encode([
-      tx[0], tx[1], tx[2], tx[3], tx[4], tx[5],
-      `0x${v.toString(16)}`,
-      `0x${r.toString('hex')}`,
-      `0x${s.toString('hex')}`
+      tx[0],              // nonce
+      tx[1],              // gasPrice
+      tx[2],              // gasLimit
+      tx[3],              // to
+      tx[4],              // value
+      tx[5],              // data
+      '0x' + v.toString(16), // v (as hex)
+      r,
+      s
     ]);
 
     const rawTxHex = '0x' + signedTx.toString('hex');
