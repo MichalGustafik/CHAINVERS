@@ -1,26 +1,46 @@
+import fetch from 'node-fetch';
 import { ethers } from 'ethers';
 
-const log = (...args) => console.log(`[${new Date().toISOString()}]`, ...args);
+// Funkcia na získanie ceny plynu z Infura Gas API
+async function getGasPrice() {
+  const url = process.env.INFURA_GAS_API;
 
+  try {
+    const response = await fetch(url);
+    const data = await response.json();
+
+    if (data && data.result && data.result.ProposeGasPrice) {
+      const gasPriceInGwei = data.result.ProposeGasPrice;
+      console.log("[INFO] Aktuálna cena plynu (Gwei):", gasPriceInGwei);
+      return gasPriceInGwei; // Vráti cenu plynu
+    } else {
+      console.error("[ERROR] Chyba pri získavaní ceny plynu z Infura Gas API");
+    }
+  } catch (error) {
+    console.error("[ERROR] Chyba pri volaní Infura Gas API:", error);
+  }
+}
+
+// Funkcia na podpisovanie a odosielanie transakcie
 export default async function handler(req, res) {
-  log('=============================================');
-  log('🔗 MINTCHAIN AKTIVOVANÝ');
+  const log = (...args) => console.log(`[${new Date().toISOString()}]`, ...args);
 
   if (req.method !== 'POST') {
     log('❌ Nepodporovaná HTTP metóda:', req.method);
-    return res.status(405).json({ error: 'Only POST method allowed' });
+    return res.status(405).json({ error: 'Only POST allowed' });
   }
 
   const { metadataURI, crop_id, walletAddress } = req.body;
-
-  log('📥 Prijaté údaje:');
-  log('   - metadataURI:', metadataURI);
-  log('   - crop_id:', crop_id);
-  log('   - walletAddress:', walletAddress);
+  log('📥 PRIJATÉ PARAMETRE:', { metadataURI, crop_id, walletAddress });
 
   if (!metadataURI || !crop_id || !walletAddress) {
-    log('⚠️ Chýbajú požadované údaje.');
+    log('⚠️ Neúplné údaje');
     return res.status(400).json({ error: 'Missing metadataURI, crop_id or walletAddress' });
+  }
+
+  if (!isValidAddress(walletAddress)) {
+    log('⚠️ Neplatná adresa:', walletAddress);
+    return res.status(400).json({ error: 'Invalid wallet address format' });
   }
 
   const PRIVATE_KEY = process.env.PRIVATE_KEY?.replace(/^0x/, '');
@@ -29,53 +49,71 @@ export default async function handler(req, res) {
   const PROVIDER_URL = process.env.PROVIDER_URL;
 
   if (!PRIVATE_KEY || !FROM || !TO || !PROVIDER_URL) {
-    log('❌ Chýbajú environment variables');
+    log('❌ Chýbajú environment premenné');
     return res.status(500).json({ error: 'Missing environment variables' });
   }
 
-  log('🌍 ENV nastavenia:');
-  log('   - FROM_ADDRESS:', FROM);
-  log('   - CONTRACT_ADDRESS:', TO);
-  log('   - PROVIDER_URL:', PROVIDER_URL.slice(0, 40) + '...');
+  log('🌍 ENV nastavenia:', { FROM, TO, PROVIDER_URL: PROVIDER_URL.slice(0, 40) + '...' });
 
   try {
-    const provider = new ethers.providers.JsonRpcProvider(PROVIDER_URL); // Opravené volanie
-    const wallet = new ethers.Wallet(PRIVATE_KEY, provider);
+    const provider = new ethers.JsonRpcProvider(PROVIDER_URL);
+    const signer = new ethers.Wallet(PRIVATE_KEY, provider);
 
-    const contractInterface = new ethers.utils.Interface([
-      'function createOriginal(string memory imageURI, string memory cropId, address to)'
-    ]);
+    // Získanie ceny plynu z Infura Gas API
+    const gasPrice = await getGasPrice();
 
-    const txData = contractInterface.encodeFunctionData('createOriginal', [
-      metadataURI,
-      crop_id,
-      walletAddress
-    ]);
+    // Získanie nonce pre transakciu
+    const nonce = await provider.getTransactionCount(FROM, 'latest');
+    log('⛽️ PLYN (Gas):', { nonce, gasPrice });
 
+    // Zakódovanie funkcie pre mintovanie
+    const data = encodeFunctionCall(metadataURI, crop_id, walletAddress);
+    const gasLimit = 3000000; // Predpokladaný gas limit pre túto transakciu
+
+    // Príprava transakcie
     const tx = {
+      nonce,
+      gasLimit,
+      gasPrice: ethers.utils.parseUnits(gasPrice.toString(), 'gwei'),
       to: TO,
-      data: txData,
-      value: 0,
-      gasLimit: 300000,
+      value: ethers.BigNumber.from(0),
+      data,
+      chainId: 11155111 // Sepolia testnet
     };
 
     log('🚀 Posielam transakciu...');
-    const txResponse = await wallet.sendTransaction(tx);
-    log('✅ Transakcia hash:', txResponse.hash);
 
-    log('⏳ Čakanie na potvrdenie...');
+    // Podpisovanie a odoslanie transakcie
+    const txResponse = await signer.sendTransaction(tx);
+    log('✅ TX Hash:', txResponse.hash);
+
+    // Čakanie na potvrdenie transakcie
     const receipt = await txResponse.wait();
-    log('📦 Transakcia potvrdená v bloku:', receipt.blockNumber);
+    log('📦 Transakcia potvrdená:', { blockNumber: receipt.blockNumber });
 
     return res.status(200).json({
       success: true,
       txHash: txResponse.hash,
       metadataURI,
-      recipient: walletAddress,
       blockNumber: receipt.blockNumber
     });
   } catch (err) {
-    log('❌ Výnimka:', err.message);
+    log('❌ Chyba pri spracovaní transakcie:', err.message);
     return res.status(500).json({ error: err.message });
   }
+}
+
+// Funkcia na kontrolu platnosti adresy
+function isValidAddress(addr) {
+  return /^0x[a-fA-F0-9]{40}$/.test(addr);
+}
+
+// Funkcia na zakódovanie funkcie mintovania
+function encodeFunctionCall(uri, crop, to) {
+  const methodID = '0x0f1320cb'; // Prvé 4 bajty z hash funkcie "createOriginal(string,string,address)"
+  const uriHex = ethers.utils.hexlify(ethers.utils.toUtf8Bytes(uri)).padEnd(66, '0');
+  const cropHex = ethers.utils.hexlify(ethers.utils.toUtf8Bytes(crop)).padEnd(66, '0');
+  const addrHex = to.toLowerCase().replace(/^0x/, '').padStart(64, '0');
+
+  return methodID + uriHex + cropHex + addrHex;
 }
