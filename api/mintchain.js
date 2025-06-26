@@ -1,7 +1,7 @@
 import crypto from 'crypto';
 import https from 'https';
 import rlp from 'rlp';
-import { keccak256 } from 'js-sha3';
+import pkg from 'js-sha3';
 import secp256k1 from 'secp256k1';
 
 // 🪵 Logovanie s časovou značkou
