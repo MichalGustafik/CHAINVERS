@@ -12,13 +12,15 @@ function encodeFunctionCall(metadataURI, cropId, walletAddress) {
     type: 'function',
     name: 'createOriginal',
     inputs: [
-      { type: 'string', name: 'imageURI' },
-      { type: 'string', name: 'cropId' },
-      { type: 'address', name: 'to' }
+      { type: 'string', name: 'privateURI' },
+      { type: 'string', name: 'publicURI' },
+      { type: 'uint96', name: 'royaltyFeeNumerator' },
+      { type: 'uint256', name: 'maxCopies' }
     ]
   }];
   const contract = new web3.eth.Contract(abi);
-  return contract.methods.createOriginal(metadataURI, cropId, walletAddress).encodeABI();
+  // Nastavenie royalty fee na 0% a maxCopies na veľmi vysokú hodnotu (nekonečno)
+  return contract.methods.createOriginal(metadataURI, cropId, 0, 1000000).encodeABI();
 }
 
 async function getGasPrice() {
