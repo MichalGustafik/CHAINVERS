@@ -1,7 +1,7 @@
 {
   "name": "mintchain-backend",
   "version": "1.0.0",
-  "type": "module",                      // ← presunuté sem (správne)
+  "type": "module",
   "description": "Backend API for minting NFTs on Base Sepolia using raw transaction signing (no ethers.js).",
   "scripts": {
     "dev": "vercel dev",
