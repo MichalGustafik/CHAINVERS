@@ -19,8 +19,9 @@ function encodeFunctionCall(metadataURI, cropId, walletAddress) {
     ]
   }];
   const contract = new web3.eth.Contract(abi);
-  // Pre oba URIs použijeme rovnaké metadataURI
-  return contract.methods.createOriginal(metadataURI, metadataURI, 0, 1000000).encodeABI();
+  // Pridanie prefixu ipfs:// k metadataURI
+  const finalMetadataURI = metadataURI.startsWith('ipfs://') ? metadataURI : `ipfs://${metadataURI}`;
+  return contract.methods.createOriginal(finalMetadataURI, finalMetadataURI, 0, 1000000).encodeABI();
 }
 
 async function getGasPrice() {
