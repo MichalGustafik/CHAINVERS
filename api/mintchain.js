@@ -1,12 +1,15 @@
 import Web3 from 'web3';
+import axios from 'axios';
 
 const web3 = new Web3(process.env.PROVIDER_URL);
 const log = (...args) => console.log(`[${new Date().toISOString()}]`, ...args);
 
+// Funkcia na kontrolu platnej adresy
 function isValidAddress(addr) {
   return web3.utils.isAddress(addr);
 }
 
+// Funkcia na zakódovanie volania smart kontraktu
 function encodeFunctionCall(metadataURI, cropId, walletAddress) {
   const abi = [{
     type: 'function',
@@ -19,6 +22,20 @@ function encodeFunctionCall(metadataURI, cropId, walletAddress) {
   }];
   const contract = new web3.eth.Contract(abi);
   return contract.methods.createOriginal(metadataURI, cropId, walletAddress).encodeABI();
+}
+
+// Funkcia na získanie ceny za gas z Infura Gas API
+async function getGasPrice() {
+  try {
+    const response = await axios.get(`https://gas.api.infura.io/v3/${process.env.INFURA_GAS_API}/gas-price`);
+    if (response.data && response.data.gasPrice) {
+      return response.data.gasPrice;
+    }
+    throw new Error('Failed to fetch gas price from Infura');
+  } catch (err) {
+    log('❌ Gas API Error:', err.message);
+    return null;
+  }
 }
 
 export default async function handler(req, res) {
@@ -51,7 +68,10 @@ export default async function handler(req, res) {
     log(`🔎 Chain ID: ${chainId}`);
     log(`🏦 Balance: ${balanceEth} ETH`);
 
-    const gasPrice = await web3.eth.getGasPrice();
+    // Získanie ceny za gas z Infura
+    const infuraGasPrice = await getGasPrice();
+    const gasPrice = infuraGasPrice || await web3.eth.getGasPrice();  // Ak Infura nevráti cenu, použije sa Web3
+
     const data = encodeFunctionCall(metadataURI, crop_id, walletAddress);
     const gasLimit = await web3.eth.estimateGas({ from: FROM, to: TO, data });
 
