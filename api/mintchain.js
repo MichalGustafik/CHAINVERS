@@ -19,8 +19,8 @@ function encodeFunctionCall(metadataURI, cropId, walletAddress) {
     ]
   }];
   const contract = new web3.eth.Contract(abi);
-  // Nastavenie royalty fee na 0% a maxCopies na veľmi vysokú hodnotu (nekonečno)
-  return contract.methods.createOriginal(metadataURI, cropId, 0, 1000000).encodeABI();
+  // Pre oba URIs použijeme rovnaké metadataURI
+  return contract.methods.createOriginal(metadataURI, metadataURI, 0, 1000000).encodeABI();
 }
 
 async function getGasPrice() {
@@ -43,7 +43,12 @@ export default async function handler(req, res) {
 
   const { metadataURI, crop_id, walletAddress } = req.body;
 
-  if (!metadataURI || !crop_id || !walletAddress || !isValidAddress(walletAddress)) {
+  // Skontroluj, že metadataURI začína správnym prefixom
+  if (!metadataURI || (!metadataURI.startsWith('ipfs://') && !metadataURI.startsWith('https://'))) {
+    return res.status(400).json({ error: 'Invalid metadataURI. Should be an IPFS URI.' });
+  }
+
+  if (!crop_id || !walletAddress || !isValidAddress(walletAddress)) {
     return res.status(400).json({ error: 'Missing or invalid parameters' });
   }
 
