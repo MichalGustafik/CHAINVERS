@@ -1,8 +1,9 @@
+// ✅ chainwebhook.js
+import Web3 from 'web3';
 import FormData from 'form-data';
 import fetch from 'node-fetch';
 import { Readable } from 'stream';
 
-const web3 = new Web3(process.env.PROVIDER_URL);
 const globalLog = (...args) => console.log(`[${new Date().toISOString()}]`, ...args);
 
 export default async function handler(req, res) {
@@ -87,7 +88,7 @@ export default async function handler(req, res) {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        metadataURI, // Posielame správne formátovaný metadataURI
+        metadataURI,
         crop_id,
         walletAddress: wallet,
       }),
