@@ -70,14 +70,14 @@ export default async function handler(req, res) {
       return res.status(500).json({ error: "Nepodarilo sa nahrať metadáta", detail: metadataResult });
     }
 
-    // ⛳ ZMENA TU: posielame `imageURI` namiesto `metadataURI`
+    // ✅ OPRAVA TU
     log("🚀 [CHAIN] Volanie mintchain...");
     const mintCall = await fetch(process.env.MINTCHAIN_API_URL, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        metadataURI: imageURI,  // ← toto je zmena!
-        crop_id,
+        imageURI,
+        cropId: crop_id,
         walletAddress: wallet,
       }),
     });
