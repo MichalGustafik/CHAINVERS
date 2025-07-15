@@ -26,7 +26,6 @@ export default async function handler(req, res) {
       return res.status(400).json({ error: "Chýbajú údaje" });
     }
 
-    // Konverzia base64 na buffer
     const buffer = Buffer.from(image_base64, "base64");
     const stream = Readable.from(buffer);
 
@@ -34,7 +33,6 @@ export default async function handler(req, res) {
     const formData = new FormData();
     formData.append("file", stream, `${crop_id}.png`);
 
-    // Nahrávanie obrázka na IPFS
     const imageUpload = await fetch("https://api.pinata.cloud/pinning/pinFileToIPFS", {
       method: "POST",
       headers: {
@@ -46,18 +44,16 @@ export default async function handler(req, res) {
     const imageResult = await imageUpload.json();
     log("🖼️ [PINATA] Výsledok obrázka:", imageResult);
 
-    // Skontrolujte, či bolo nahranie úspešné
     if (!imageResult.IpfsHash) {
       log("❌ [PINATA] Nahrávanie obrázka zlyhalo:", imageResult);
       return res.status(500).json({ error: "Nepodarilo sa nahrať obrázok", detail: imageResult });
     }
 
-    // Správne formátovanie URI
     const imageURI = `ipfs://${imageResult.IpfsHash}`;
     const metadata = {
       name: `Chainvers NFT ${crop_id}`,
       description: "NFT z CHAINVERS",
-      image: imageURI, // URI musí byť správne nastavené
+      image: imageURI,
       attributes: [{ trait_type: "Crop ID", value: crop_id }],
     };
 
@@ -104,14 +100,4 @@ export default async function handler(req, res) {
       return res.status(500).json({ error: "Mintovanie zlyhalo", detail: mintResult });
     }
 
-    return res.status(200).json({
-      success: true,
-      message: "NFT vytvorený",
-      metadata_cid: metadataResult.IpfsHash,
-      txHash: mintResult.txHash,
-    });
-  } catch (err) {
-    log("❌ [VÝNIMKA]", err.message);
-    return res.status(500).json({ error: "Interná chyba servera", detail: err.message });
-  }
-}
+    return res.status(
