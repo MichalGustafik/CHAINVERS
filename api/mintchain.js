@@ -3,12 +3,10 @@ import Web3 from 'web3';
 const web3 = new Web3(process.env.PROVIDER_URL);
 const log = (...args) => console.log(`[${new Date().toISOString()}]`, ...args);
 
-// Funkcia na kontrolu platnej adresy
 function isValidAddress(addr) {
   return web3.utils.isAddress(addr);
 }
 
-// Funkcia na zakódovanie volania smart kontraktu
 function encodeFunctionCall(privateURI, publicURI, cropId, walletAddress) {
   const abi = [{
     type: 'function',
@@ -22,13 +20,12 @@ function encodeFunctionCall(privateURI, publicURI, cropId, walletAddress) {
   }];
   const contract = new web3.eth.Contract(abi);
 
-  log(`📎 privateURI to send in contract: ${privateURI}`);
-  log(`📎 publicURI to send in contract: ${publicURI}`);
+  log(`📎 metadataURI to send in contract: ${privateURI}, ${publicURI}`);
 
+  // Pre oba URIs použijeme rovnaké metadataURI
   return contract.methods.createOriginal(privateURI, publicURI, 0, 1000000).encodeABI();
 }
 
-// Funkcia na získanie ceny za gas
 async function getGasPrice() {
   try {
     const gasPrice = await web3.eth.getGasPrice();
@@ -49,7 +46,7 @@ export default async function handler(req, res) {
 
   const { metadataURI, crop_id, walletAddress } = req.body;
 
-  // Skontroluj, že metadataURI začína správnym prefixom
+  // Overte, či metadataURI začína správnym prefixom
   if (!metadataURI || (!metadataURI.startsWith('ipfs://') && !metadataURI.startsWith('https://'))) {
     return res.status(400).json({ error: 'Invalid metadataURI. Should be an IPFS URI.' });
   }
@@ -77,10 +74,11 @@ export default async function handler(req, res) {
     log(`🔗 Chain ID: ${chainId}`);
     log(`💰 Wallet balance: ${balanceEth} ETH`);
 
-    const gasPrice = await getGasPrice();
+    // Zakódujeme funkciu a odhadneme gas
     const data = encodeFunctionCall(metadataURI, metadataURI, crop_id, walletAddress);  // Používame obe hodnoty pre privateURI a publicURI
     const gasLimit = await web3.eth.estimateGas({ from: FROM, to: TO, data });
 
+    const gasPrice = await getGasPrice();
     const gasCost = web3.utils.toBN(gasPrice).mul(web3.utils.toBN(gasLimit));
     const balanceBN = web3.utils.toBN(balance);
 
