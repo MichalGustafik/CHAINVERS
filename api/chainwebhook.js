@@ -100,4 +100,14 @@ export default async function handler(req, res) {
       return res.status(500).json({ error: "Mintovanie zlyhalo", detail: mintResult });
     }
 
-    return res.status(
+    return res.status(200).json({
+      success: true,
+      message: "NFT vytvorený",
+      metadata_cid: metadataResult.IpfsHash,
+      txHash: mintResult.txHash,
+    });
+  } catch (err) {
+    log("❌ [VÝNIMKA]", err.message);
+    return res.status(500).json({ error: "Interná chyba servera", detail: err.message });
+  }
+}
