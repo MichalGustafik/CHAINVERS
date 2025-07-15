@@ -1,8 +1,13 @@
+import FormData from 'form-data';
+import fetch from 'node-fetch';
+
+const log = (...args) => console.log(...args);
+
 export default async function handler(req, res) {
   const now = new Date().toISOString();
   const log = (...args) => console.log(`[${now}]`, ...args);
 
-  if (req.method !== "POST") {
+  if (req.method !== 'POST') {
     log("❌ [CHYBA] Nepodporovaná HTTP metóda:", req.method);
     return res.status(405).json({ error: "Method Not Allowed" });
   }
@@ -37,13 +42,10 @@ export default async function handler(req, res) {
     log("🖼️ [PINATA] Výsledok obrázka:", imageResult);
 
     if (!imageResult.IpfsHash) {
-      log("❌ [PINATA] Nepodarilo sa nahrať obrázok.");
       return res.status(500).json({ error: "Nepodarilo sa nahrať obrázok", detail: imageResult });
     }
 
     const imageURI = `ipfs://${imageResult.IpfsHash}`;
-    log("🔗 [INFO] imageURI:", imageURI);
-
     const metadata = {
       name: `Chainvers NFT ${crop_id}`,
       description: "NFT z CHAINVERS",
@@ -70,13 +72,12 @@ export default async function handler(req, res) {
     log("📄 [PINATA] Výsledok metadát:", metadataResult);
 
     if (!metadataResult.IpfsHash) {
-      log("❌ [PINATA] Nepodarilo sa nahrať metadáta.");
       return res.status(500).json({ error: "Nepodarilo sa nahrať metadáta", detail: metadataResult });
     }
 
     const metadataURI = `ipfs://${metadataResult.IpfsHash}`;
-    log("🔗 [INFO] metadataURI:", metadataURI);
 
+    // ✅ POSIELAME SPRÁVNE NÁZVY PREMENNÝCH
     log("🚀 [CHAIN] Volanie mintchain...");
     const mintCall = await fetch(process.env.MINTCHAIN_API_URL, {
       method: "POST",
@@ -84,7 +85,7 @@ export default async function handler(req, res) {
       body: JSON.stringify({
         metadataURI,
         crop_id,
-        walletAddress: wallet,
+        walletAddress: wallet, // <- správne premenované
       }),
     });
 
