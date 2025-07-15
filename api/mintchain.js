@@ -1,5 +1,4 @@
 import Web3 from 'web3';
-import axios from 'axios';
 
 const web3 = new Web3(process.env.PROVIDER_URL);
 const log = (...args) => console.log(`[${new Date().toISOString()}]`, ...args);
@@ -24,20 +23,6 @@ function encodeFunctionCall(imageURI, cropId, walletAddress) {
   return contract.methods.createOriginal(imageURI, cropId, walletAddress).encodeABI();
 }
 
-// ✅ Voliteľné – Získanie gas price z Infura, fallback na Web3 ak nefunguje
-async function getGasPrice() {
-  try {
-    const response = await axios.get(`https://gas.api.infura.io/v3/${process.env.INFURA_GAS_API}/gas-price`);
-    if (response.data && response.data.gasPrice) {
-      return response.data.gasPrice;
-    }
-    throw new Error('Failed to fetch gas price from Infura');
-  } catch (err) {
-    log('❌ Gas API Error:', err.message);
-    return null;
-  }
-}
-
 export default async function handler(req, res) {
   log('===== MINTCHAIN START =====');
 
@@ -46,7 +31,6 @@ export default async function handler(req, res) {
 
   const { imageURI, cropId, walletAddress } = req.body;
 
-  // ✅ Log vstupných údajov
   log(`🔗 Calling createOriginal with:`);
   log(`   imageURI: ${imageURI}`);
   log(`   cropId: ${cropId}`);
@@ -75,9 +59,8 @@ export default async function handler(req, res) {
     log(`🔎 Chain ID: ${chainId}`);
     log(`💰 Wallet balance: ${balanceEth} ETH`);
 
-    // ✅ Získaj gasPrice – fallback ak zlyhá Infura
-    const infuraGasPrice = await getGasPrice();
-    const gasPrice = infuraGasPrice || await web3.eth.getGasPrice();
+    // ✅ Čisto len getGasPrice z uzla
+    const gasPrice = await web3.eth.getGasPrice();
 
     const data = encodeFunctionCall(imageURI, cropId, walletAddress);
     const gasLimit = await web3.eth.estimateGas({ from: FROM, to: TO, data });
