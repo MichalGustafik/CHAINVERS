@@ -1,3 +1,4 @@
+// ✅ mintchain.js
 import Web3 from 'web3';
 
 const web3 = new Web3(process.env.PROVIDER_URL);
@@ -7,7 +8,14 @@ function isValidAddress(addr) {
   return web3.utils.isAddress(addr);
 }
 
-function encodeFunctionCall(privateURI, publicURI) {
+function encodeFunctionCall(metadataURI) {
+  const ensureIPFS = (uri) => {
+    return uri.startsWith('ipfs://') ? uri : `ipfs://${uri}`;
+  };
+
+  const privateURI = ensureIPFS(metadataURI);
+  const publicURI = ensureIPFS(metadataURI);
+
   const abi = [{
     type: 'function',
     name: 'createOriginal',
@@ -18,9 +26,9 @@ function encodeFunctionCall(privateURI, publicURI) {
       { type: 'uint256', name: 'maxCopies' }
     ]
   }];
+
   const contract = new web3.eth.Contract(abi);
-  log(`📎 privateURI to send in contract: ${privateURI}`);
-  log(`📎 publicURI to send in contract: ${publicURI}`);
+  log(`📌 Sending to contract:\n   privateURI: ${privateURI}\n   publicURI: ${publicURI}`);
   return contract.methods.createOriginal(privateURI, publicURI, 0, 1000000).encodeABI();
 }
 
@@ -44,7 +52,7 @@ export default async function handler(req, res) {
 
   const { metadataURI, crop_id, walletAddress } = req.body;
 
-  if (!metadataURI || (!metadataURI.startsWith('ipfs://') && !metadataURI.startsWith('https://'))) {
+  if (!metadataURI || (!metadataURI.startsWith('ipfs://') && !metadataURI.startsWith('https://') && !metadataURI.startsWith('Qm'))) {
     return res.status(400).json({ error: 'Invalid metadataURI. Should be an IPFS URI.' });
   }
 
@@ -70,9 +78,6 @@ export default async function handler(req, res) {
     log('   cropId:', crop_id);
     log('   walletAddress:', walletAddress);
 
-    const privateURI = `ipfs://${metadataURI}`; // Add ipfs prefix
-    const publicURI = privateURI; // Same as privateURI in this case, can be changed if needed
-
     const chainId = await web3.eth.getChainId();
     const balance = await web3.eth.getBalance(FROM);
     const balanceEth = web3.utils.fromWei(balance, 'ether');
@@ -80,7 +85,7 @@ export default async function handler(req, res) {
     log(`💰 Wallet balance: ${balanceEth} ETH`);
 
     const gasPrice = await getGasPrice();
-    const data = encodeFunctionCall(privateURI, publicURI);
+    const data = encodeFunctionCall(metadataURI);
     const gasLimit = await web3.eth.estimateGas({ from: FROM, to: TO, data });
 
     const gasCost = web3.utils.toBN(gasPrice).mul(web3.utils.toBN(gasLimit));
