@@ -4,10 +4,12 @@ import axios from 'axios';
 const web3 = new Web3(process.env.PROVIDER_URL);
 const log = (...args) => console.log(`[${new Date().toISOString()}]`, ...args);
 
+// ✅ Funkcia na kontrolu platnej adresy
 function isValidAddress(addr) {
   return web3.utils.isAddress(addr);
 }
 
+// ✅ Funkcia na zakódovanie volania smart kontraktu
 function encodeFunctionCall(imageURI, cropId, walletAddress) {
   const abi = [{
     type: 'function',
@@ -22,6 +24,7 @@ function encodeFunctionCall(imageURI, cropId, walletAddress) {
   return contract.methods.createOriginal(imageURI, cropId, walletAddress).encodeABI();
 }
 
+// ✅ Voliteľné – Získanie gas price z Infura, fallback na Web3 ak nefunguje
 async function getGasPrice() {
   try {
     const response = await axios.get(`https://gas.api.infura.io/v3/${process.env.INFURA_GAS_API}/gas-price`);
@@ -42,6 +45,13 @@ export default async function handler(req, res) {
     return res.status(405).json({ error: 'Only POST allowed' });
 
   const { imageURI, cropId, walletAddress } = req.body;
+
+  // ✅ Log vstupných údajov
+  log(`🔗 Calling createOriginal with:`);
+  log(`   imageURI: ${imageURI}`);
+  log(`   cropId: ${cropId}`);
+  log(`   walletAddress: ${walletAddress}`);
+
   if (!imageURI || !cropId || !walletAddress || !isValidAddress(walletAddress)) {
     return res.status(400).json({ error: 'Missing or invalid parameters' });
   }
@@ -65,6 +75,7 @@ export default async function handler(req, res) {
     log(`🔎 Chain ID: ${chainId}`);
     log(`💰 Wallet balance: ${balanceEth} ETH`);
 
+    // ✅ Získaj gasPrice – fallback ak zlyhá Infura
     const infuraGasPrice = await getGasPrice();
     const gasPrice = infuraGasPrice || await web3.eth.getGasPrice();
 
