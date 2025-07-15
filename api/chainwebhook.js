@@ -1,3 +1,15 @@
+// 🔍 Pomocná funkcia na overenie dostupnosti IPFS obrázka cez gateway
+async function waitForImageAvailability(imageUrl, maxAttempts = 5, delayMs = 3000) {
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    const response = await fetch(imageUrl, { method: 'HEAD' });
+    if (response.ok) return true;
+
+    console.log(`⏳ [ČAKANIE] Pokus ${attempt}/${maxAttempts} – obrázok ešte nie je dostupný.`);
+    await new Promise((resolve) => setTimeout(resolve, delayMs));
+  }
+  return false;
+}
+
 export default async function handler(req, res) {
   const now = new Date().toISOString();
   const log = (...args) => console.log(`[${now}]`, ...args);
@@ -40,8 +52,18 @@ export default async function handler(req, res) {
       return res.status(500).json({ error: "Nepodarilo sa nahrať obrázok", detail: imageResult });
     }
 
-    // 🔧 JEDINÁ ZMENA TU:
     const imageURI = `https://gateway.pinata.cloud/ipfs/${imageResult.IpfsHash}`;
+
+    // 🔍 Overenie dostupnosti obrázka cez HTTP
+    log("🔍 Overujem dostupnosť obrázka...");
+    const available = await waitForImageAvailability(imageURI);
+    if (!available) {
+      log("❌ Obrázok sa nepodarilo načítať z gateway ani po opakovaní.");
+      return res.status(500).json({
+        error: "Obrázok nie je dostupný cez IPFS gateway",
+        ipfsHash: imageResult.IpfsHash
+      });
+    }
 
     const metadata = {
       name: `Chainvers NFT ${crop_id}`,
@@ -74,7 +96,6 @@ export default async function handler(req, res) {
 
     const metadataURI = `ipfs://${metadataResult.IpfsHash}`;
 
-    // ✅ POSIELAME SPRÁVNE NÁZVY PREMENNÝCH
     log("🚀 [CHAIN] Volanie mintchain...");
     const mintCall = await fetch(process.env.MINTCHAIN_API_URL, {
       method: "POST",
@@ -82,7 +103,7 @@ export default async function handler(req, res) {
       body: JSON.stringify({
         metadataURI,
         crop_id,
-        walletAddress: wallet, // <- správne premenované
+        walletAddress: wallet,
       }),
     });
 
@@ -103,4 +124,4 @@ export default async function handler(req, res) {
     log("❌ [VÝNIMKA]", err.message);
     return res.status(500).json({ error: "Interná chyba servera", detail: err.message });
   }
-}
+                    }
