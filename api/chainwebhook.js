@@ -1,8 +1,5 @@
-// ✅ chainwebhook.js
-import Web3 from 'web3';
 import FormData from 'form-data';
 import fetch from 'node-fetch';
-import { Readable } from 'stream';
 
 const globalLog = (...args) => console.log(`[${new Date().toISOString()}]`, ...args);
 
@@ -28,16 +25,19 @@ export default async function handler(req, res) {
     }
 
     const buffer = Buffer.from(image_base64, "base64");
-    const stream = Readable.from(buffer);
 
     log("📡 [PINATA] Nahrávanie obrázka...");
     const formData = new FormData();
-    formData.append("file", stream, `${crop_id}.png`);
+    formData.append("file", buffer, {
+      filename: `${crop_id}.png`,
+      contentType: "image/png"
+    });
 
     const imageUpload = await fetch("https://api.pinata.cloud/pinning/pinFileToIPFS", {
       method: "POST",
       headers: {
         Authorization: `Bearer ${process.env.PINATA_JWT}`,
+        ...formData.getHeaders(),
       },
       body: formData,
     });
@@ -107,6 +107,7 @@ export default async function handler(req, res) {
       metadata_cid: metadataResult.IpfsHash,
       txHash: mintResult.txHash,
     });
+
   } catch (err) {
     log("❌ [VÝNIMKA]", err.message);
     return res.status(500).json({ error: "Interná chyba servera", detail: err.message });
