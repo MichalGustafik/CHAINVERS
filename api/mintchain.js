@@ -3,12 +3,12 @@ import Web3 from 'web3';
 const web3 = new Web3(process.env.PROVIDER_URL);
 const log = (...args) => console.log(`[${new Date().toISOString()}]`, ...args);
 
-// ✅ Funkcia na kontrolu platnej adresy
+// Funkcia na kontrolu platnej adresy
 function isValidAddress(addr) {
   return web3.utils.isAddress(addr);
 }
 
-// ✅ Funkcia na zakódovanie volania smart kontraktu
+// Funkcia na zakódovanie volania smart kontraktu
 function encodeFunctionCall(metadataURI, cropId, walletAddress) {
   const abi = [{
     type: 'function',
@@ -28,7 +28,7 @@ function encodeFunctionCall(metadataURI, cropId, walletAddress) {
   return contract.methods.createOriginal(metadataURI, metadataURI, 0, 1000000).encodeABI();
 }
 
-// ✅ Funkcia pre získanie gas price
+// Funkcia na získanie ceny za gas z Infura alebo poskytovateľa
 async function getGasPrice() {
   try {
     const gasPrice = await web3.eth.getGasPrice();
