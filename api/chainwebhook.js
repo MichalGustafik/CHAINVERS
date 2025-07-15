@@ -28,7 +28,7 @@ export default async function handler(req, res) {
     const buffer = Buffer.from(image_base64, "base64");
     log("📡 [PINATA] Nahrávanie obrázka...");
     const formData = new FormData();
-    formData.append("file", new Blob([buffer]), `${crop_id}.png`);
+    formData.append("file", buffer, `${crop_id}.png`);
 
     const imageUpload = await fetch("https://api.pinata.cloud/pinning/pinFileToIPFS", {
       method: "POST",
