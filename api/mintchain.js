@@ -7,8 +7,8 @@ function isValidAddress(addr) {
   return web3.utils.isAddress(addr);
 }
 
-function encodeFunctionCall(metadataURI) {
-  const abi = {
+function encodeCreateOriginalCall(privateURI, publicURI, royalty = 0, maxCopies = 1000000) {
+  const funcAbi = {
     name: 'createOriginal',
     type: 'function',
     inputs: [
@@ -19,15 +19,13 @@ function encodeFunctionCall(metadataURI) {
     ]
   };
 
-  const encoded = web3.eth.abi.encodeFunctionCall(abi, [
-    metadataURI,
-    metadataURI,
-    '0',
-    '1000000'
-  ]);
+  const signature = web3.eth.abi.encodeFunctionSignature(funcAbi);
+  const params = web3.eth.abi.encodeParameters(
+    ['string', 'string', 'uint96', 'uint256'],
+    [privateURI, publicURI, royalty, maxCopies]
+  );
 
-  log(`📌 Sending to contract:\n   privateURI: ${metadataURI}\n   publicURI: ${metadataURI}`);
-  return encoded;
+  return signature + params.slice(2); // odstrániť "0x"
 }
 
 async function getGasPrice() {
@@ -83,45 +81,9 @@ export default async function handler(req, res) {
     log(`💰 Wallet balance: ${balanceEth} ETH`);
 
     const gasPrice = await getGasPrice();
-    const data = encodeFunctionCall(metadataURI);
+    const data = encodeCreateOriginalCall(metadataURI, metadataURI);
+    log('📌 Encoded data:', data);
+
     const gasLimit = await web3.eth.estimateGas({ from: FROM, to: TO, data });
 
-    const gasCost = web3.utils.toBN(gasPrice).mul(web3.utils.toBN(gasLimit));
-    const balanceBN = web3.utils.toBN(balance);
-
-    log(`📏 gasLimit: ${gasLimit}`);
-    log(`💵 Estimated TX cost: ${web3.utils.fromWei(gasCost)} ETH`);
-
-    if (balanceBN.lt(gasCost)) {
-      return res.status(400).json({
-        error: 'Insufficient ETH for gas fees',
-        requiredETH: web3.utils.fromWei(gasCost),
-        walletBalance: balanceEth,
-      });
-    }
-
-    const tx = {
-      from: FROM,
-      to: TO,
-      nonce: await web3.eth.getTransactionCount(FROM),
-      gasPrice: web3.utils.toHex(gasPrice),
-      gas: web3.utils.toHex(gasLimit),
-      value: '0x0',
-      data
-    };
-
-    const signedTx = await web3.eth.accounts.signTransaction(tx, PRIVATE_KEY);
-    const receipt = await web3.eth.sendSignedTransaction(signedTx.rawTransaction);
-
-    log(`✅ Mint successful! TX: ${receipt.transactionHash}`);
-    return res.status(200).json({
-      success: true,
-      txHash: receipt.transactionHash,
-      blockNumber: receipt.blockNumber
-    });
-
-  } catch (err) {
-    log('❌ ERROR:', err.message || err);
-    return res.status(500).json({ error: err.message || 'Unexpected error occurred.' });
-  }
-}
+    const gasCost =
