@@ -44,6 +44,7 @@ export default async function handler(req, res) {
     log("🖼️ [PINATA] Výsledok obrázka:", imageResult);
 
     if (!imageResult.IpfsHash) {
+      log("❌ [PINATA] Nahrávanie obrázka zlyhalo:", imageResult);
       return res.status(500).json({ error: "Nepodarilo sa nahrať obrázok", detail: imageResult });
     }
 
@@ -74,6 +75,7 @@ export default async function handler(req, res) {
     log("📄 [PINATA] Výsledok metadát:", metadataResult);
 
     if (!metadataResult.IpfsHash) {
+      log("❌ [PINATA] Nahrávanie metadát zlyhalo:", metadataResult);
       return res.status(500).json({ error: "Nepodarilo sa nahrať metadáta", detail: metadataResult });
     }
 
