@@ -37,10 +37,13 @@ export default async function handler(req, res) {
     log("🖼️ [PINATA] Výsledok obrázka:", imageResult);
 
     if (!imageResult.IpfsHash) {
+      log("❌ [PINATA] Nepodarilo sa nahrať obrázok.");
       return res.status(500).json({ error: "Nepodarilo sa nahrať obrázok", detail: imageResult });
     }
 
-    const imageURI = `https://ipfs.io/ipfs/${imageResult.IpfsHash}`;
+    const imageURI = `ipfs://${imageResult.IpfsHash}`;
+    log("🔗 [INFO] imageURI:", imageURI);
+
     const metadata = {
       name: `Chainvers NFT ${crop_id}`,
       description: "NFT z CHAINVERS",
@@ -67,17 +70,20 @@ export default async function handler(req, res) {
     log("📄 [PINATA] Výsledok metadát:", metadataResult);
 
     if (!metadataResult.IpfsHash) {
+      log("❌ [PINATA] Nepodarilo sa nahrať metadáta.");
       return res.status(500).json({ error: "Nepodarilo sa nahrať metadáta", detail: metadataResult });
     }
 
-    // ✅ OPRAVA TU
+    const metadataURI = `ipfs://${metadataResult.IpfsHash}`;
+    log("🔗 [INFO] metadataURI:", metadataURI);
+
     log("🚀 [CHAIN] Volanie mintchain...");
     const mintCall = await fetch(process.env.MINTCHAIN_API_URL, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        imageURI,
-        cropId: crop_id,
+        metadataURI,
+        crop_id,
         walletAddress: wallet,
       }),
     });
