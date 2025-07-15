@@ -28,7 +28,7 @@ function encodeFunctionCall(metadataURI, cropId, walletAddress) {
   return contract.methods.createOriginal(metadataURI, metadataURI, 0, 1000000).encodeABI();
 }
 
-// Funkcia na získanie ceny za gas z Infura alebo poskytovateľa
+// Funkcia na získanie ceny za gas
 async function getGasPrice() {
   try {
     const gasPrice = await web3.eth.getGasPrice();
@@ -50,9 +50,7 @@ export default async function handler(req, res) {
   const { metadataURI, crop_id, walletAddress } = req.body;
 
   // Skontroluj, že metadataURI začína správnym prefixom
-  log("🔍 Checking metadataURI format...");
   if (!metadataURI || (!metadataURI.startsWith('ipfs://') && !metadataURI.startsWith('https://'))) {
-    log('❌ Invalid metadataURI format:', metadataURI);
     return res.status(400).json({ error: 'Invalid metadataURI. Should be an IPFS URI.' });
   }
 
