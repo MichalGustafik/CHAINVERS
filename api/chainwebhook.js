@@ -13,6 +13,7 @@ export default async function handler(req, res) {
   log('📥 VSTUP:', { crop_id, wallet, image_base64_length: image_base64?.length });
 
   const buffer = Buffer.from(image_base64, 'base64');
+  log('📡 Pripravujem stream z bufferu...');
   const stream = Readable.from(buffer);
 
   const formData = new FormData();
@@ -23,6 +24,7 @@ export default async function handler(req, res) {
     headers: { Authorization: `Bearer ${process.env.PINATA_JWT}`, ...formData.getHeaders() },
     body: formData,
   });
+
   const imageResult = await imageUpload.json();
   log('🖼️ Pinata obrázok:', imageResult);
   if (!imageResult.IpfsHash) return res.status(500).json({ error: 'Nepodarilo sa nahrať obrázok', detail: imageResult });
@@ -35,6 +37,7 @@ export default async function handler(req, res) {
     headers: { Authorization: `Bearer ${process.env.PINATA_JWT}`, 'Content-Type': 'application/json' },
     body: JSON.stringify({ pinataMetadata: { name: `chainvers-metadata-${crop_id}` }, pinataContent: metadata }),
   });
+
   const metadataResult = await metadataUpload.json();
   log('📄 Pinata metadáta:', metadataResult);
   if (!metadataResult.IpfsHash) return res.status(500).json({ error: 'Nepodarilo sa nahrať metadáta', detail: metadataResult });
@@ -52,6 +55,7 @@ export default async function handler(req, res) {
 
   return res.status(200).json({ success: true, metadata_cid: metadataResult.IpfsHash, txHash: mintResult.txHash });
 }
+
 
 // ✅ mintchain.js
 import Web3 from 'web3';
@@ -75,6 +79,7 @@ function encodeFunctionCall(metadataURI, cropId, walletAddress) {
     ]
   }];
   const contract = new web3.eth.Contract(abi);
+  log(`📎 metadataURI to send in contract: ${metadataURI}`);
   return contract.methods.createOriginal(metadataURI, metadataURI, 0, 1000000).encodeABI();
 }
 
@@ -92,24 +97,31 @@ async function getGasPrice() {
 export default async function handler(req, res) {
   log('===== MINTCHAIN START =====');
 
-  if (req.method !== 'POST') return res.status(405).json({ error: 'Only POST method allowed' });
+  if (req.method !== 'POST') {
+    return res.status(405).json({ error: 'Only POST method allowed' });
+  }
 
   const { metadataURI, crop_id, walletAddress } = req.body;
-  if (!metadataURI || (!metadataURI.startsWith('ipfs://') && !metadataURI.startsWith('https://')))
-    return res.status(400).json({ error: 'Invalid metadataURI. Should be an IPFS URI.' });
 
-  if (!crop_id || !walletAddress || !isValidAddress(walletAddress))
+  if (!metadataURI || (!metadataURI.startsWith('ipfs://') && !metadataURI.startsWith('https://'))) {
+    return res.status(400).json({ error: 'Invalid metadataURI. Should be an IPFS URI.' });
+  }
+
+  if (!crop_id || !walletAddress || !isValidAddress(walletAddress)) {
     return res.status(400).json({ error: 'Missing or invalid parameters' });
+  }
 
   const PRIVATE_KEY = process.env.PRIVATE_KEY;
   const FROM = process.env.FROM_ADDRESS;
   const TO = process.env.CONTRACT_ADDRESS;
 
-  if (!PRIVATE_KEY || !FROM || !TO || !process.env.PROVIDER_URL)
+  if (!PRIVATE_KEY || !FROM || !TO || !process.env.PROVIDER_URL) {
     return res.status(500).json({ error: 'Missing environment variables' });
+  }
 
-  if (!isValidAddress(FROM) || !isValidAddress(TO))
+  if (!isValidAddress(FROM) || !isValidAddress(TO)) {
     return res.status(500).json({ error: 'Invalid FROM or CONTRACT_ADDRESS' });
+  }
 
   try {
     const chainId = await web3.eth.getChainId();
@@ -150,7 +162,11 @@ export default async function handler(req, res) {
     const receipt = await web3.eth.sendSignedTransaction(signedTx.rawTransaction);
 
     log(`✅ Mint successful! TX: ${receipt.transactionHash}`);
-    return res.status(200).json({ success: true, txHash: receipt.transactionHash, blockNumber: receipt.blockNumber });
+    return res.status(200).json({
+      success: true,
+      txHash: receipt.transactionHash,
+      blockNumber: receipt.blockNumber
+    });
 
   } catch (err) {
     log('❌ ERROR:', err.message || err);
