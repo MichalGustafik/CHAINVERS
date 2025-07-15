@@ -1,4 +1,3 @@
-// ✅ mintchain.js
 import Web3 from 'web3';
 
 const web3 = new Web3(process.env.PROVIDER_URL);
@@ -9,27 +8,26 @@ function isValidAddress(addr) {
 }
 
 function encodeFunctionCall(metadataURI) {
-  const ensureIPFS = (uri) => {
-    return uri.startsWith('ipfs://') ? uri : `ipfs://${uri}`;
-  };
-
-  const privateURI = ensureIPFS(metadataURI);
-  const publicURI = ensureIPFS(metadataURI);
-
-  const abi = [{
-    type: 'function',
+  const abi = {
     name: 'createOriginal',
+    type: 'function',
     inputs: [
       { type: 'string', name: 'privateURI' },
       { type: 'string', name: 'publicURI' },
       { type: 'uint96', name: 'royaltyFeeNumerator' },
       { type: 'uint256', name: 'maxCopies' }
     ]
-  }];
+  };
 
-  const contract = new web3.eth.Contract(abi);
-  log(`📌 Sending to contract:\n   privateURI: ${privateURI}\n   publicURI: ${publicURI}`);
-  return contract.methods.createOriginal(privateURI, publicURI, 0, 1000000).encodeABI();
+  const encoded = web3.eth.abi.encodeFunctionCall(abi, [
+    metadataURI,
+    metadataURI,
+    '0',
+    '1000000'
+  ]);
+
+  log(`📌 Sending to contract:\n   privateURI: ${metadataURI}\n   publicURI: ${metadataURI}`);
+  return encoded;
 }
 
 async function getGasPrice() {
@@ -52,7 +50,7 @@ export default async function handler(req, res) {
 
   const { metadataURI, crop_id, walletAddress } = req.body;
 
-  if (!metadataURI || (!metadataURI.startsWith('ipfs://') && !metadataURI.startsWith('https://') && !metadataURI.startsWith('Qm'))) {
+  if (!metadataURI || (!metadataURI.startsWith('ipfs://') && !metadataURI.startsWith('https://'))) {
     return res.status(400).json({ error: 'Invalid metadataURI. Should be an IPFS URI.' });
   }
 
