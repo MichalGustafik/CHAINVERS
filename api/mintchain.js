@@ -50,7 +50,9 @@ export default async function handler(req, res) {
   const { metadataURI, crop_id, walletAddress } = req.body;
 
   // Skontroluj, že metadataURI začína správnym prefixom
+  log("🔍 Checking metadataURI format...");
   if (!metadataURI || (!metadataURI.startsWith('ipfs://') && !metadataURI.startsWith('https://'))) {
+    log('❌ Invalid metadataURI format:', metadataURI);
     return res.status(400).json({ error: 'Invalid metadataURI. Should be an IPFS URI.' });
   }
 
