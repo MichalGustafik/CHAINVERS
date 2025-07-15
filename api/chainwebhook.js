@@ -40,7 +40,9 @@ export default async function handler(req, res) {
       return res.status(500).json({ error: "Nepodarilo sa nahrať obrázok", detail: imageResult });
     }
 
-    const imageURI = `ipfs://${imageResult.IpfsHash}`;
+    // 🔧 JEDINÁ ZMENA TU:
+    const imageURI = `https://gateway.pinata.cloud/ipfs/${imageResult.IpfsHash}`;
+
     const metadata = {
       name: `Chainvers NFT ${crop_id}`,
       description: "NFT z CHAINVERS",
