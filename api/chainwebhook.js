@@ -1,18 +1,6 @@
-// 🔍 Pomocná funkcia na overenie dostupnosti IPFS obrázka cez gateway
-async function waitForImageAvailability(imageUrl, maxAttempts = 5, delayMs = 3000) {
-  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-    const response = await fetch(imageUrl, { method: 'HEAD' });
-    if (response.ok) return true;
-
-    console.log(`[${new Date().toISOString()}] ⏳ [ČAKANIE] Pokus ${attempt}/${maxAttempts} – obrázok ešte nie je dostupný.`);
-    await new Promise((resolve) => setTimeout(resolve, delayMs));
-  }
-  return false;
-}
-
 export default async function handler(req, res) {
   const now = new Date().toISOString();
-  const log = (...args) => console.log(`[${new Date().toISOString()}]`, ...args);
+  const log = (...args) => console.log(`[${now}]`, ...args);
 
   if (req.method !== "POST") {
     log("❌ [CHYBA] Nepodporovaná HTTP metóda:", req.method);
@@ -49,24 +37,10 @@ export default async function handler(req, res) {
     log("🖼️ [PINATA] Výsledok obrázka:", imageResult);
 
     if (!imageResult.IpfsHash) {
-      log("❌ [CHYBA] Obrázok nemá IpfsHash:", imageResult);
       return res.status(500).json({ error: "Nepodarilo sa nahrať obrázok", detail: imageResult });
     }
 
     const imageURI = `https://ipfs.io/ipfs/${imageResult.IpfsHash}`;
-    log("🔗 [INFO] imageURI:", imageURI);
-
-    // 🔍 Overenie dostupnosti obrázka cez HTTP
-    log("🔍 Overujem dostupnosť obrázka cez ipfs.io...");
-    const available = await waitForImageAvailability(imageURI);
-    if (!available) {
-      log("❌ Obrázok sa nepodarilo načítať z gateway ani po opakovaní.");
-      return res.status(500).json({
-        error: "Obrázok nie je dostupný cez IPFS gateway",
-        ipfsHash: imageResult.IpfsHash
-      });
-    }
-
     const metadata = {
       name: `Chainvers NFT ${crop_id}`,
       description: "NFT z CHAINVERS",
@@ -93,26 +67,22 @@ export default async function handler(req, res) {
     log("📄 [PINATA] Výsledok metadát:", metadataResult);
 
     if (!metadataResult.IpfsHash) {
-      log("❌ [CHYBA] Metadáta nemajú IpfsHash:", metadataResult);
       return res.status(500).json({ error: "Nepodarilo sa nahrať metadáta", detail: metadataResult });
     }
 
-    const metadataURI = `ipfs://${metadataResult.IpfsHash}`;
-    log("🔗 [INFO] metadataURI:", metadataURI);
-
+    // ⛳ ZMENA TU: posielame `imageURI` namiesto `metadataURI`
     log("🚀 [CHAIN] Volanie mintchain...");
     const mintCall = await fetch(process.env.MINTCHAIN_API_URL, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        metadataURI,
+        metadataURI: imageURI,  // ← toto je zmena!
         crop_id,
         walletAddress: wallet,
       }),
     });
 
     const mintResult = await mintCall.json();
-    log("📬 [CHAIN] Výsledok mintu:", mintResult);
 
     if (!mintResult.success) {
       log("❌ [CHAIN] Mint zlyhal:", mintResult);
@@ -129,4 +99,4 @@ export default async function handler(req, res) {
     log("❌ [VÝNIMKA]", err.message);
     return res.status(500).json({ error: "Interná chyba servera", detail: err.message });
   }
-                               }
+}
