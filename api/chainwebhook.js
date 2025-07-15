@@ -1,4 +1,3 @@
-import Web3 from 'web3';
 import FormData from 'form-data';
 import fetch from 'node-fetch';
 import { Readable } from 'stream';
