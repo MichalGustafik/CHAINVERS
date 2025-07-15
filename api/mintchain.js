@@ -7,7 +7,7 @@ function isValidAddress(addr) {
   return web3.utils.isAddress(addr);
 }
 
-function encodeFunctionCall(metadataURI) {
+function encodeFunctionCall(privateURI, publicURI) {
   const abi = [{
     type: 'function',
     name: 'createOriginal',
@@ -19,8 +19,9 @@ function encodeFunctionCall(metadataURI) {
     ]
   }];
   const contract = new web3.eth.Contract(abi);
-  log(`📎 metadataURI to send in contract: ${metadataURI}`);
-  return contract.methods.createOriginal(metadataURI, metadataURI, 0, 1000000).encodeABI();
+  log(`📎 privateURI to send in contract: ${privateURI}`);
+  log(`📎 publicURI to send in contract: ${publicURI}`);
+  return contract.methods.createOriginal(privateURI, publicURI, 0, 1000000).encodeABI();
 }
 
 async function getGasPrice() {
@@ -69,6 +70,9 @@ export default async function handler(req, res) {
     log('   cropId:', crop_id);
     log('   walletAddress:', walletAddress);
 
+    const privateURI = `ipfs://${metadataURI}`; // Add ipfs prefix
+    const publicURI = privateURI; // Same as privateURI in this case, can be changed if needed
+
     const chainId = await web3.eth.getChainId();
     const balance = await web3.eth.getBalance(FROM);
     const balanceEth = web3.utils.fromWei(balance, 'ether');
@@ -76,7 +80,7 @@ export default async function handler(req, res) {
     log(`💰 Wallet balance: ${balanceEth} ETH`);
 
     const gasPrice = await getGasPrice();
-    const data = encodeFunctionCall(metadataURI);
+    const data = encodeFunctionCall(privateURI, publicURI);
     const gasLimit = await web3.eth.estimateGas({ from: FROM, to: TO, data });
 
     const gasCost = web3.utils.toBN(gasPrice).mul(web3.utils.toBN(gasLimit));
