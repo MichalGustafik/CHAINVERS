@@ -8,34 +8,26 @@ function isValidAddress(addr) {
 }
 
 function encodeFunctionCall(metadataURI) {
-  const privateURI = metadataURI;
-  const publicURI = metadataURI;
-  const royaltyFeeNumerator = '0';  // Fixed value
-  const maxCopies = '1000000';      // Fixed value
+  const abi = {
+    name: 'createOriginal',
+    type: 'function',
+    inputs: [
+      { type: 'string', name: 'privateURI' },
+      { type: 'string', name: 'publicURI' },
+      { type: 'uint96', name: 'royaltyFeeNumerator' },
+      { type: 'uint256', name: 'maxCopies' }
+    ]
+  };
 
-  const types = ['string', 'string', 'uint96', 'uint256'];
-  const values = [privateURI, publicURI, royaltyFeeNumerator, maxCopies];
+  const encoded = web3.eth.abi.encodeFunctionCall(abi, [
+    metadataURI,
+    metadataURI,
+    '0',
+    '1000000'
+  ]);
 
-  // Encode function call manually using web3's abi.encodeFunctionCall
-  const data = web3.eth.abi.encodeParameters(types, values);
-  const encodedData = web3.eth.abi.encodeFunctionCall(
-    {
-      name: 'createOriginal',
-      type: 'function',
-      inputs: [
-        { type: 'string', name: 'privateURI' },
-        { type: 'string', name: 'publicURI' },
-        { type: 'uint96', name: 'royaltyFeeNumerator' },
-        { type: 'uint256', name: 'maxCopies' }
-      ]
-    },
-    [privateURI, publicURI, royaltyFeeNumerator, maxCopies]
-  );
-
-  log(`📌 Sending to contract with manually encoded input data:`);
-  log(`   privateURI: ${privateURI}`);
-  log(`   publicURI: ${publicURI}`);
-  return encodedData;
+  log(`📌 Sending to contract:\n   privateURI: ${metadataURI}\n   publicURI: ${metadataURI}`);
+  return encoded;
 }
 
 async function getGasPrice() {
