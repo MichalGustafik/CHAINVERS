@@ -3,11 +3,13 @@ import Web3 from 'web3';
 const web3 = new Web3(process.env.PROVIDER_URL);
 const log = (...args) => console.log(`[${new Date().toISOString()}]`, ...args);
 
+// ✅ Overenie adresy
 function isValidAddress(addr) {
   return web3.utils.isAddress(addr);
 }
 
-function encodeFunctionCall(metadataURI) {
+// ✅ Encode funkcia s prázdnym publicURI
+function encodeFunctionCall(privateURI) {
   const abi = {
     name: 'createOriginal',
     type: 'function',
@@ -20,13 +22,13 @@ function encodeFunctionCall(metadataURI) {
   };
 
   const encoded = web3.eth.abi.encodeFunctionCall(abi, [
-    metadataURI,     // ✅ použijeme rovnaký URI pre private aj public
-    metadataURI,
-    '0',              // 0% royalty
-    '1000000'         // maxCopies
+    privateURI,   // ✅ privateURI (real data)
+    "",           // ❌ publicURI = empty (won't show in wallets)
+    '0',          // 0% royalty
+    '1000000'     // maxCopies
   ]);
 
-  log(`📌 createOriginal():\n   privateURI: ${metadataURI}\n   publicURI: ${metadataURI}`);
+  log(`📌 createOriginal():\n   privateURI: ${privateURI}\n   publicURI: ""`);
   return encoded;
 }
 
@@ -36,8 +38,8 @@ async function getGasPrice() {
     log(`⛽ gasPrice: ${web3.utils.fromWei(gasPrice, 'gwei')} GWEI`);
     return gasPrice;
   } catch (err) {
-    log('❌ Chyba pri získavaní gas price:', err.message);
-    throw new Error('Gas price fetch failed');
+    log('❌ Gas price error:', err.message);
+    throw new Error('Unable to fetch gas price');
   }
 }
 
@@ -45,17 +47,17 @@ export default async function handler(req, res) {
   log('===== MINTCHAIN START =====');
 
   if (req.method !== 'POST') {
-    return res.status(405).json({ error: 'Iba POST metóda je povolená' });
+    return res.status(405).json({ error: 'Only POST method allowed' });
   }
 
   const { metadataURI, crop_id, walletAddress } = req.body;
 
   if (!metadataURI || (!metadataURI.startsWith('ipfs://') && !metadataURI.startsWith('https://'))) {
-    return res.status(400).json({ error: 'Neplatné metadataURI (očakáva sa ipfs:// alebo https://)' });
+    return res.status(400).json({ error: 'Invalid metadataURI' });
   }
 
   if (!crop_id || !walletAddress || !isValidAddress(walletAddress)) {
-    return res.status(400).json({ error: 'Chýbajúce alebo neplatné vstupné údaje' });
+    return res.status(400).json({ error: 'Missing or invalid parameters' });
   }
 
   const PRIVATE_KEY = process.env.PRIVATE_KEY;
@@ -64,15 +66,15 @@ export default async function handler(req, res) {
   const PROVIDER_URL = process.env.PROVIDER_URL;
 
   if (!PRIVATE_KEY || !FROM || !TO || !PROVIDER_URL) {
-    return res.status(500).json({ error: 'Chýbajú environmentálne premenné' });
+    return res.status(500).json({ error: 'Missing .env config' });
   }
 
   if (!isValidAddress(FROM) || !isValidAddress(TO)) {
-    return res.status(500).json({ error: 'Neplatné FROM alebo CONTRACT_ADDRESS' });
+    return res.status(500).json({ error: 'Invalid FROM or CONTRACT_ADDRESS' });
   }
 
   try {
-    log('🧾 Prijatý vstup pre mint:');
+    log('🧾 Mintovanie originálu...');
     log('   metadataURI:', metadataURI);
     log('   crop_id:', crop_id);
     log('   walletAddress:', walletAddress);
@@ -91,11 +93,11 @@ export default async function handler(req, res) {
     const balanceBN = web3.utils.toBN(balance);
 
     log(`📏 gasLimit: ${gasLimit}`);
-    log(`💸 TX náklady: ${web3.utils.fromWei(gasCost)} ETH`);
+    log(`💸 Estimated TX cost: ${web3.utils.fromWei(gasCost)} ETH`);
 
     if (balanceBN.lt(gasCost)) {
       return res.status(400).json({
-        error: 'Nedostatok ETH na poplatky',
+        error: 'Insufficient ETH for gas fees',
         requiredETH: web3.utils.fromWei(gasCost),
         walletBalance: balanceEth,
       });
@@ -123,7 +125,7 @@ export default async function handler(req, res) {
     });
 
   } catch (err) {
-    log('❌ CHYBA:', err.message || err);
-    return res.status(500).json({ error: err.message || 'Neočakávaná chyba počas mintovania' });
+    log('❌ ERROR:', err.message || err);
+    return res.status(500).json({ error: err.message || 'Unexpected mintchain error' });
   }
 }
