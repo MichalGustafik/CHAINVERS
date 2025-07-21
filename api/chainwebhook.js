@@ -3,53 +3,50 @@ import fetch from 'node-fetch';
 
 const globalLog = (...args) => console.log(`[${new Date().toISOString()}]`, ...args);
 
-// 🔮 Získa unikátnu hlášku z online API
+// 🔮 Získa unikátny citát pre description
 async function fetchUniqueDescription() {
   try {
     const res = await fetch('https://api.quotable.io/random');
     const data = await res.json();
     if (data && data.content) {
       return `Originálny NFT z Chainvers, ktorý "${data.content}"`;
-    } else {
-      return `Originálny NFT z Chainvers, ktorý reprezentuje unikátny dizajn.`;
     }
-  } catch (e) {
-    return `Originálny NFT z Chainvers, ktorý reprezentuje unikátny dizajn.`; // fallback
-  }
+  } catch {}
+  return `Originálny NFT z Chainvers, ktorý reprezentuje unikátny dizajn.`; // fallback
 }
 
 export default async function handler(req, res) {
   const log = globalLog;
 
   if (req.method !== 'POST') {
-    log("❌ [CHYBA] Nepodporovaná HTTP metóda:", req.method);
+    log("❌ Nepodporovaná metóda:", req.method);
     return res.status(405).json({ error: "Method Not Allowed" });
   }
 
   try {
     const { crop_id, wallet, image_base64 } = req.body;
 
-    log("📥 [VSTUP] Prijaté údaje:", {
+    log("📥 Prijaté vstupy:", {
       crop_id,
       wallet,
       image_base64_length: image_base64?.length || 0,
     });
 
     if (!crop_id || !wallet || !image_base64) {
-      log("⚠️ [VALIDÁCIA] Neúplné vstupné údaje.");
       return res.status(400).json({ error: "Chýbajú údaje" });
     }
 
     const filename = `${crop_id}.png`;
     const buffer = Buffer.from(image_base64, "base64");
 
-    log("📡 [PINATA] Nahrávanie obrázka...");
+    // 🔼 Upload obrázka na Pinata
     const formData = new FormData();
     formData.append("file", buffer, {
-      filename: filename,
-      contentType: "image/png"
+      filename,
+      contentType: "image/png",
     });
 
+    log("📡 Upload obrázka na Pinata...");
     const imageUpload = await fetch("https://api.pinata.cloud/pinning/pinFileToIPFS", {
       method: "POST",
       headers: {
@@ -60,15 +57,11 @@ export default async function handler(req, res) {
     });
 
     const imageResult = await imageUpload.json();
-    log("🖼️ [PINATA] Výsledok obrázka:", imageResult);
-
     if (!imageResult.IpfsHash) {
-      log("❌ [PINATA] Nahrávanie obrázka zlyhalo:", imageResult);
-      return res.status(500).json({ error: "Nepodarilo sa nahrať obrázok", detail: imageResult });
+      return res.status(500).json({ error: "Nahrávanie obrázka zlyhalo", detail: imageResult });
     }
 
     const imageURI = `ipfs://${imageResult.IpfsHash}`;
-
     const description = await fetchUniqueDescription();
 
     const metadata = {
@@ -82,7 +75,7 @@ export default async function handler(req, res) {
       ]
     };
 
-    log("📦 [PINATA] Nahrávanie metadát...");
+    log("📦 Upload metadát...");
     const metadataUpload = await fetch("https://api.pinata.cloud/pinning/pinJSONToIPFS", {
       method: "POST",
       headers: {
@@ -98,16 +91,14 @@ export default async function handler(req, res) {
     });
 
     const metadataResult = await metadataUpload.json();
-    log("📄 [PINATA] Výsledok metadát:", metadataResult);
-
     if (!metadataResult.IpfsHash) {
-      log("❌ [PINATA] Nahrávanie metadát zlyhalo:", metadataResult);
-      return res.status(500).json({ error: "Nepodarilo sa nahrať metadáta", detail: metadataResult });
+      return res.status(500).json({ error: "Nahrávanie metadát zlyhalo", detail: metadataResult });
     }
 
     const metadataURI = `ipfs://${metadataResult.IpfsHash}`;
 
-    log("🚀 [CHAIN] Volanie mintchain...");
+    // 🔗 Zavolaj mintchain API
+    log("🚀 Volám mintchain.js...");
     const mintCall = await fetch(process.env.MINTCHAIN_API_URL, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -119,9 +110,7 @@ export default async function handler(req, res) {
     });
 
     const mintResult = await mintCall.json();
-
     if (!mintResult.success) {
-      log("❌ [CHAIN] Mint zlyhal:", mintResult);
       return res.status(500).json({ error: "Mintovanie zlyhalo", detail: mintResult });
     }
 
@@ -133,7 +122,7 @@ export default async function handler(req, res) {
     });
 
   } catch (err) {
-    log("❌ [VÝNIMKA]", err.message);
+    log("❌ Výnimka:", err.message);
     return res.status(500).json({ error: "Interná chyba servera", detail: err.message });
   }
 }
