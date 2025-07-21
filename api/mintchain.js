@@ -3,13 +3,11 @@ import Web3 from 'web3';
 const web3 = new Web3(process.env.PROVIDER_URL);
 const log = (...args) => console.log(`[${new Date().toISOString()}]`, ...args);
 
-// Overenie ETH adresy
 function isValidAddress(addr) {
   return web3.utils.isAddress(addr);
 }
 
-// 🔁 Funkcia na encode volania createOriginal
-function encodeFunctionCall(privateURI, publicURI) {
+function encodeFunctionCall(metadataURI) {
   const abi = {
     name: 'createOriginal',
     type: 'function',
@@ -22,13 +20,13 @@ function encodeFunctionCall(privateURI, publicURI) {
   };
 
   const encoded = web3.eth.abi.encodeFunctionCall(abi, [
-    privateURI,
-    publicURI,
-    '0',
-    '1000000'
+    metadataURI,     // ✅ použijeme rovnaký URI pre private aj public
+    metadataURI,
+    '0',              // 0% royalty
+    '1000000'         // maxCopies
   ]);
 
-  log(`📌 createOriginal():\n   privateURI: ${privateURI}\n   publicURI: ${publicURI}`);
+  log(`📌 createOriginal():\n   privateURI: ${metadataURI}\n   publicURI: ${metadataURI}`);
   return encoded;
 }
 
@@ -86,15 +84,7 @@ export default async function handler(req, res) {
     log(`💰 balance: ${balanceEth} ETH`);
 
     const gasPrice = await getGasPrice();
-
-    // 🔒 Private URI – reálne metadáta s dizajnom
-    const privateURI = metadataURI;
-
-    // 🎭 Public URI – placeholder pre zobrazenie NFT
-    const placeholderCID = process.env.PLACEHOLDER_CID || 'QmPlaceholder123456'; // nastav v .env
-    const publicURI = `ipfs://${placeholderCID}`;
-
-    const data = encodeFunctionCall(privateURI, publicURI);
+    const data = encodeFunctionCall(metadataURI);
     const gasLimit = await web3.eth.estimateGas({ from: FROM, to: TO, data });
 
     const gasCost = web3.utils.toBN(gasPrice).mul(web3.utils.toBN(gasLimit));
