@@ -3,6 +3,21 @@ import fetch from 'node-fetch';
 
 const globalLog = (...args) => console.log(`[${new Date().toISOString()}]`, ...args);
 
+// 🔮 Získa unikátnu hlášku z online API
+async function fetchUniqueDescription() {
+  try {
+    const res = await fetch('https://api.quotable.io/random');
+    const data = await res.json();
+    if (data && data.content) {
+      return `Originálny NFT z Chainvers, ktorý "${data.content}"`;
+    } else {
+      return `Originálny NFT z Chainvers, ktorý reprezentuje unikátny dizajn.`;
+    }
+  } catch (e) {
+    return `Originálny NFT z Chainvers, ktorý reprezentuje unikátny dizajn.`; // fallback
+  }
+}
+
 export default async function handler(req, res) {
   const log = globalLog;
 
@@ -52,13 +67,19 @@ export default async function handler(req, res) {
       return res.status(500).json({ error: "Nepodarilo sa nahrať obrázok", detail: imageResult });
     }
 
-    const imageURI = `https://ipfs.io/ipfs/${imageResult.IpfsHash}`;
+    const imageURI = `ipfs://${imageResult.IpfsHash}`;
+
+    const description = await fetchUniqueDescription();
 
     const metadata = {
-      name: `Chainvers NFT ${crop_id}`,
-      description: "NFT z CHAINVERS",
+      name: `Chainvers NFT #${crop_id}`,
+      description,
       image: imageURI,
-      attributes: [{ trait_type: "Crop ID", value: crop_id }],
+      attributes: [
+        { trait_type: "Category", value: "Art" },
+        { trait_type: "Creator", value: "Chainvers Team" },
+        { trait_type: "Edition", value: "Original" }
+      ]
     };
 
     log("📦 [PINATA] Nahrávanie metadát...");
@@ -70,7 +91,7 @@ export default async function handler(req, res) {
       },
       body: JSON.stringify({
         pinataMetadata: {
-          name: "metadata.json" // ✅ Názov súboru
+          name: "metadata.json"
         },
         pinataContent: metadata
       }),
