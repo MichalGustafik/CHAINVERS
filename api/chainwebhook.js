@@ -7,7 +7,13 @@ const web3 = new Web3(process.env.PROVIDER_URL);
 const CONTRACT = process.env.CHAINVERS_CONTRACT;
 
 const CONTRACT_ABI = [
-  { constant: true, inputs: [], name: 'tokenIdCounter', outputs: [{ name: '', type: 'uint256' }], type: 'function' }
+  {
+    constant: true,
+    inputs: [],
+    name: 'tokenIdCounter',
+    outputs: [{ name: '', type: 'uint256' }],
+    type: 'function'
+  }
 ];
 const contract = new web3.eth.Contract(CONTRACT_ABI, CONTRACT);
 
@@ -85,7 +91,7 @@ export default async function handler(req, res) {
     }
     const metadataURI = `ipfs://${metaJson.IpfsHash}`;
 
-    // 3) Mint through Mintchain
+    // 3) Mint NFT
     const mintRes = await fetch(process.env.MINTCHAIN_API_URL, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -96,7 +102,7 @@ export default async function handler(req, res) {
       return res.status(500).json({ error: 'Mintovanie zlyhalo', detail: mintJson });
     }
 
-    // 4) Get tokenId from transaction receipt
+    // 4) Transaction receipt + tokenId
     const receipt = await getReceipt(mintJson.txHash);
     if (!receipt) {
       return res.status(500).json({ error: 'Transakcia nebola potvrdená' });
@@ -104,20 +110,19 @@ export default async function handler(req, res) {
 
     const transferTopic = web3.utils.keccak256('Transfer(address,address,uint256)');
     let tokenId = null;
+
     for (const lg of receipt.logs || []) {
       if (
-        typeof lg.address === 'string' &&
-        lg.address.toLowerCase() === CONTRACT.toLowerCase() &&
+        lg.address &&
+        web3.utils.toChecksumAddress(lg.address) === web3.utils.toChecksumAddress(CONTRACT) &&
         Array.isArray(lg.topics) &&
-        lg.topics[0] === transferTopic &&
-        lg.topics.length >= 4
+        lg.topics[0] === transferTopic
       ) {
-        tokenId = web3.utils.hexToNumberString(lg.topics[3]);
+        tokenId = web3.utils.hexToNumber(lg.topics[3]);
         break;
       }
     }
 
-    // fallback cez tokenIdCounter
     if (tokenId === null) {
       const counter = await contract.methods.tokenIdCounter().call();
       tokenId = parseInt(counter, 10) - 1;
@@ -127,10 +132,6 @@ export default async function handler(req, res) {
     const openseaUrl = `https://opensea.io/assets/base/${CONTRACT}/${tokenId}`;
     const copyMintUrl = `https://chainvers.vercel.app/copy/${CONTRACT}/${tokenId}`;
 
-    // fallback URL ak OpenSea zlyhá
-    const fallbackOpenSeaUrl = `https://base-sepolia.blockscout.com/token/${CONTRACT}/instance/${tokenId}/metadata`;
-
-    // 6) Send back everything needed for buychain.php
     return res.status(200).json({
       success: true,
       message: 'NFT úspešne vytvorený',
@@ -140,7 +141,6 @@ export default async function handler(req, res) {
       tokenId,
       cropId: crop_id,
       openseaUrl,
-      fallbackOpenSeaUrl,
       copyMintUrl
     });
 
