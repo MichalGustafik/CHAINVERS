@@ -6,7 +6,7 @@ import Web3 from 'web3';
 const web3 = new Web3(process.env.PROVIDER_URL);
 const CONTRACT = process.env.CHAINVERS_CONTRACT; // nastav v .env adresu svojho ERC-721 kontraktu
 
-// MinABI pre čítanie tokenIdCounter()
+// MinABI len pre tokenIdCounter()
 const CONTRACT_ABI = [
   { constant: true, inputs: [], name: 'tokenIdCounter', outputs: [{ name: '', type: 'uint256' }], type: 'function' }
 ];
@@ -42,7 +42,7 @@ export default async function handler(req, res) {
       return res.status(400).json({ error: 'Chýbajú údaje' });
     }
 
-    // 1) Pin image
+    // 1) Pin image to IPFS
     const buf = Buffer.from(image_base64, 'base64');
     const form = new FormData();
     form.append('file', buf, `${crop_id}.png`);
@@ -60,7 +60,7 @@ export default async function handler(req, res) {
       return res.status(500).json({ error: 'Obrázok nie je dostupný cez IPFS gateway' });
     }
 
-    // 2) Pin metadata
+    // 2) Pin metadata to IPFS
     const metadata = {
       name: `Chainvers NFT ${crop_id}`,
       description: `Originálny NFT z Chainvers, ktorý reprezentuje unikátny dizajn.`,
@@ -86,7 +86,7 @@ export default async function handler(req, res) {
     }
     const metadataURI = `ipfs://${metaJson.IpfsHash}`;
 
-    // 3) Mint
+    // 3) Mint through your Mintchain API
     const mintRes = await fetch(process.env.MINTCHAIN_API_URL, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -111,7 +111,7 @@ export default async function handler(req, res) {
         break;
       }
     }
-    // fallback
+    // fallback if not found
     if (tokenId === null) {
       const counter = await contract.methods.tokenIdCounter().call();
       tokenId = parseInt(counter, 10) - 1;
@@ -121,6 +121,7 @@ export default async function handler(req, res) {
     const openseaUrl  = `https://opensea.io/assets/base/${CONTRACT}/${tokenId}`;
     const copyMintUrl = `https://chainvers.vercel.app/copy/${CONTRACT}/${tokenId}`;
 
+    // 6) Return response
     return res.status(200).json({
       success: true,
       message: 'NFT úspešne vytvorený',
@@ -128,6 +129,7 @@ export default async function handler(req, res) {
       txHash: mintJson.txHash,
       contractAddress: CONTRACT,
       tokenId,
+      cropId,      // vaše vlastné označenie
       openseaUrl,
       copyMintUrl
     });
