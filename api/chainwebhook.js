@@ -4,8 +4,9 @@ import fetch from 'node-fetch';
 import Web3 from 'web3';
 
 const web3 = new Web3(process.env.PROVIDER_URL);
-const CONTRACT = process.env.CHAINVERS_CONTRACT; // nastav v .env
-// MinABI len pre tokenIdCounter()
+const CONTRACT = process.env.CHAINVERS_CONTRACT; // nastav v .env adresu svojho ERC-721 kontraktu
+
+// MinABI pre čítanie tokenIdCounter()
 const CONTRACT_ABI = [
   { constant: true, inputs: [], name: 'tokenIdCounter', outputs: [{ name: '', type: 'uint256' }], type: 'function' }
 ];
@@ -21,7 +22,6 @@ async function waitForImageAvailability(imageUrl, maxAttempts = 5, delayMs = 300
   return false;
 }
 
-// poll until receipt available
 async function getReceipt(txHash, maxTries = 10, delayMs = 3000) {
   for (let i = 0; i < maxTries; i++) {
     const receipt = await web3.eth.getTransactionReceipt(txHash);
@@ -35,6 +35,7 @@ export default async function handler(req, res) {
   if (req.method !== 'POST') {
     return res.status(405).json({ error: 'Method Not Allowed' });
   }
+
   try {
     const { crop_id, wallet, image_base64 } = req.body;
     if (!crop_id || !wallet || !image_base64) {
@@ -104,11 +105,13 @@ export default async function handler(req, res) {
     const transferTopic = web3.utils.keccak256('Transfer(address,address,uint256)');
     let tokenId = null;
     for (const lg of receipt.logs || []) {
-      if (lg.address && lg.address.toLowerCase() === CONTRACT.toLowerCase() && Array.isArray(lg.topics) && lg.topics[0] === transferTopic) {
+      if (lg.address && lg.address.toLowerCase() === CONTRACT.toLowerCase()
+          && Array.isArray(lg.topics) && lg.topics[0] === transferTopic) {
         tokenId = web3.utils.hexToNumber(lg.topics[3]);
         break;
       }
     }
+    // fallback
     if (tokenId === null) {
       const counter = await contract.methods.tokenIdCounter().call();
       tokenId = parseInt(counter, 10) - 1;
@@ -128,6 +131,7 @@ export default async function handler(req, res) {
       openseaUrl,
       copyMintUrl
     });
+
   } catch (err) {
     console.error('CHAINWEBHOOK ERROR:', err.stack);
     return res.status(500).json({ error: 'Interná chyba servera', detail: err.message });
