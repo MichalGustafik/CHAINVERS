@@ -7,7 +7,13 @@ const web3 = new Web3(process.env.PROVIDER_URL);
 const CONTRACT = process.env.CHAINVERS_CONTRACT;
 
 const CONTRACT_ABI = [
-  { constant: true, inputs: [], name: 'tokenIdCounter', outputs: [{ name: '', type: 'uint256' }], type: 'function' }
+  {
+    constant: true,
+    inputs: [],
+    name: 'tokenIdCounter',
+    outputs: [{ name: '', type: 'uint256' }],
+    type: 'function'
+  }
 ];
 const contract = new web3.eth.Contract(CONTRACT_ABI, CONTRACT);
 
@@ -41,7 +47,7 @@ export default async function handler(req, res) {
       return res.status(400).json({ error: 'Chýbajú údaje' });
     }
 
-    // 1) Obrázok na IPFS
+    // 1) Upload image to IPFS
     const buf = Buffer.from(image_base64, 'base64');
     const form = new FormData();
     form.append('file', buf, `${crop_id}.png`);
@@ -54,12 +60,14 @@ export default async function handler(req, res) {
     if (!imgJson.IpfsHash) {
       return res.status(500).json({ error: 'Nepodarilo sa nahrať obrázok', detail: imgJson });
     }
+
     const imageURI = `https://ipfs.io/ipfs/${imgJson.IpfsHash}`;
-    if (!(await waitForImageAvailability(imageURI))) {
+    const dostupne = await waitForImageAvailability(imageURI);
+    if (!dostupne) {
       return res.status(500).json({ error: 'Obrázok nie je dostupný cez IPFS gateway' });
     }
 
-    // 2) Metadáta na IPFS
+    // 2) Upload metadata to IPFS
     const metadata = {
       name: `Chainvers NFT ${crop_id}`,
       description: `Originálny NFT z Chainvers, ktorý reprezentuje unikátny dizajn.`,
@@ -71,18 +79,24 @@ export default async function handler(req, res) {
         { trait_type: 'Edition', value: 'Original' }
       ]
     };
+
     const metaRes = await fetch('https://api.pinata.cloud/pinning/pinJSONToIPFS', {
       method: 'POST',
-      headers: { Authorization: `Bearer ${process.env.PINATA_JWT}`, 'Content-Type': 'application/json' },
+      headers: {
+        Authorization: `Bearer ${process.env.PINATA_JWT}`,
+        'Content-Type': 'application/json'
+      },
       body: JSON.stringify({
         pinataMetadata: { name: `chainvers-metadata-${crop_id}` },
         pinataContent: metadata
       })
     });
+
     const metaJson = await metaRes.json();
     if (!metaJson.IpfsHash) {
       return res.status(500).json({ error: 'Nepodarilo sa nahrať metadáta', detail: metaJson });
     }
+
     const metadataURI = `ipfs://${metaJson.IpfsHash}`;
 
     // 3) Mint
@@ -96,46 +110,51 @@ export default async function handler(req, res) {
       return res.status(500).json({ error: 'Mintovanie zlyhalo', detail: mintJson });
     }
 
-    // 4) Získať tokenId z eventu
+    // 4) Získaj tokenId z logov alebo fallback
     const receipt = await getReceipt(mintJson.txHash);
-    if (!receipt) {
-      return res.status(500).json({ error: 'Transakcia nebola potvrdená' });
-    }
-    const transferTopic = web3.utils.keccak256('Transfer(address,address,uint256)');
     let tokenId = null;
-    for (const lg of receipt.logs || []) {
-      if (lg.address && lg.address.toLowerCase() === CONTRACT.toLowerCase()
-          && Array.isArray(lg.topics) && lg.topics[0] === transferTopic) {
-        tokenId = web3.utils.hexToNumber(lg.topics[3]);
-        break;
+    if (receipt) {
+      const transferTopic = web3.utils.keccak256('Transfer(address,address,uint256)');
+      for (const lg of receipt.logs || []) {
+        if (
+          lg.address &&
+          lg.address.toLowerCase() === CONTRACT.toLowerCase() &&
+          Array.isArray(lg.topics) &&
+          lg.topics[0] === transferTopic &&
+          lg.topics.length >= 4
+        ) {
+          tokenId = web3.utils.hexToNumberString(lg.topics[3]);
+          break;
+        }
       }
     }
-    if (tokenId === null) {
+
+    if (!tokenId) {
       const counter = await contract.methods.tokenIdCounter().call();
-      tokenId = parseInt(counter, 10) - 1;
+      tokenId = (parseInt(counter, 10) - 1).toString();
     }
 
-    // 5) Odkazy
-    const openseaUrl        = `https://opensea.io/assets/base/${CONTRACT}/${tokenId}`;
-    const fallbackOpenSeaUrl = `https://opensea.io/assets/${CONTRACT}/${tokenId}`; // pre prípady mimo base chainu
-    const copyMintUrl       = `https://chainvers.vercel.app/copy/${CONTRACT}/${tokenId}`;
+    // 5) URL adresy
+    const openseaUrl = `https://opensea.io/assets/base/${CONTRACT}/${tokenId}`;
+    const fallbackOpenSeaUrl = `https://opensea.io/assets/base/${CONTRACT}/${crop_id}`;
+    const copyMintUrl = `https://chainvers.vercel.app/copy/${CONTRACT}/${tokenId}`;
 
-    // 6) Výstup
+    // 6) Odoslať späť
     return res.status(200).json({
       success: true,
       message: 'NFT úspešne vytvorený',
       metadata_cid: metaJson.IpfsHash,
       txHash: mintJson.txHash,
       contractAddress: CONTRACT,
-      tokenId: tokenId.toString(),
-      cropId: crop_id,
+      tokenId,
+      cropId: crop_id, // 👈 Dôležité pre buychain.php
       openseaUrl,
       fallbackOpenSeaUrl,
       copyMintUrl
     });
 
   } catch (err) {
-    console.error('CHAINWEBHOOK ERROR:', err.stack);
+    console.error('CHAINWEBHOOK ERROR:', err.stack || err.message);
     return res.status(500).json({ error: 'Interná chyba servera', detail: err.message });
   }
 }
