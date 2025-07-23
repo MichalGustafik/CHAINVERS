@@ -4,18 +4,16 @@ import fetch from 'node-fetch';
 import Web3 from 'web3';
 
 const web3 = new Web3(process.env.PROVIDER_URL);
-const CONTRACT = process.env.CHAINVERS_CONTRACT;
+const CONTRACT = process.env.CONTRACT_ADDRESS; // ← používame správne meno
 
+// Minimal ABI len pre tokenIdCounter()
 const CONTRACT_ABI = [
-  {
-    constant: true,
-    inputs: [],
-    name: 'tokenIdCounter',
-    outputs: [{ name: '', type: 'uint256' }],
-    type: 'function'
-  }
+  { constant: true, inputs: [], name: 'tokenIdCounter', outputs: [{ name: '', type: 'uint256' }], type: 'function' }
 ];
-const contract = new web3.eth.Contract(CONTRACT_ABI, CONTRACT);
+const contract = new web3.eth.Contract(CONTRACT_ABI);
+if (CONTRACT) {
+  contract.options.address = CONTRACT;
+}
 
 async function waitForImageAvailability(imageUrl, maxAttempts = 5, delayMs = 3000) {
   for (let i = 1; i <= maxAttempts; i++) {
@@ -47,7 +45,7 @@ export default async function handler(req, res) {
       return res.status(400).json({ error: 'Chýbajú údaje' });
     }
 
-    // 1) Pin image to IPFS
+    // 1) Upload image
     const buf = Buffer.from(image_base64, 'base64');
     const form = new FormData();
     form.append('file', buf, `${crop_id}.png`);
@@ -65,7 +63,7 @@ export default async function handler(req, res) {
       return res.status(500).json({ error: 'Obrázok nie je dostupný cez IPFS gateway' });
     }
 
-    // 2) Pin metadata to IPFS
+    // 2) Upload metadata
     const metadata = {
       name: `Chainvers NFT ${crop_id}`,
       description: `Originálny NFT z Chainvers, ktorý reprezentuje unikátny dizajn.`,
@@ -79,7 +77,10 @@ export default async function handler(req, res) {
     };
     const metaRes = await fetch('https://api.pinata.cloud/pinning/pinJSONToIPFS', {
       method: 'POST',
-      headers: { Authorization: `Bearer ${process.env.PINATA_JWT}`, 'Content-Type': 'application/json' },
+      headers: {
+        Authorization: `Bearer ${process.env.PINATA_JWT}`,
+        'Content-Type': 'application/json'
+      },
       body: JSON.stringify({
         pinataMetadata: { name: `chainvers-metadata-${crop_id}` },
         pinataContent: metadata
@@ -102,35 +103,33 @@ export default async function handler(req, res) {
       return res.status(500).json({ error: 'Mintovanie zlyhalo', detail: mintJson });
     }
 
-    // 4) Transaction receipt + tokenId
+    // 4) Get transaction receipt
     const receipt = await getReceipt(mintJson.txHash);
     if (!receipt) {
       return res.status(500).json({ error: 'Transakcia nebola potvrdená' });
     }
 
+    // 5) Extract tokenId from logs
     const transferTopic = web3.utils.keccak256('Transfer(address,address,uint256)');
     let tokenId = null;
-
     for (const lg of receipt.logs || []) {
-      if (
-        lg.address &&
-        web3.utils.toChecksumAddress(lg.address) === web3.utils.toChecksumAddress(CONTRACT) &&
-        Array.isArray(lg.topics) &&
-        lg.topics[0] === transferTopic
-      ) {
-        tokenId = web3.utils.hexToNumber(lg.topics[3]);
-        break;
+      if (lg.topics && lg.topics[0] === transferTopic && lg.topics.length >= 4) {
+        try {
+          tokenId = web3.utils.hexToNumber(lg.topics[3]);
+          break;
+        } catch (_) {}
       }
     }
 
-    if (tokenId === null) {
+    // 6) Fallback ak sa tokenId nepodarí z logov
+    if (tokenId === null && contract.options.address) {
       const counter = await contract.methods.tokenIdCounter().call();
       tokenId = parseInt(counter, 10) - 1;
     }
 
-    // 5) Build URLs
-    const openseaUrl = `https://opensea.io/assets/base/${CONTRACT}/${tokenId}`;
-    const copyMintUrl = `https://chainvers.vercel.app/copy/${CONTRACT}/${tokenId}`;
+    // 7) Build response
+    const openseaUrl  = `https://opensea.io/assets/base/${CONTRACT}/${tokenId || crop_id}`;
+    const copyMintUrl = `https://chainvers.vercel.app/copy/${CONTRACT}/${tokenId || crop_id}`;
 
     return res.status(200).json({
       success: true,
@@ -138,7 +137,7 @@ export default async function handler(req, res) {
       metadata_cid: metaJson.IpfsHash,
       txHash: mintJson.txHash,
       contractAddress: CONTRACT,
-      tokenId,
+      tokenId: tokenId || crop_id,
       cropId: crop_id,
       openseaUrl,
       copyMintUrl
