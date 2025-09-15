@@ -12,9 +12,7 @@ export default async function handler(req, res) {
   }
 
   if (req.method !== "POST") {
-    return res
-      .status(405)
-      .json({ ok: false, error: "Use POST method" });
+    return res.status(405).json({ ok: false, error: "Use POST method" });
   }
 
   try {
@@ -67,6 +65,11 @@ export default async function handler(req, res) {
         .json({ ok: false, error: "Image upload failed", resp: uploadData });
     }
 
+    // 🔑 zdroj obrázka (src) – vždy definovaný
+    const imgSrc = uploadData.file_url
+      ? uploadData.file_url
+      : `https://images.printify.com/mockup/${uploadData.id}.png`;
+
     // === 3) Blueprint + Provider + Variant ===
     const bResp = await fetch(
       "https://api.printify.com/v1/catalog/blueprints.json",
@@ -116,7 +119,7 @@ export default async function handler(req, res) {
                   position: "front",
                   images: [
                     {
-                      src: uploadData.file_url, // URL z uploadu
+                      src: imgSrc, // teraz vždy existuje
                       scale: 1,
                       x: 0.5,
                       y: 0.5,
