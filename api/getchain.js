@@ -63,7 +63,15 @@ export default async function handler(req, res) {
               placeholders: [
                 {
                   position: "front",
-                  images: [{ src: inverse_image }],
+                  images: [
+                    {
+                      src: inverse_image,
+                      scale: 1,
+                      x: 0.5,
+                      y: 0.5,
+                      angle: 0,
+                    },
+                  ],
                 },
               ],
             },
@@ -99,7 +107,12 @@ export default async function handler(req, res) {
     if (orderResp.ok && orderData.id) {
       return res.status(200).json({ ok: true, order: orderData });
     } else {
-      return res.status(orderResp.status).json({ ok: false, error: 'Order failed', resp: orderData });
+      return res.status(orderResp.status).json({
+        ok: false,
+        error: 'Order failed',
+        resp: orderData,
+        payload_sent: payload, // pre debug
+      });
     }
   } catch (e) {
     return res.status(500).json({ ok: false, error: e.message });
