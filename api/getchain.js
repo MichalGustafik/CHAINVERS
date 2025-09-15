@@ -15,7 +15,7 @@ export default async function handler(req, res) {
       if (!Array.isArray(shops) || shops.length === 0) {
         return res.status(500).json({ ok: false, error: 'No shops found', raw: shops });
       }
-      // vyber shop (preferuj CHAINVERS)
+      // preferuj CHAINVERS shop
       let shop = shops.find(s => (s.title || '').toLowerCase().includes('chainvers')) || shops[0];
       const shopId = shop?.id;
 
