@@ -118,7 +118,11 @@ export default async function handler(req, res) {
               position: "front",
               images: [
                 {
-                  id: uploadData.id, // ID z uploadu
+                  id: uploadData.id,
+                  x: 0.5,
+                  y: 0.5,
+                  scale: 1,
+                  angle: 0,
                 },
               ],
             },
