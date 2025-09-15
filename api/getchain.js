@@ -1,4 +1,3 @@
-// /api/getchain.js
 export default async function handler(req, res) {
   const { PRINTIFY_API_KEY } = process.env;
   if (!PRINTIFY_API_KEY) {
@@ -12,7 +11,9 @@ export default async function handler(req, res) {
   try {
     const { crop_id, image_base64, user } = req.body;
     if (!crop_id || !image_base64) {
-      return res.status(400).json({ ok: false, error: "Missing crop_id or image_base64" });
+      return res
+        .status(400)
+        .json({ ok: false, error: "Missing crop_id or image_base64" });
     }
 
     const authHeader = { Authorization: `Bearer ${PRINTIFY_API_KEY}` };
@@ -57,19 +58,21 @@ export default async function handler(req, res) {
       );
       const uploadData = await uploadResp.json();
       if (!uploadData.id) {
-        return res.status(500).json({ ok: false, error: "Upload failed", resp: uploadData });
+        return res
+          .status(500)
+          .json({ ok: false, error: "Upload failed", resp: uploadData });
       }
 
-      // 4) Vytvor produkt (Classic Tee)
+      // ⚠️ Pozor: provider_id a variant_id si nastav podľa reálneho blueprintu z Printify
       const productPayload = {
         title: `CHAINVERS Tee ${crop_id}`,
         description: `Unikátne tričko s panelom ${crop_id}`,
         blueprint_id: 9, // Classic Unisex Tee
-        print_provider_id: 1, // musíš nahradiť provider.id ktorý máš
-        variants: [{ id: /* tu variant ID napíš */, price: 2000, is_enabled: true }],
+        print_provider_id: 14, // napr. provider pre tričko, skontroluj v API
+        variants: [{ id: 44234, price: 2000, is_enabled: true }],
         print_areas: [
           {
-            variant_ids: [/* tu variant ID */],
+            variant_ids: [44234],
             placeholders: [
               {
                 position: "front",
@@ -99,11 +102,15 @@ export default async function handler(req, res) {
       );
       const created = await createProdResp.json();
       if (!createProdResp.ok || !created.id) {
-        return res.status(500).json({ ok: false, error: "Product creation failed", resp: created });
+        return res.status(500).json({
+          ok: false,
+          error: "Product creation failed",
+          resp: created,
+        });
       }
       product = created;
 
-      // 5) Publish produktu
+      // 4) Publish produktu (204 No Content)
       const publishResp = await fetch(
         `https://api.printify.com/v1/shops/${shopId}/products/${product.id}/publish.json`,
         {
@@ -114,17 +121,21 @@ export default async function handler(req, res) {
             description: true,
             images: true,
             variants: true,
-            tags: true
+            tags: true,
           }),
         }
       );
-      const publishData = await publishResp.json();
       if (!publishResp.ok) {
-        return res.status(500).json({ ok: false, error: "Publish product failed", resp: publishData });
+        const txt = await publishResp.text();
+        return res.status(500).json({
+          ok: false,
+          error: "Publish product failed",
+          raw: txt,
+        });
       }
     }
 
-    // 6) Vytvor objednávku (ak už neexistuje order / ak chceš)
+    // 5) Vytvor test objednávku (iba ak produkt ešte neexistoval)
     let order = null;
     if (!existing && product?.id) {
       const orderPayload = {
@@ -147,6 +158,7 @@ export default async function handler(req, res) {
           zip: "81101",
         },
       };
+
       const orderResp = await fetch(
         `https://api.printify.com/v1/shops/${shopId}/orders.json`,
         {
@@ -157,12 +169,20 @@ export default async function handler(req, res) {
       );
       order = await orderResp.json();
       if (!orderResp.ok) {
-        return res.status(500).json({ ok: false, error: "Order creation failed", resp: order });
+        return res.status(500).json({
+          ok: false,
+          error: "Order creation failed",
+          resp: order,
+        });
       }
     }
 
-    return res.status(200).json({ ok: true, product, order, exists: !!existing });
+    return res
+      .status(200)
+      .json({ ok: true, product, order, exists: !!existing });
   } catch (e) {
-    return res.status(500).json({ ok: false, error: e.message, stack: e.stack });
+    return res
+      .status(500)
+      .json({ ok: false, error: e.message, stack: e.stack });
   }
 }
