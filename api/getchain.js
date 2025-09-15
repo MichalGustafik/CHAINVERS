@@ -16,11 +16,11 @@ export default async function handler(req, res) {
   }
 
   try {
-    const { crop_id, image_base64, inverse_image } = req.body;
-    if (!crop_id || (!image_base64 && !inverse_image)) {
+    const { crop_id, image_base64 } = req.body;
+    if (!crop_id || !image_base64) {
       return res
         .status(400)
-        .json({ ok: false, error: "Missing crop_id and image" });
+        .json({ ok: false, error: "Missing crop_id or image_base64" });
     }
 
     // === 1) Shop ===
@@ -34,19 +34,13 @@ export default async function handler(req, res) {
       ) || shops[0];
     const shopId = shop?.id;
 
-    // === 2) Upload obrázka ===
-    let uploadBody = { file_name: `chainvers_${crop_id}.png` };
-
-    if (image_base64) {
-      uploadBody.contents = image_base64; // Base64 obsah
-    } else if (inverse_image) {
-      const baseUrl = "https://chainvers.infinityfreeapp.com/";
-      const imageUrl = inverse_image.startsWith("http")
-        ? inverse_image
-        : baseUrl + inverse_image.replace(/^\/+/, "");
-      uploadBody.url = imageUrl;
+    if (!shopId) {
+      return res
+        .status(500)
+        .json({ ok: false, error: "No shop found", shops });
     }
 
+    // === 2) Upload obrázka ===
     const uploadResp = await fetch(
       "https://api.printify.com/v1/uploads/images.json",
       {
@@ -55,17 +49,22 @@ export default async function handler(req, res) {
           Authorization: `Bearer ${PRINTIFY_API_KEY}`,
           "Content-Type": "application/json",
         },
-        body: JSON.stringify(uploadBody),
+        body: JSON.stringify({
+          file_name: `chainvers_${crop_id}.png`,
+          contents: image_base64,
+        }),
       }
     );
     const uploadData = await uploadResp.json();
     if (!uploadResp.ok || !uploadData.id) {
-      return res
-        .status(500)
-        .json({ ok: false, error: "Image upload failed", resp: uploadData });
+      return res.status(500).json({
+        ok: false,
+        error: "Image upload failed",
+        resp: uploadData,
+      });
     }
 
-    // === 3) Blueprint + Provider + Variant ===
+    // === 3) Vyber blueprint + provider + variant ===
     const bResp = await fetch(
       "https://api.printify.com/v1/catalog/blueprints.json",
       {
@@ -98,74 +97,62 @@ export default async function handler(req, res) {
     let variant =
       variants.find((v) => v.is_enabled || v.enabled) || variants[0];
 
-    // === 4) Draft objednávka ===
-    const payload = {
-      external_id: "chainvers_" + crop_id,
-      line_items: [
+    // === 4) Create Product ===
+    const productPayload = {
+      title: `CHAINVERS Tee ${crop_id}`,
+      description: `Unikátne tričko s panelom ${crop_id}`,
+      blueprint_id: blueprint.id,
+      print_provider_id: provider.id,
+      variants: [
         {
-          blueprint_id: blueprint.id,
-          print_provider_id: provider.id,
-          variant_id: variant.id,
-          quantity: 1,
-          print_areas: [
+          id: variant.id,
+          price: 2000, // cena v centoch
+          is_enabled: true,
+        },
+      ],
+      print_areas: [
+        {
+          variant_ids: [variant.id],
+          placeholders: [
             {
-              placeholders: [
+              position: "front",
+              images: [
                 {
-                  position: "front",
-                  images: [
-                    {
-                      id: uploadData.id, // ⬅️ použijeme ID namiesto src
-                      scale: 1,
-                      x: 0.5,
-                      y: 0.5,
-                      angle: 0,
-                    },
-                  ],
+                  id: uploadData.id, // ID z uploadu
                 },
               ],
             },
           ],
         },
       ],
-      address_to: {
-        first_name: "CHAIN",
-        last_name: "User",
-        email: "test@example.com",
-        phone: "421900000000",
-        country: "SK",
-        region: "",
-        address1: "Test Street 1",
-        city: "Bratislava",
-        zip: "81101",
-      },
     };
 
-    const orderResp = await fetch(
-      `https://api.printify.com/v1/shops/${shopId}/orders.json?confirm=false`,
+    const prodResp = await fetch(
+      `https://api.printify.com/v1/shops/${shopId}/products.json`,
       {
         method: "POST",
         headers: {
           Authorization: `Bearer ${PRINTIFY_API_KEY}`,
           "Content-Type": "application/json",
         },
-        body: JSON.stringify(payload),
+        body: JSON.stringify(productPayload),
       }
     );
+    const prodData = await prodResp.json();
 
-    const orderData = await orderResp.json();
-    if (orderResp.ok && orderData.id) {
+    if (prodResp.ok && prodData.id) {
       return res.status(200).json({
         ok: true,
-        order: orderData,
+        product: prodData,
         uploaded_image: uploadData,
         used: { shopId, blueprint, provider, variant },
       });
     } else {
-      return res.status(orderResp.status).json({
+      return res.status(prodResp.status).json({
         ok: false,
-        error: "Order failed",
-        resp: orderData,
-        payload_sent: payload,
+        error: "Product creation failed",
+        resp: prodData,
+        payload_sent: productPayload,
       });
     }
   } catch (e) {
