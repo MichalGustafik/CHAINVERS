@@ -19,6 +19,12 @@ export default async function handler(req, res) {
       return res.status(400).json({ ok: false, error: 'Missing crop_id or inverse_image' });
     }
 
+    // 🔧 Relatívna cesta → absolútna URL
+    const baseUrl = "https://chainvers.infinityfreeapp.com/";
+    const imageUrl = inverse_image.startsWith("http")
+      ? inverse_image
+      : baseUrl + inverse_image.replace(/^\/+/, "");
+
     // === 1) Shop ===
     const shopsResp = await fetch('https://api.printify.com/v1/shops.json', {
       headers: { Authorization: `Bearer ${PRINTIFY_API_KEY}` },
@@ -34,7 +40,10 @@ export default async function handler(req, res) {
         Authorization: `Bearer ${PRINTIFY_API_KEY}`,
         'Content-Type': 'application/json',
       },
-      body: JSON.stringify({ file_name: `chainvers_${crop_id}.png`, url: inverse_image }),
+      body: JSON.stringify({
+        file_name: `chainvers_${crop_id}.png`,
+        url: imageUrl,
+      }),
     });
     const uploadData = await uploadResp.json();
     if (!uploadResp.ok || !uploadData.id) {
@@ -118,7 +127,7 @@ export default async function handler(req, res) {
         ok: true,
         order: orderData,
         uploaded_image: uploadData,
-        used: { shopId, blueprint, provider, variant },
+        used: { shopId, blueprint, provider, variant, imageUrl },
       });
     } else {
       return res.status(orderResp.status).json({
