@@ -11,44 +11,60 @@ export default async function handler(req, res) {
   try {
     const { crop_id, image_base64, user } = req.body;
     if (!crop_id || !image_base64) {
-      return res.status(400).json({ ok: false, error: "Missing crop_id or image" });
+      return res
+        .status(400)
+        .json({ ok: false, error: "Missing crop_id or image" });
     }
 
     const authHeader = { Authorization: `Bearer ${PRINTIFY_API_KEY}` };
 
-    // shop id
-    const shopsResp = await fetch("https://api.printify.com/v1/shops.json", { headers: authHeader });
+    // --- zisti shop ID ---
+    const shopsResp = await fetch("https://api.printify.com/v1/shops.json", {
+      headers: authHeader,
+    });
     const shops = await shopsResp.json();
     const shopId = shops[0]?.id;
-    if (!shopId) return res.status(500).json({ ok: false, error: "No shop found" });
+    if (!shopId)
+      return res.status(500).json({ ok: false, error: "No shop found" });
 
-    // check existing products
-    const prodsResp = await fetch(`https://api.printify.com/v1/shops/${shopId}/products.json`, { headers: authHeader });
-    const products = await prodsResp.json();
+    // --- získaj produkty v shope ---
+    const prodsResp = await fetch(
+      `https://api.printify.com/v1/shops/${shopId}/products.json`,
+      { headers: authHeader }
+    );
+    const productsResp = await prodsResp.json();
+    const products = Array.isArray(productsResp.data) ? productsResp.data : [];
+
     const externalId = `chainvers_${crop_id}`;
-    let existing = products.find(p => p.external_id === externalId);
+    let existing = products.find((p) => p.external_id === externalId);
 
     let product = null;
 
     if (existing) {
       product = existing;
     } else {
-      // upload image
-      const uploadResp = await fetch(`https://api.printify.com/v1/uploads/images.json`, {
-        method: "POST",
-        headers: { ...authHeader, "Content-Type": "application/json" },
-        body: JSON.stringify({ file_name: `${crop_id}.png`, contents: image_base64 }),
-      });
+      // --- upload obrázka ---
+      const uploadResp = await fetch(
+        `https://api.printify.com/v1/uploads/images.json`,
+        {
+          method: "POST",
+          headers: { ...authHeader, "Content-Type": "application/json" },
+          body: JSON.stringify({
+            file_name: `${crop_id}.png`,
+            contents: image_base64,
+          }),
+        }
+      );
       const uploadData = await uploadResp.json();
       if (!uploadData.id) throw new Error("Upload failed");
 
-      // create product (classic tee)
+      // --- vytvor produkt (Classic Unisex Tee) ---
       const payload = {
         title: `CHAINVERS Tee ${crop_id}`,
         description: `Unikátne tričko s panelom ${crop_id}`,
         blueprint_id: 9, // classic unisex tee
         print_provider_id: 1,
-        variants: [{ id: 4012, price: 2000, is_enabled: true }], // variant example
+        variants: [{ id: 4012, price: 2000, is_enabled: true }],
         print_areas: [
           {
             variant_ids: [4012],
@@ -71,17 +87,20 @@ export default async function handler(req, res) {
         external_id: externalId,
       };
 
-      const createProd = await fetch(`https://api.printify.com/v1/shops/${shopId}/products.json`, {
-        method: "POST",
-        headers: { ...authHeader, "Content-Type": "application/json" },
-        body: JSON.stringify(payload),
-      });
+      const createProd = await fetch(
+        `https://api.printify.com/v1/shops/${shopId}/products.json`,
+        {
+          method: "POST",
+          headers: { ...authHeader, "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
+        }
+      );
       product = await createProd.json();
     }
 
-    // create test order
+    // --- vytvor test objednávku (iba ak produkt ešte neexistoval) ---
     let order = null;
-    if (!existing) {
+    if (!existing && product?.id) {
       const orderPayload = {
         external_id: externalId,
         line_items: [
@@ -103,16 +122,23 @@ export default async function handler(req, res) {
         },
       };
 
-      const orderResp = await fetch(`https://api.printify.com/v1/shops/${shopId}/orders.json`, {
-        method: "POST",
-        headers: { ...authHeader, "Content-Type": "application/json" },
-        body: JSON.stringify(orderPayload),
-      });
+      const orderResp = await fetch(
+        `https://api.printify.com/v1/shops/${shopId}/orders.json`,
+        {
+          method: "POST",
+          headers: { ...authHeader, "Content-Type": "application/json" },
+          body: JSON.stringify(orderPayload),
+        }
+      );
       order = await orderResp.json();
     }
 
-    return res.status(200).json({ ok: true, product, order, exists: !!existing });
+    return res
+      .status(200)
+      .json({ ok: true, product, order, exists: !!existing });
   } catch (e) {
-    return res.status(500).json({ ok: false, error: e.message, stack: e.stack });
+    return res
+      .status(500)
+      .json({ ok: false, error: e.message, stack: e.stack });
   }
 }
