@@ -14,16 +14,10 @@ export default async function handler(req, res) {
   }
 
   try {
-    const { crop_id, inverse_image } = req.body;
-    if (!crop_id || !inverse_image) {
-      return res.status(400).json({ ok: false, error: 'Missing crop_id or inverse_image' });
+    const { crop_id, image_base64, inverse_image } = req.body;
+    if (!crop_id || (!image_base64 && !inverse_image)) {
+      return res.status(400).json({ ok: false, error: 'Missing crop_id and image' });
     }
-
-    // 🔧 Relatívna cesta → absolútna URL
-    const baseUrl = "https://chainvers.infinityfreeapp.com/";
-    const imageUrl = inverse_image.startsWith("http")
-      ? inverse_image
-      : baseUrl + inverse_image.replace(/^\/+/, "");
 
     // === 1) Shop ===
     const shopsResp = await fetch('https://api.printify.com/v1/shops.json', {
@@ -34,16 +28,25 @@ export default async function handler(req, res) {
     const shopId = shop?.id;
 
     // === 2) Upload obrázka do Printify ===
+    let uploadBody = { file_name: `chainvers_${crop_id}.png` };
+
+    if (image_base64) {
+      uploadBody.contents = image_base64; // Base64 obsah
+    } else if (inverse_image) {
+      const baseUrl = "https://chainvers.infinityfreeapp.com/";
+      const imageUrl = inverse_image.startsWith("http")
+        ? inverse_image
+        : baseUrl + inverse_image.replace(/^\/+/, "");
+      uploadBody.url = imageUrl;
+    }
+
     const uploadResp = await fetch('https://api.printify.com/v1/uploads/images.json', {
       method: 'POST',
       headers: {
         Authorization: `Bearer ${PRINTIFY_API_KEY}`,
         'Content-Type': 'application/json',
       },
-      body: JSON.stringify({
-        file_name: `chainvers_${crop_id}.png`,
-        url: imageUrl,
-      }),
+      body: JSON.stringify(uploadBody),
     });
     const uploadData = await uploadResp.json();
     if (!uploadResp.ok || !uploadData.id) {
@@ -127,7 +130,7 @@ export default async function handler(req, res) {
         ok: true,
         order: orderData,
         uploaded_image: uploadData,
-        used: { shopId, blueprint, provider, variant, imageUrl },
+        used: { shopId, blueprint, provider, variant },
       });
     } else {
       return res.status(orderResp.status).json({
