@@ -6,28 +6,37 @@ export const config = {
 export default async function handler(req, res) {
   const { PRINTIFY_API_KEY } = process.env;
   if (!PRINTIFY_API_KEY) {
-    return res.status(500).json({ ok: false, error: 'Missing PRINTIFY_API_KEY in ENV' });
+    return res
+      .status(500)
+      .json({ ok: false, error: "Missing PRINTIFY_API_KEY in ENV" });
   }
 
-  if (req.method !== 'POST') {
-    return res.status(405).json({ ok: false, error: 'Use POST method' });
+  if (req.method !== "POST") {
+    return res
+      .status(405)
+      .json({ ok: false, error: "Use POST method" });
   }
 
   try {
     const { crop_id, image_base64, inverse_image } = req.body;
     if (!crop_id || (!image_base64 && !inverse_image)) {
-      return res.status(400).json({ ok: false, error: 'Missing crop_id and image' });
+      return res
+        .status(400)
+        .json({ ok: false, error: "Missing crop_id and image" });
     }
 
     // === 1) Shop ===
-    const shopsResp = await fetch('https://api.printify.com/v1/shops.json', {
+    const shopsResp = await fetch("https://api.printify.com/v1/shops.json", {
       headers: { Authorization: `Bearer ${PRINTIFY_API_KEY}` },
     });
     const shops = await shopsResp.json();
-    let shop = shops.find(s => (s.title || '').toLowerCase().includes('chainvers')) || shops[0];
+    let shop =
+      shops.find((s) =>
+        (s.title || "").toLowerCase().includes("chainvers")
+      ) || shops[0];
     const shopId = shop?.id;
 
-    // === 2) Upload obrázka do Printify ===
+    // === 2) Upload obrázka ===
     let uploadBody = { file_name: `chainvers_${crop_id}.png` };
 
     if (image_base64) {
@@ -40,34 +49,44 @@ export default async function handler(req, res) {
       uploadBody.url = imageUrl;
     }
 
-    const uploadResp = await fetch('https://api.printify.com/v1/uploads/images.json', {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${PRINTIFY_API_KEY}`,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify(uploadBody),
-    });
+    const uploadResp = await fetch(
+      "https://api.printify.com/v1/uploads/images.json",
+      {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${PRINTIFY_API_KEY}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify(uploadBody),
+      }
+    );
     const uploadData = await uploadResp.json();
     if (!uploadResp.ok || !uploadData.id) {
-      return res.status(500).json({ ok: false, error: 'Image upload failed', resp: uploadData });
+      return res
+        .status(500)
+        .json({ ok: false, error: "Image upload failed", resp: uploadData });
     }
-    const imageId = uploadData.id;
 
     // === 3) Blueprint + Provider + Variant ===
-    const bResp = await fetch('https://api.printify.com/v1/catalog/blueprints.json', {
-      headers: { Authorization: `Bearer ${PRINTIFY_API_KEY}` },
-    });
+    const bResp = await fetch(
+      "https://api.printify.com/v1/catalog/blueprints.json",
+      {
+        headers: { Authorization: `Bearer ${PRINTIFY_API_KEY}` },
+      }
+    );
     const blueprints = await bResp.json();
     let blueprint =
-      blueprints.find(b => (b.title || '').toLowerCase().includes('classic')) || blueprints[0];
+      blueprints.find((b) =>
+        (b.title || "").toLowerCase().includes("classic")
+      ) || blueprints[0];
 
     const provResp = await fetch(
       `https://api.printify.com/v1/catalog/blueprints/${blueprint.id}/print_providers.json`,
       { headers: { Authorization: `Bearer ${PRINTIFY_API_KEY}` } }
     );
     let providers = await provResp.json();
-    if (!Array.isArray(providers)) providers = providers?.providers || providers?.data || [];
+    if (!Array.isArray(providers))
+      providers = providers?.providers || providers?.data || [];
     const provider = providers[0];
 
     const varResp = await fetch(
@@ -75,8 +94,11 @@ export default async function handler(req, res) {
       { headers: { Authorization: `Bearer ${PRINTIFY_API_KEY}` } }
     );
     let vjson = await varResp.json();
-    let variants = Array.isArray(vjson) ? vjson : (vjson?.variants || vjson?.data || []);
-    let variant = variants.find(v => v.is_enabled || v.enabled) || variants[0];
+    let variants = Array.isArray(vjson)
+      ? vjson
+      : vjson?.variants || vjson?.data || [];
+    let variant =
+      variants.find((v) => v.is_enabled || v.enabled) || variants[0];
 
     // === 4) Draft objednávka ===
     const payload = {
@@ -92,7 +114,15 @@ export default async function handler(req, res) {
               placeholders: [
                 {
                   position: "front",
-                  images: [{ id: imageId }],
+                  images: [
+                    {
+                      src: uploadData.file_url, // URL z uploadu
+                      scale: 1,
+                      x: 0.5,
+                      y: 0.5,
+                      angle: 0,
+                    },
+                  ],
                 },
               ],
             },
@@ -115,10 +145,10 @@ export default async function handler(req, res) {
     const orderResp = await fetch(
       `https://api.printify.com/v1/shops/${shopId}/orders.json?confirm=false`,
       {
-        method: 'POST',
+        method: "POST",
         headers: {
           Authorization: `Bearer ${PRINTIFY_API_KEY}`,
-          'Content-Type': 'application/json',
+          "Content-Type": "application/json",
         },
         body: JSON.stringify(payload),
       }
@@ -135,7 +165,7 @@ export default async function handler(req, res) {
     } else {
       return res.status(orderResp.status).json({
         ok: false,
-        error: 'Order failed',
+        error: "Order failed",
         resp: orderData,
         payload_sent: payload,
       });
