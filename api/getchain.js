@@ -65,11 +65,6 @@ export default async function handler(req, res) {
         .json({ ok: false, error: "Image upload failed", resp: uploadData });
     }
 
-    // 🔑 zdroj obrázka (src) – vždy definovaný
-    const imgSrc = uploadData.file_url
-      ? uploadData.file_url
-      : `https://images.printify.com/mockup/${uploadData.id}.png`;
-
     // === 3) Blueprint + Provider + Variant ===
     const bResp = await fetch(
       "https://api.printify.com/v1/catalog/blueprints.json",
@@ -119,7 +114,7 @@ export default async function handler(req, res) {
                   position: "front",
                   images: [
                     {
-                      src: imgSrc, // teraz vždy existuje
+                      id: uploadData.id, // ⬅️ použijeme ID namiesto src
                       scale: 1,
                       x: 0.5,
                       y: 0.5,
