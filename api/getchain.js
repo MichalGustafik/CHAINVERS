@@ -6,9 +6,7 @@ export const config = {
 export default async function handler(req, res) {
   const { PRINTIFY_API_KEY } = process.env;
   if (!PRINTIFY_API_KEY) {
-    return res
-      .status(500)
-      .json({ ok: false, error: "Missing PRINTIFY_API_KEY in ENV" });
+    return res.status(500).json({ ok: false, error: "Missing PRINTIFY_API_KEY in ENV" });
   }
 
   if (req.method !== "POST") {
@@ -18,9 +16,7 @@ export default async function handler(req, res) {
   try {
     const { crop_id, image_base64 } = req.body;
     if (!crop_id || !image_base64) {
-      return res
-        .status(400)
-        .json({ ok: false, error: "Missing crop_id or image_base64" });
+      return res.status(400).json({ ok: false, error: "Missing crop_id or image_base64" });
     }
 
     // === 1) Shop ===
@@ -28,85 +24,58 @@ export default async function handler(req, res) {
       headers: { Authorization: `Bearer ${PRINTIFY_API_KEY}` },
     });
     const shops = await shopsResp.json();
-    let shop =
-      shops.find((s) =>
-        (s.title || "").toLowerCase().includes("chainvers")
-      ) || shops[0];
+    const shop = shops[0]; // prvý shop
     const shopId = shop?.id;
-
     if (!shopId) {
-      return res
-        .status(500)
-        .json({ ok: false, error: "No shop found", shops });
+      return res.status(500).json({ ok: false, error: "No shop found", shops });
     }
 
     // === 2) Upload obrázka ===
-    const uploadResp = await fetch(
-      "https://api.printify.com/v1/uploads/images.json",
-      {
-        method: "POST",
-        headers: {
-          Authorization: `Bearer ${PRINTIFY_API_KEY}`,
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          file_name: `chainvers_${crop_id}.png`,
-          contents: image_base64,
-        }),
-      }
-    );
+    const uploadResp = await fetch("https://api.printify.com/v1/uploads/images.json", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${PRINTIFY_API_KEY}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        file_name: `chainvers_${crop_id}.png`,
+        contents: image_base64,
+      }),
+    });
     const uploadData = await uploadResp.json();
     if (!uploadResp.ok || !uploadData.id) {
-      return res.status(500).json({
-        ok: false,
-        error: "Image upload failed",
-        resp: uploadData,
-      });
+      return res.status(500).json({ ok: false, error: "Image upload failed", resp: uploadData });
     }
 
-    // === 3) Vyber blueprint + provider + variant ===
-    const bResp = await fetch(
-      "https://api.printify.com/v1/catalog/blueprints.json",
-      {
-        headers: { Authorization: `Bearer ${PRINTIFY_API_KEY}` },
-      }
-    );
-    const blueprints = await bResp.json();
-    let blueprint =
-      blueprints.find((b) =>
-        (b.title || "").toLowerCase().includes("classic")
-      ) || blueprints[0];
+    // === 3) Classic Tee = blueprint_id 9 ===
+    const blueprintId = 9;
 
     const provResp = await fetch(
-      `https://api.printify.com/v1/catalog/blueprints/${blueprint.id}/print_providers.json`,
+      `https://api.printify.com/v1/catalog/blueprints/${blueprintId}/print_providers.json`,
       { headers: { Authorization: `Bearer ${PRINTIFY_API_KEY}` } }
     );
     let providers = await provResp.json();
-    if (!Array.isArray(providers))
-      providers = providers?.providers || providers?.data || [];
+    if (!Array.isArray(providers)) providers = providers?.providers || providers?.data || [];
     const provider = providers[0];
 
     const varResp = await fetch(
-      `https://api.printify.com/v1/catalog/blueprints/${blueprint.id}/print_providers/${provider.id}/variants.json`,
+      `https://api.printify.com/v1/catalog/blueprints/${blueprintId}/print_providers/${provider.id}/variants.json`,
       { headers: { Authorization: `Bearer ${PRINTIFY_API_KEY}` } }
     );
     let vjson = await varResp.json();
-    let variants = Array.isArray(vjson)
-      ? vjson
-      : vjson?.variants || vjson?.data || [];
-    let variant =
-      variants.find((v) => v.is_enabled || v.enabled) || variants[0];
+    let variants = Array.isArray(vjson) ? vjson : vjson?.variants || vjson?.data || [];
+    let variant = variants.find((v) => v.is_enabled || v.enabled) || variants[0];
 
     // === 4) Create Product ===
     const productPayload = {
       title: `CHAINVERS Tee ${crop_id}`,
       description: `Unikátne tričko s panelom ${crop_id}`,
-      blueprint_id: blueprint.id,
+      blueprint_id: blueprintId,
       print_provider_id: provider.id,
       variants: [
         {
           id: variant.id,
-          price: 2000, // cena v centoch
+          price: 2000,
           is_enabled: true,
         },
       ],
@@ -149,7 +118,7 @@ export default async function handler(req, res) {
         ok: true,
         product: prodData,
         uploaded_image: uploadData,
-        used: { shopId, blueprint, provider, variant },
+        used: { shopId, provider, variant },
       });
     } else {
       return res.status(prodResp.status).json({
