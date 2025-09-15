@@ -1,3 +1,4 @@
+// /api/getchain.js
 export default async function handler(req, res) {
   const { PRINTIFY_API_KEY } = process.env;
   if (!PRINTIFY_API_KEY) {
@@ -11,23 +12,22 @@ export default async function handler(req, res) {
   try {
     const { crop_id, image_base64, user } = req.body;
     if (!crop_id || !image_base64) {
-      return res
-        .status(400)
-        .json({ ok: false, error: "Missing crop_id or image" });
+      return res.status(400).json({ ok: false, error: "Missing crop_id or image_base64" });
     }
 
     const authHeader = { Authorization: `Bearer ${PRINTIFY_API_KEY}` };
 
-    // --- zisti shop ID ---
+    // 1) Získaj shop ID
     const shopsResp = await fetch("https://api.printify.com/v1/shops.json", {
       headers: authHeader,
     });
     const shops = await shopsResp.json();
     const shopId = shops[0]?.id;
-    if (!shopId)
+    if (!shopId) {
       return res.status(500).json({ ok: false, error: "No shop found" });
+    }
 
-    // --- získaj produkty v shope ---
+    // 2) Skontroluj, či už existuje produkt s external_id
     const prodsResp = await fetch(
       `https://api.printify.com/v1/shops/${shopId}/products.json`,
       { headers: authHeader }
@@ -43,7 +43,7 @@ export default async function handler(req, res) {
     if (existing) {
       product = existing;
     } else {
-      // --- upload obrázka ---
+      // 3) Upload obrázka
       const uploadResp = await fetch(
         `https://api.printify.com/v1/uploads/images.json`,
         {
@@ -56,18 +56,20 @@ export default async function handler(req, res) {
         }
       );
       const uploadData = await uploadResp.json();
-      if (!uploadData.id) throw new Error("Upload failed");
+      if (!uploadData.id) {
+        return res.status(500).json({ ok: false, error: "Upload failed", resp: uploadData });
+      }
 
-      // --- vytvor produkt (Classic Unisex Tee) ---
-      const payload = {
+      // 4) Vytvor produkt (Classic Tee)
+      const productPayload = {
         title: `CHAINVERS Tee ${crop_id}`,
         description: `Unikátne tričko s panelom ${crop_id}`,
-        blueprint_id: 9, // classic unisex tee
-        print_provider_id: 1,
-        variants: [{ id: 4012, price: 2000, is_enabled: true }],
+        blueprint_id: 9, // Classic Unisex Tee
+        print_provider_id: 1, // musíš nahradiť provider.id ktorý máš
+        variants: [{ id: /* tu variant ID napíš */, price: 2000, is_enabled: true }],
         print_areas: [
           {
-            variant_ids: [4012],
+            variant_ids: [/* tu variant ID */],
             placeholders: [
               {
                 position: "front",
@@ -87,18 +89,42 @@ export default async function handler(req, res) {
         external_id: externalId,
       };
 
-      const createProd = await fetch(
+      const createProdResp = await fetch(
         `https://api.printify.com/v1/shops/${shopId}/products.json`,
         {
           method: "POST",
           headers: { ...authHeader, "Content-Type": "application/json" },
-          body: JSON.stringify(payload),
+          body: JSON.stringify(productPayload),
         }
       );
-      product = await createProd.json();
+      const created = await createProdResp.json();
+      if (!createProdResp.ok || !created.id) {
+        return res.status(500).json({ ok: false, error: "Product creation failed", resp: created });
+      }
+      product = created;
+
+      // 5) Publish produktu
+      const publishResp = await fetch(
+        `https://api.printify.com/v1/shops/${shopId}/products/${product.id}/publish.json`,
+        {
+          method: "POST",
+          headers: { ...authHeader, "Content-Type": "application/json" },
+          body: JSON.stringify({
+            title: true,
+            description: true,
+            images: true,
+            variants: true,
+            tags: true
+          }),
+        }
+      );
+      const publishData = await publishResp.json();
+      if (!publishResp.ok) {
+        return res.status(500).json({ ok: false, error: "Publish product failed", resp: publishData });
+      }
     }
 
-    // --- vytvor test objednávku (iba ak produkt ešte neexistoval) ---
+    // 6) Vytvor objednávku (ak už neexistuje order / ak chceš)
     let order = null;
     if (!existing && product?.id) {
       const orderPayload = {
@@ -121,7 +147,6 @@ export default async function handler(req, res) {
           zip: "81101",
         },
       };
-
       const orderResp = await fetch(
         `https://api.printify.com/v1/shops/${shopId}/orders.json`,
         {
@@ -131,14 +156,13 @@ export default async function handler(req, res) {
         }
       );
       order = await orderResp.json();
+      if (!orderResp.ok) {
+        return res.status(500).json({ ok: false, error: "Order creation failed", resp: order });
+      }
     }
 
-    return res
-      .status(200)
-      .json({ ok: true, product, order, exists: !!existing });
+    return res.status(200).json({ ok: true, product, order, exists: !!existing });
   } catch (e) {
-    return res
-      .status(500)
-      .json({ ok: false, error: e.message, stack: e.stack });
+    return res.status(500).json({ ok: false, error: e.message, stack: e.stack });
   }
 }
