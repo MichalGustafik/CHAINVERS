@@ -2,7 +2,7 @@ import Stripe from "stripe";
 
 export const config = {
   api: {
-    bodyParser: false, // Stripe webhook musí mať raw body
+    bodyParser: false,
   },
 };
 
@@ -32,24 +32,20 @@ export default async function handler(req, res) {
 
   try {
     switch (event.type) {
-      case "payment_intent.succeeded":
-        const paymentIntent = event.data.object;
-        console.log("✅ Payment succeeded:", paymentIntent.id);
+      case "checkout.session.completed":
+        const session = event.data.object;
+        console.log("✅ Checkout Session succeeded:", session.id);
 
-        // Pošli notifikáciu na InfinityFree
-        await fetch("https://tvoj.infinityfree.net/confirm_payment.php", {
+        // Pošli dáta na InfinityFree confirm_payment.php
+        await fetch("https://chainvers.free.nf/confirm_payment.php", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
-            paymentIntentId: paymentIntent.id,
-            crop_data: paymentIntent.metadata?.crop_data,
+            paymentIntentId: session.payment_intent,
+            crop_data: session.metadata?.crop_data,
+            user_address: session.metadata?.user_address,
           }),
         });
-        break;
-
-      case "payment_intent.payment_failed":
-        const failedIntent = event.data.object;
-        console.log("❌ Payment failed:", failedIntent.last_payment_error?.message);
         break;
 
       default:
