@@ -98,12 +98,12 @@ export default async function handler(req, res) {
       };
 
       console.log("📤  [WEBHOOK] → IF confirm_payment.php", confirmPayload);
-      console.log("📤  [WEBHOOK] → Vercel /api/splatchain", splitPayload);
+      console.log("📤  [WEBHOOK] → Vercel /api/splitchain", splitPayload);
 
       // spusti obe volania paralelne; nenecháme webhook padnúť
       const confirmUrl = "https://chainvers.free.nf/confirm_payment.php";
       const splitchainUrl =
-        process.env.SPLITCHAIN_URL ?? "https://chainvers.vercel.app/api/splatchain";
+        process.env.SPLITCHAIN_URL ?? "https://chainvers.vercel.app/api/splitchain";
 
       const tasks = [
         fetch(confirmUrl, {
@@ -121,7 +121,7 @@ export default async function handler(req, res) {
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify(splitPayload),
         }).then(async (r) => ({
-          tag: "splatchain",
+          tag: "splitchain",
           ok: r.ok,
           status: r.status,
           body: (await r.text()).slice(0, 500),
