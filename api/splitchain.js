@@ -4,19 +4,6 @@ export const config = {
   runtime: "nodejs18.x",
 };
 
-/**
- * ENV (Vercel → Project → Settings → Environment Variables)
- *
- * STRIPE_SECRET_KEY=sk_live_...
- * SPLIT_PRINTIFY_PERCENT=0.50
- * SPLIT_ETH_PERCENT=0.30
- * SPLIT_PROFIT_PERCENT=0.20
- *
- * ENABLE_STRIPE_PAYOUT=true
- * ENABLE_COINBASE_ETH=false
- * CONTRACT_ADDRESS=0xTvojaAdresaAleboKontrakt
- * BASE_URL=https://chainvers.vercel.app
- */
 
 const seenPayments = new Set();
 
