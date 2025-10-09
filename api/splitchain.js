@@ -1,9 +1,18 @@
 import Stripe from "stripe";
 
-export const config = {
-  runtime: "nodejs18.x",
-};
-
+/**
+ * ENV (Vercel → Project → Settings → Environment Variables)
+ *
+ * STRIPE_SECRET_KEY=sk_live_...
+ * SPLIT_PRINTIFY_PERCENT=0.50
+ * SPLIT_ETH_PERCENT=0.30
+ * SPLIT_PROFIT_PERCENT=0.20
+ *
+ * ENABLE_STRIPE_PAYOUT=true
+ * ENABLE_COINBASE_ETH=false
+ * CONTRACT_ADDRESS=0xTvojaAdresaAleboKontrakt
+ * BASE_URL=https://chainvers.vercel.app
+ */
 
 const seenPayments = new Set();
 
@@ -24,7 +33,6 @@ export default async function handler(req, res) {
   }
 
   try {
-    // ---- Parse body
     const { paymentIntentId, amount, currency } = req.body || {};
     console.log("📥  [SPLITCHAIN] Raw body", req.body);
 
@@ -33,14 +41,12 @@ export default async function handler(req, res) {
       return res.status(400).json({ error: "Missing paymentIntentId, amount or currency" });
     }
 
-    // ---- Idempotency
     if (seenPayments.has(paymentIntentId)) {
       console.log("♻️  [SPLITCHAIN] Duplicate payment, skipping", { paymentIntentId });
       return res.status(200).json({ ok: true, deduped: true });
     }
     seenPayments.add(paymentIntentId);
 
-    // ---- Percent splitting
     const pPrintify = parseFloat(process.env.SPLIT_PRINTIFY_PERCENT ?? "0.50");
     const pEth = parseFloat(process.env.SPLIT_ETH_PERCENT ?? "0.30");
     const pProfit = parseFloat(process.env.SPLIT_PROFIT_PERCENT ?? "0.20");
@@ -61,14 +67,14 @@ export default async function handler(req, res) {
       split,
     });
 
-    // ---- 1) PRINTIFY reserve
+    // 1) PRINTIFY reserve (iba evidencia/log)
     const printifyResult = {
       status: "reserved",
       note: `Keep ${split.printify} ${upperCurrency} on Printify card.`,
     };
     console.log("🗂️  [SPLITCHAIN] Printify reserve", printifyResult);
 
-    // ---- 2) ETH transfer (optional)
+    // 2) ETH transfer (voliteľné)
     let ethResult = { skipped: true };
     if ((process.env.ENABLE_COINBASE_ETH ?? "false").toLowerCase() === "true") {
       const address = process.env.CONTRACT_ADDRESS;
@@ -94,7 +100,7 @@ export default async function handler(req, res) {
       }
     }
 
-    // ---- 3) PROFIT payout (optional)
+    // 3) PROFIT payout (voliteľné)
     let payoutResult = { skipped: true };
     if ((process.env.ENABLE_STRIPE_PAYOUT ?? "false").toLowerCase() === "true") {
       try {
@@ -111,19 +117,13 @@ export default async function handler(req, res) {
       }
     }
 
-    // ---- Build response
     const response = {
       ok: true,
       paymentIntentId,
       split,
-      results: {
-        printify: printifyResult,
-        eth: ethResult,
-        profit: payoutResult,
-      },
+      results: { printify: printifyResult, eth: ethResult, profit: payoutResult },
       ms: Date.now() - start,
     };
-
     console.log("✅  [SPLITCHAIN] Done", response);
     return res.status(200).json(response);
   } catch (err) {
