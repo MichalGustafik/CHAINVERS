@@ -1,19 +1,5 @@
 import Stripe from "stripe";
 
-/**
- * ENV (Vercel → Project → Settings → Environment Variables)
- *
- * STRIPE_SECRET_KEY=sk_live_...
- * SPLIT_PRINTIFY_PERCENT=0.50
- * SPLIT_ETH_PERCENT=0.30
- * SPLIT_PROFIT_PERCENT=0.20
- *
- * ENABLE_STRIPE_PAYOUT=true
- * ENABLE_COINBASE_ETH=false
- * CONTRACT_ADDRESS=0xTvojaAdresaAleboKontrakt
- * BASE_URL=https://chainvers.vercel.app
- */
-
 const seenPayments = new Set();
 
 export default async function handler(req, res) {
@@ -33,29 +19,59 @@ export default async function handler(req, res) {
   }
 
   try {
-    const { paymentIntentId, amount, currency } = req.body || {};
+    let { paymentIntentId, amount, currency } = req.body || {};
     console.log("📥  [SPLITCHAIN] Raw body", req.body);
+
+    // ➜ Ak prišiel priamo Stripe event (object: 'event'), vyparsuj checkout.session.*
+    if (!paymentIntentId && req.body?.object === "event") {
+      const evt = req.body;
+      console.log("🔎  [SPLITCHAIN] Detected Stripe Event", {
+        eventId: evt.id,
+        type: evt.type,
+        livemode: evt.livemode,
+      });
+
+      // zaujímajú nás tieto typy
+      const okTypes = new Set([
+        "checkout.session.completed",
+        "checkout.session.async_payment_succeeded",
+      ]);
+
+      if (okTypes.has(evt.type)) {
+        const session = evt.data?.object;
+        if (session?.object === "checkout.session") {
+          paymentIntentId = session.payment_intent;
+          amount = typeof session.amount_total === "number" ? session.amount_total / 100 : undefined;
+          currency = session.currency?.toUpperCase?.();
+          console.log("🧩  [SPLITCHAIN] Extracted from Stripe event", {
+            paymentIntentId, amount, currency,
+          });
+        }
+      }
+    }
 
     if (!paymentIntentId || typeof amount !== "number" || !currency) {
       console.error("❌  [SPLITCHAIN] Invalid payload", { paymentIntentId, amount, currency });
       return res.status(400).json({ error: "Missing paymentIntentId, amount or currency" });
     }
 
+    // idempotencia
     if (seenPayments.has(paymentIntentId)) {
       console.log("♻️  [SPLITCHAIN] Duplicate payment, skipping", { paymentIntentId });
       return res.status(200).json({ ok: true, deduped: true });
     }
     seenPayments.add(paymentIntentId);
 
+    // percentá
     const pPrintify = parseFloat(process.env.SPLIT_PRINTIFY_PERCENT ?? "0.50");
-    const pEth = parseFloat(process.env.SPLIT_ETH_PERCENT ?? "0.30");
-    const pProfit = parseFloat(process.env.SPLIT_PROFIT_PERCENT ?? "0.20");
-    const total = pPrintify + pEth + pProfit || 1;
+    const pEth      = parseFloat(process.env.SPLIT_ETH_PERCENT ?? "0.30");
+    const pProfit   = parseFloat(process.env.SPLIT_PROFIT_PERCENT ?? "0.20");
+    const total     = (pPrintify + pEth + pProfit) || 1;
 
     const split = {
       printify: round2(amount * (pPrintify / total)),
-      eth: round2(amount * (pEth / total)),
-      profit: round2(amount * (pProfit / total)),
+      eth:      round2(amount * (pEth / total)),
+      profit:   round2(amount * (pProfit / total)),
     };
     const upperCurrency = String(currency).toUpperCase();
 
@@ -67,14 +83,14 @@ export default async function handler(req, res) {
       split,
     });
 
-    // 1) PRINTIFY reserve (iba evidencia/log)
+    // 1) Printify "reserve" (len evidencia/log)
     const printifyResult = {
       status: "reserved",
       note: `Keep ${split.printify} ${upperCurrency} on Printify card.`,
     };
     console.log("🗂️  [SPLITCHAIN] Printify reserve", printifyResult);
 
-    // 2) ETH transfer (voliteľné)
+    // 2) ETH (voliteľné)
     let ethResult = { skipped: true };
     if ((process.env.ENABLE_COINBASE_ETH ?? "false").toLowerCase() === "true") {
       const address = process.env.CONTRACT_ADDRESS;
@@ -82,7 +98,12 @@ export default async function handler(req, res) {
         console.error("🚨  [SPLITCHAIN] Missing CONTRACT_ADDRESS for ETH");
       } else {
         try {
-          const r = await fetch(`${process.env.BASE_URL}/api/coinbase_send`, {
+          const base =
+            process.env.BASE_URL
+            || (process.env.VERCEL_URL ? `https://${process.env.VERCEL_URL}` : "");
+          if (!base) throw new Error("Missing BASE_URL or VERCEL_URL for coinbase_send");
+
+          const r = await fetch(`${base}/api/coinbase_send`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
@@ -92,15 +113,15 @@ export default async function handler(req, res) {
             }),
           });
           ethResult = await r.json();
-          console.log("🟢  [SPLITCHAIN] ETH sent", ethResult);
+          console.log("🟢  [SPLITCHAIN] ETH result", ethResult);
         } catch (e) {
-          console.error("🚨  [SPLITCHAIN] ETH error", e);
-          ethResult = { ok: false, error: e.message };
+          ethResult = { ok: false, error: e?.message || String(e) };
+          console.error("🚨  [SPLITCHAIN] ETH error", ethResult);
         }
       }
     }
 
-    // 3) PROFIT payout (voliteľné)
+    // 3) Profit payout (voliteľné)
     let payoutResult = { skipped: true };
     if ((process.env.ENABLE_STRIPE_PAYOUT ?? "false").toLowerCase() === "true") {
       try {
@@ -112,8 +133,8 @@ export default async function handler(req, res) {
         payoutResult = { ok: true, payoutId: payout.id, status: payout.status };
         console.log("🟢  [SPLITCHAIN] Stripe payout", payoutResult);
       } catch (e) {
-        console.error("🚨  [SPLITCHAIN] Stripe payout failed", e);
-        payoutResult = { ok: false, error: e.message };
+        payoutResult = { ok: false, error: e?.message || String(e) };
+        console.error("🚨  [SPLITCHAIN] Stripe payout failed", payoutResult);
       }
     }
 
@@ -126,6 +147,7 @@ export default async function handler(req, res) {
     };
     console.log("✅  [SPLITCHAIN] Done", response);
     return res.status(200).json(response);
+
   } catch (err) {
     console.error("🔥  [SPLITCHAIN] Fatal error", { message: err.message, stack: err.stack });
     return res.status(500).json({ error: "Splitchain failed", detail: err.message });
