@@ -1,3 +1,4 @@
+//api/stripe-webhook.js
 import Stripe from "stripe";
 
 // Stripe potrebuje RAW body kvôli verifikácii podpisu
@@ -5,6 +6,43 @@ export const config = { api: { bodyParser: false } };
 
 // jednoduchý (in-memory) idempotency guard – do produkcie zvaž Redis/KV/DB
 const seenEvents = new Set();
+
+// ---- Circle helpers ----
+const CIRCLE_BASE = process.env.CIRCLE_BASE || "https://api.circle.com";
+const CIRCLE_HEADERS = {
+  Authorization: `Bearer ${process.env.CIRCLE_API_KEY}`,
+  "Content-Type": "application/json",
+};
+
+function uuid() {
+  if (globalThis.crypto?.randomUUID) return crypto.randomUUID();
+  return "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(/[xy]/g, (c) => {
+    const r = (Math.random() * 16) | 0,
+      v = c === "x" ? r : (r & 0x3) | 0x8;
+    return v.toString(16);
+  });
+}
+
+// vytvor payout USDC/EURC na address_book recipienta (id = CIRCLE_ADDRESS_BOOK_ID)
+async function circlePayout({ amount, currency = "USDC" }) {
+  const body = {
+    idempotencyKey: uuid(),
+    destination: { type: "address_book", id: process.env.CIRCLE_ADDRESS_BOOK_ID },
+    amount: { amount: String(amount), currency }, // "USDC" alebo "EURC"
+    chain: process.env.PAYOUT_CHAIN || "BASE",    // BASE, ETH, MATIC, ...
+  };
+
+  const r = await fetch(`${CIRCLE_BASE}/v1/payouts`, {
+    method: "POST",
+    headers: CIRCLE_HEADERS,
+    body: JSON.stringify(body),
+  });
+  const data = await r.json();
+  if (!r.ok) {
+    throw new Error(`Circle payout failed: ${r.status} ${JSON.stringify(data)}`);
+  }
+  return data?.data; // { id, status, ... }
+}
 
 export default async function handler(req, res) {
   const startedAt = Date.now();
@@ -86,18 +124,34 @@ export default async function handler(req, res) {
 
       // URL pre Splitchain – preferuj ENV, inak aktuálny deployment, inak fallback
       const splitchainUrl =
-        process.env.SPLITCHAIN_URL
-          || (process.env.VERCEL_URL ? `https://${process.env.VERCEL_URL}/api/splitchain` : "https://chainvers.vercel.app/api/splitchain");
+        process.env.SPLITCHAIN_URL ||
+        (process.env.VERCEL_URL
+          ? `https://${process.env.VERCEL_URL}/api/splitchain`
+          : "https://chainvers.vercel.app/api/splitchain");
 
       // payloady
       const confirmPayload = { paymentIntentId, crop_data, user_address };
-      const splitPayload   = { paymentIntentId, amount, currency };
+      const splitPayload = { paymentIntentId, amount, currency };
 
       console.log("📤  [WEBHOOK] → IF confirm_payment.php", confirmPayload);
       console.log("📤  [WEBHOOK] → Vercel /api/splitchain", { url: splitchainUrl, ...splitPayload });
 
-      // spusti paralelne (a návrat Stripe-u rýchlo 2xx)
+      // -----------------------------------------------
+      // NOVÉ: Circle payout – po úspešnej platbe
+      // mapovanie EUR -> USDC: pre jednoduchý štart berieme 1:1
+      // ak chceš presný FX / pricing, uprav amountToToken podľa vlastných pravidiel
+      const useToken = process.env.CIRCLE_PAYOUT_CURRENCY || "USDC"; // alebo "EURC"
+      const amountToToken = amount; // jednoduchý mapping 1:1 (eurá -> USDC číslo)
+      console.log("💸  [WEBHOOK] Circle payout request", {
+        addressBookId: process.env.CIRCLE_ADDRESS_BOOK_ID,
+        chain: process.env.PAYOUT_CHAIN || "BASE",
+        currency: useToken,
+        amount: amountToToken,
+      });
+
+      // spusti všetko paralelne; Stripe-u odpovieme 2xx po dokončení
       const tasks = [
+        // 1) IF confirm (PHP)
         fetch("https://chainvers.free.nf/confirm_payment.php", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -108,6 +162,8 @@ export default async function handler(req, res) {
           status: r.status,
           body: (await r.text()).slice(0, 500),
         })),
+
+        // 2) Splitchain (tvoja interná logika)
         fetch(splitchainUrl, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -118,7 +174,18 @@ export default async function handler(req, res) {
           status: r.status,
           body: (await r.text()).slice(0, 500),
         })),
+
+        // 3) CIRCLE payout (USDC/EURC -> FROM_ADDRESS cez address book)
+        (async () => {
+          try {
+            const payout = await circlePayout({ amount: amountToToken, currency: useToken });
+            return { tag: "circle_payout", ok: true, status: 200, body: JSON.stringify(payout).slice(0, 500) };
+          } catch (e) {
+            return { tag: "circle_payout", ok: false, status: 500, body: String(e?.message || e) };
+          }
+        })(),
       ];
+      // -----------------------------------------------
 
       const results = await Promise.allSettled(tasks);
       results.forEach((r) => {
