@@ -3,7 +3,6 @@
     { "source": "/api/circle-ping",          "destination": "/api/chainvers/circle-ping" },
     { "source": "/api/circle-add-address",   "destination": "/api/chainvers/circle-add-address" },
     { "source": "/api/circle-payout-test",   "destination": "/api/chainvers/circle-payout-test" },
-    { "source": "/api/circle-payout-status", "destination": "/api/chainvers/circle-payout-status" },
-    { "source": "/api/splitchain",           "destination": "/api/chainvers/splitchain" }
+    { "source": "/api/circle-payout-status", "destination": "/api/chainvers/circle-payout-status" }
   ]
 }

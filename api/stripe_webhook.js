@@ -30,20 +30,29 @@ function uuid() {
 }
 
 async function circlePayout({ amount, currency = "USDC" }) {
+  const idempotencyKey = uuid();
   const body = {
-    idempotencyKey: uuid(),
+    idempotencyKey,
     destination: { type: "address_book", id: process.env.CIRCLE_ADDRESS_BOOK_ID },
-    amount: { amount: String(amount), currency }, // USDC alebo EURC
+    amount: { amount: String(amount), currency },
     chain: process.env.PAYOUT_CHAIN || "BASE",
   };
   const r = await fetch(`${CIRCLE_BASE}/v1/payouts`, {
     method: "POST",
-    headers: CIRCLE_HEADERS,
+    headers: { ...CIRCLE_HEADERS, "Idempotency-Key": idempotencyKey },
     body: JSON.stringify(body),
   });
   const data = await r.json();
   if (!r.ok) throw new Error(`Circle payout failed: ${r.status} ${JSON.stringify(data)}`);
   return data?.data; // { id, status, ... }
+}
+
+function resolveSplitchainUrl() {
+  if (process.env.SPLITCHAIN_URL) return process.env.SPLITCHAIN_URL;
+  if (process.env.SPLITCHAIN_ENDPOINT) return process.env.SPLITCHAIN_ENDPOINT;
+  const base = process.env.SELF_BASE_URL
+    || (process.env.VERCEL_URL ? `https://${process.env.VERCEL_URL}` : "http://localhost:3000");
+  return `${base.replace(/\/$/, "")}/api/splitchain`;
 }
 
 export default async function handler(req, res) {
@@ -101,8 +110,26 @@ export default async function handler(req, res) {
 
       const tasks = [
         fetch("https://chainvers.free.nf/confirm_payment.php", {
-          method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(confirmPayload),
-        }).then(async (r) => ({ tag: "confirm_payment", ok: r.ok, status: r.status, body: (await r.text()).slice(0, 300) })),
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(confirmPayload),
+        }).then(async (r) => ({
+          tag: "confirm_payment",
+          ok: r.ok,
+          status: r.status,
+          body: (await r.text()).slice(0, 300),
+        })),
+
+        fetch(resolveSplitchainUrl(), {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ paymentIntentId, amount, currency }),
+        }).then(async (r) => ({
+          tag: "splitchain",
+          ok: r.ok,
+          status: r.status,
+          body: (await r.text()).slice(0, 300),
+        })).catch((err) => ({ tag: "splitchain", ok: false, status: 500, body: String(err?.message || err) })),
 
         (async () => {
           if (amountToToken <= 0 || !process.env.CIRCLE_API_KEY || !process.env.CIRCLE_ADDRESS_BOOK_ID) {
@@ -117,7 +144,8 @@ export default async function handler(req, res) {
         })(),
       ];
 
-      await Promise.allSettled(tasks);
+      const results = await Promise.allSettled(tasks);
+      console.log("[stripe_webhook] post-processing results", results.map((r) => r.value ?? { status: "rejected" }));
       return res.status(200).json({ received: true });
     }
 

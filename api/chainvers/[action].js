@@ -1,7 +1,6 @@
 // pages/api/chainvers/[action].js
 const BASE = process.env.CIRCLE_BASE || "https://api.circle.com";
 const HDRS = (key) => ({ Authorization: `Bearer ${key}`, "Content-Type": "application/json" });
-const seenPayments = new Set(); // idempotencia pre splitchain
 
 export default async function handler(req, res) {
   try {
@@ -10,7 +9,6 @@ export default async function handler(req, res) {
       "circle-add-address",
       "circle-payout-test",
       "circle-payout-status",
-      "splitchain",
     ]);
 
     const rawAction = (() => {
@@ -63,20 +61,6 @@ export default async function handler(req, res) {
         return v.toString(16);
       });
     }
-
-    async function readJsonBody(req) {
-      if (req.body && typeof req.body === "object") return req.body;
-      const chunks = [];
-      for await (const ch of req) chunks.push(ch);
-      const raw = Buffer.concat(chunks).toString("utf8");
-      try {
-        return raw ? JSON.parse(raw) : {};
-      } catch {
-        return {};
-      }
-    }
-
-    const round2 = (x) => Math.round((Number(x) + Number.EPSILON) * 100) / 100;
 
     // ===== Circle: ping =====
     if (action === "circle-ping") {
@@ -131,47 +115,6 @@ export default async function handler(req, res) {
       if (!id) return res.status(400).json({ error: "Missing ?id=" });
       const { r, json, text } = await call(`/v1/payouts/${id}`);
       return res.status(r.status).json(json ?? { raw: text });
-    }
-
-    // ===== Splitchain (presunutý sem) =====
-    if (action === "splitchain") {
-      if (req.method !== "POST") return res.status(405).json({ error: "Method not allowed" });
-      const start = Date.now();
-      const body = await readJsonBody(req);
-      let { paymentIntentId, amount, currency } = body || {};
-
-      if (!paymentIntentId || typeof amount !== "number" || !currency) {
-        return res.status(400).json({ error: "Missing paymentIntentId, amount or currency" });
-      }
-      if (seenPayments.has(paymentIntentId)) return res.status(200).json({ ok: true, deduped: true });
-      seenPayments.add(paymentIntentId);
-
-      const pPrintify = parseFloat(process.env.SPLIT_PRINTIFY_PERCENT ?? "0.50");
-      const pEth = parseFloat(process.env.SPLIT_ETH_PERCENT ?? "0.30");
-      const pProfit = parseFloat(process.env.SPLIT_PROFIT_PERCENT ?? "0.20");
-      const total = (pPrintify + pEth + pProfit) || 1;
-
-      const split = {
-        printify: round2(amount * (pPrintify / total)),
-        eth: round2(amount * (pEth / total)),
-        profit: round2(amount * (pProfit / total)),
-      };
-      const upperCurrency = String(currency).toUpperCase();
-
-      let ethResult = { skipped: true }; // ak chceš /api/coinbase_send, pridaj si ho neskôr
-      let payoutResult = { skipped: true }; // Stripe Payouts voliteľne
-
-      return res.status(200).json({
-        ok: true,
-        paymentIntentId,
-        split,
-        results: {
-          printify: { status: "reserved", note: `Keep ${split.printify} ${upperCurrency} on card.` },
-          eth: ethResult,
-          profit: payoutResult,
-        },
-        ms: Date.now() - start,
-      });
     }
 
     return res.status(404).json({
