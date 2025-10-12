@@ -1,59 +1,10 @@
 // pages/api/stripe-webhook.js
 import Stripe from "stripe";
+import { runSplit } from "../shared/splitchain.js";
+import { circlePayout } from "../shared/circle.js";
 
 export const config = { api: { bodyParser: false } };
 const seenEvents = new Set();
-
-const CIRCLE_BASE = process.env.CIRCLE_BASE || "https://api.circle.com";
-const CIRCLE_HEADERS = {
-  Authorization: `Bearer ${process.env.CIRCLE_API_KEY}`,
-  "Content-Type": "application/json",
-};
-
-const round2 = (n) => Math.round((Number(n) + Number.EPSILON) * 100) / 100;
-
-function resolvePayoutFraction() {
-  const raw = process.env.CIRCLE_PAYOUT_PERCENT ?? process.env.CIRCLE_PAYOUT_FRACTION;
-  if (!raw) return 1; // default: 100 % do Circle
-  const parsed = parseFloat(raw);
-  if (!Number.isFinite(parsed) || parsed <= 0) return 0;
-  if (parsed > 1) return Math.min(parsed / 100, 1); // "50" => 0.5
-  return Math.min(parsed, 1);
-}
-
-function uuid() {
-  if (globalThis.crypto?.randomUUID) return crypto.randomUUID();
-  return "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(/[xy]/g, (c) => {
-    const r = (Math.random() * 16) | 0, v = c === "x" ? r : (r & 0x3) | 0x8;
-    return v.toString(16);
-  });
-}
-
-async function circlePayout({ amount, currency = "USDC" }) {
-  const idempotencyKey = uuid();
-  const body = {
-    idempotencyKey,
-    destination: { type: "address_book", id: process.env.CIRCLE_ADDRESS_BOOK_ID },
-    amount: { amount: String(amount), currency },
-    chain: process.env.PAYOUT_CHAIN || "BASE",
-  };
-  const r = await fetch(`${CIRCLE_BASE}/v1/payouts`, {
-    method: "POST",
-    headers: { ...CIRCLE_HEADERS, "Idempotency-Key": idempotencyKey },
-    body: JSON.stringify(body),
-  });
-  const data = await r.json();
-  if (!r.ok) throw new Error(`Circle payout failed: ${r.status} ${JSON.stringify(data)}`);
-  return data?.data; // { id, status, ... }
-}
-
-function resolveSplitchainUrl() {
-  if (process.env.SPLITCHAIN_URL) return process.env.SPLITCHAIN_URL;
-  if (process.env.SPLITCHAIN_ENDPOINT) return process.env.SPLITCHAIN_ENDPOINT;
-  const base = process.env.SELF_BASE_URL
-    || (process.env.VERCEL_URL ? `https://${process.env.VERCEL_URL}` : "http://localhost:3000");
-  return `${base.replace(/\/$/, "")}/api/splitchain`;
-}
 
 export default async function handler(req, res) {
   if (req.method !== "POST") return res.status(405).json({ error: "Method not allowed" });
@@ -104,10 +55,6 @@ export default async function handler(req, res) {
         crop_data: metadata.crop_data ?? null,
         user_address: metadata.user_address || null,
       };
-      const payoutFraction = resolvePayoutFraction();
-      const useToken = process.env.CIRCLE_PAYOUT_CURRENCY || "USDC";
-      const amountToToken = round2(amount * payoutFraction);
-
       const tasks = [
         fetch("https://chainvers.free.nf/confirm_payment.php", {
           method: "POST",
@@ -120,26 +67,35 @@ export default async function handler(req, res) {
           body: (await r.text()).slice(0, 300),
         })),
 
-        fetch(resolveSplitchainUrl(), {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ paymentIntentId, amount, currency }),
-        }).then(async (r) => ({
-          tag: "splitchain",
-          ok: r.ok,
-          status: r.status,
-          body: (await r.text()).slice(0, 300),
-        })).catch((err) => ({ tag: "splitchain", ok: false, status: 500, body: String(err?.message || err) })),
+        (async () => {
+          try {
+            const result = await runSplit({ paymentIntentId, amount, currency });
+            return { tag: "splitchain", ok: true, status: 200, body: JSON.stringify(result).slice(0, 300) };
+          } catch (err) {
+            return { tag: "splitchain", ok: false, status: 500, body: String(err?.message || err) };
+          }
+        })(),
 
         (async () => {
-          if (amountToToken <= 0 || !process.env.CIRCLE_API_KEY || !process.env.CIRCLE_ADDRESS_BOOK_ID) {
+          const rawFraction = process.env.CIRCLE_PAYOUT_PERCENT ?? process.env.CIRCLE_PAYOUT_FRACTION;
+          let fraction = 1;
+          if (rawFraction) {
+            const parsed = parseFloat(rawFraction);
+            if (Number.isFinite(parsed) && parsed > 0) {
+              fraction = parsed > 1 ? parsed / 100 : parsed;
+            }
+          }
+
+          const payoutAmount = Number.isFinite(fraction) ? amount * Math.min(Math.max(fraction, 0), 1) : amount;
+          if (payoutAmount <= 0 || !process.env.CIRCLE_API_KEY) {
             return { tag: "circle_payout", skipped: true, reason: "Circle payout disabled" };
           }
+
           try {
-            const payout = await circlePayout({ amount: amountToToken, currency: useToken });
+            const payout = await circlePayout({ amount: payoutAmount, currency });
             return { tag: "circle_payout", ok: true, status: 200, body: JSON.stringify(payout).slice(0, 300) };
-          } catch (e) {
-            return { tag: "circle_payout", ok: false, status: 500, body: String(e?.message || e) };
+          } catch (err) {
+            return { tag: "circle_payout", ok: false, status: 500, body: String(err?.message || err) };
           }
         })(),
       ];
