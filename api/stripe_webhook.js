@@ -1,4 +1,4 @@
-//api/stripe-webhook.js
+// /api/stripe-webhook.js
 import Stripe from "stripe";
 
 // Stripe potrebuje RAW body kvôli verifikácii podpisu
@@ -136,12 +136,9 @@ export default async function handler(req, res) {
       console.log("📤  [WEBHOOK] → IF confirm_payment.php", confirmPayload);
       console.log("📤  [WEBHOOK] → Vercel /api/splitchain", { url: splitchainUrl, ...splitPayload });
 
-      // -----------------------------------------------
-      // NOVÉ: Circle payout – po úspešnej platbe
-      // mapovanie EUR -> USDC: pre jednoduchý štart berieme 1:1
-      // ak chceš presný FX / pricing, uprav amountToToken podľa vlastných pravidiel
+      // --- CIRCLE payout po úspešnej platbe (EUR -> USDC mapping 1:1 na štart) ---
       const useToken = process.env.CIRCLE_PAYOUT_CURRENCY || "USDC"; // alebo "EURC"
-      const amountToToken = amount; // jednoduchý mapping 1:1 (eurá -> USDC číslo)
+      const amountToToken = amount; // jednoduchý mapping 1:1; neskôr si spravíš presný pricing/FX
       console.log("💸  [WEBHOOK] Circle payout request", {
         addressBookId: process.env.CIRCLE_ADDRESS_BOOK_ID,
         chain: process.env.PAYOUT_CHAIN || "BASE",
@@ -149,8 +146,7 @@ export default async function handler(req, res) {
         amount: amountToToken,
       });
 
-      // spusti všetko paralelne; Stripe-u odpovieme 2xx po dokončení
-      const tasks = [
+      const results = await Promise.allSettled([
         // 1) IF confirm (PHP)
         fetch("https://chainvers.free.nf/confirm_payment.php", {
           method: "POST",
@@ -175,7 +171,7 @@ export default async function handler(req, res) {
           body: (await r.text()).slice(0, 500),
         })),
 
-        // 3) CIRCLE payout (USDC/EURC -> FROM_ADDRESS cez address book)
+        // 3) Circle payout
         (async () => {
           try {
             const payout = await circlePayout({ amount: amountToToken, currency: useToken });
@@ -184,10 +180,8 @@ export default async function handler(req, res) {
             return { tag: "circle_payout", ok: false, status: 500, body: String(e?.message || e) };
           }
         })(),
-      ];
-      // -----------------------------------------------
+      ]);
 
-      const results = await Promise.allSettled(tasks);
       results.forEach((r) => {
         if (r.status === "fulfilled") {
           console.log(`📥  [WEBHOOK] ${r.value.tag} response`, {
@@ -208,7 +202,6 @@ export default async function handler(req, res) {
     return res.status(200).json({ received: true });
   } catch (err) {
     console.error("🚨  [WEBHOOK] Handler error", { message: err?.message, stack: err?.stack, eventId: event?.id });
-    // nech Stripe zbytočne ne-retryuje (alebo vráť 500 ak retry chceš)
     return res.status(200).json({ received: true, warning: "internal error logged" });
   }
 }
