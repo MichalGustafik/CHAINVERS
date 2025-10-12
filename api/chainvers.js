@@ -1,40 +1,23 @@
 // pages/api/chainvers.js
 const BASE = process.env.CIRCLE_BASE || "https://api.circle.com";
 const HDRS = (key) => ({ Authorization: `Bearer ${key}`, "Content-Type": "application/json" });
-
-// idempotencia pre splitchain (in-memory)
-const seenPayments = new Set();
+const seenPayments = new Set(); // idempotencia pre splitchain
 
 export default async function handler(req, res) {
   try {
     const { action, id } = req.query || {};
     const key = process.env.CIRCLE_API_KEY;
 
-    // diagnóza prostredia (pomáha pri chybách)
-    const diag = {
-      action,
-      base: BASE,
-      has_key: Boolean(key),
-      key_prefix: key ? key.split(":")[0] : null,
-      key_colons: key ? (key.match(/:/g) || []).length : 0,
-      payout_chain: process.env.PAYOUT_CHAIN || null,
-      from_address: process.env.FROM_ADDRESS || null,
-      address_book_id: process.env.CIRCLE_ADDRESS_BOOK_ID || null
-    };
-
-    // helpers
+    // ---- helpers ----
     async function call(endpoint, opts = {}) {
       const url = `${BASE}${endpoint}`;
       const headers = { ...HDRS(key), ...(opts.headers || {}) };
-      const body = opts.body
-        ? (typeof opts.body === "string" ? opts.body : JSON.stringify(opts.body))
-        : undefined;
+      const body = opts.body ? (typeof opts.body === "string" ? opts.body : JSON.stringify(opts.body)) : undefined;
       const r = await fetch(url, { ...opts, headers, body });
       const text = await r.text();
       let json = null; try { json = JSON.parse(text); } catch {}
       return { r, json, text };
     }
-
     function uuid() {
       if (globalThis.crypto?.randomUUID) return crypto.randomUUID();
       return "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(/[xy]/g, c => {
@@ -42,44 +25,42 @@ export default async function handler(req, res) {
         return v.toString(16);
       });
     }
-
     async function readJsonBody(req) {
       if (req.body && typeof req.body === "object") return req.body;
       const chunks = []; for await (const ch of req) chunks.push(ch);
       const raw = Buffer.concat(chunks).toString("utf8");
       try { return raw ? JSON.parse(raw) : {}; } catch { return {}; }
     }
-
     const round2 = (x) => Math.round((Number(x) + Number.EPSILON) * 100) / 100;
 
-    // ROUTER
+    // ---- Circle: ping ----
     if (action === "circle-ping") {
-      if (!key) return res.status(500).json({ error: "Missing CIRCLE_API_KEY", diag });
-      if ((key.match(/:/g) || []).length !== 2) {
-        return res.status(400).json({ error: "Malformed CIRCLE_API_KEY (must contain exactly two ':' separators)", diag });
-      }
+      if (!key) return res.status(500).json({ error: "Missing CIRCLE_API_KEY" });
+      if ((key.match(/:/g) || []).length !== 2) return res.status(400).json({ error: "Malformed CIRCLE_API_KEY" });
       const { r, json, text } = await call("/v1/ping");
-      return res.status(r.status).json(json ?? { raw: text, diag });
+      return res.status(r.status).json(json ?? { raw: text });
     }
 
+    // ---- Circle: pridaj jediného recipienta (FROM_ADDRESS) ----
     if (action === "circle-add-address") {
-      if (!key) return res.status(500).json({ error: "Missing CIRCLE_API_KEY", diag });
-      if (!process.env.FROM_ADDRESS) return res.status(400).json({ error: "Missing FROM_ADDRESS", diag });
+      if (!key) return res.status(500).json({ error: "Missing CIRCLE_API_KEY" });
+      if (!process.env.FROM_ADDRESS) return res.status(400).json({ error: "Missing FROM_ADDRESS" });
 
       const body = {
         idempotencyKey: uuid(),
         chain: process.env.PAYOUT_CHAIN || "BASE",
-        address: process.env.FROM_ADDRESS, // tvoja EOA
+        address: process.env.FROM_ADDRESS,
         metadata: { nickname: "Treasury", email: "ops@example.local" }
       };
       const { r, json, text } = await call("/v1/addressBook/recipients", { method: "POST", body });
-      if (!r.ok) return res.status(r.status).json({ error: json ?? text, diag });
+      if (!r.ok) return res.status(r.status).json({ error: json ?? text });
       return res.status(200).json({ ok: true, addressId: json?.data?.id, status: json?.data?.status, raw: json });
     }
 
+    // ---- Circle: test payout na tohto recipienta ----
     if (action === "circle-payout-test") {
-      if (!key) return res.status(500).json({ error: "Missing CIRCLE_API_KEY", diag });
-      if (!process.env.CIRCLE_ADDRESS_BOOK_ID) return res.status(400).json({ error: "Missing CIRCLE_ADDRESS_BOOK_ID", diag });
+      if (!key) return res.status(500).json({ error: "Missing CIRCLE_API_KEY" });
+      if (!process.env.CIRCLE_ADDRESS_BOOK_ID) return res.status(400).json({ error: "Missing CIRCLE_ADDRESS_BOOK_ID" });
 
       const body = {
         idempotencyKey: uuid(),
@@ -88,25 +69,22 @@ export default async function handler(req, res) {
         chain: process.env.PAYOUT_CHAIN || "BASE"
       };
       const { r, json, text } = await call("/v1/payouts", { method: "POST", body });
-      if (!r.ok) return res.status(r.status).json({ error: json ?? text, diag });
+      if (!r.ok) return res.status(r.status).json({ error: json ?? text });
       return res.status(200).json({
-        ok: true,
-        payoutId: json?.data?.id,
-        status: json?.data?.status,
-        chain: json?.data?.chain,
-        amount: json?.data?.amount,
-        destination: json?.data?.destination
+        ok: true, payoutId: json?.data?.id, status: json?.data?.status,
+        chain: json?.data?.chain, amount: json?.data?.amount, destination: json?.data?.destination
       });
     }
 
+    // ---- Circle: stav payoutu ----
     if (action === "circle-payout-status") {
-      if (!key) return res.status(500).json({ error: "Missing CIRCLE_API_KEY", diag });
-      if (!id) return res.status(400).json({ error: "Missing ?id=", diag });
+      if (!key) return res.status(500).json({ error: "Missing CIRCLE_API_KEY" });
+      if (!id) return res.status(400).json({ error: "Missing ?id=" });
       const { r, json, text } = await call(`/v1/payouts/${id}`);
-      return res.status(r.status).json(json ?? { raw: text, diag });
+      return res.status(r.status).json(json ?? { raw: text });
     }
 
-    // === SPLITCHAIN (prenesené sem) ===
+    // ---- Splitchain (prenesené sem) ----
     if (action === "splitchain") {
       if (req.method !== "POST") return res.status(405).json({ error: "Method not allowed" });
 
@@ -114,11 +92,11 @@ export default async function handler(req, res) {
       const body = await readJsonBody(req);
       let { paymentIntentId, amount, currency } = body || {};
 
-      // podpora pre priamy Stripe event
+      // podpora Stripe eventu
       if (!paymentIntentId && body?.object === "event") {
         const evt = body;
-        const okTypes = new Set(["checkout.session.completed", "checkout.session.async_payment_succeeded"]);
-        if (okTypes.has(evt.type)) {
+        const ok = new Set(["checkout.session.completed","checkout.session.async_payment_succeeded"]);
+        if (ok.has(evt.type)) {
           const session = evt.data?.object;
           if (session?.object === "checkout.session") {
             paymentIntentId = session.payment_intent;
@@ -131,7 +109,6 @@ export default async function handler(req, res) {
       if (!paymentIntentId || typeof amount !== "number" || !currency) {
         return res.status(400).json({ error: "Missing paymentIntentId, amount or currency" });
       }
-
       if (seenPayments.has(paymentIntentId)) {
         return res.status(200).json({ ok: true, deduped: true });
       }
@@ -149,10 +126,10 @@ export default async function handler(req, res) {
       };
       const upperCurrency = String(currency).toUpperCase();
 
-      // 1) Printify reserve (log)
+      // 1) Printify reserve (len evidencia)
       const printifyResult = { status: "reserved", note: `Keep ${split.printify} ${upperCurrency} on Printify card.` };
 
-      // 2) ETH (voliteľné, interný /api/coinbase_send ak máš)
+      // 2) ETH (voliteľné – interný /api/coinbase_send)
       let ethResult = { skipped: true };
       if ((process.env.ENABLE_COINBASE_ETH ?? "false").toLowerCase() === "true") {
         const address = process.env.CONTRACT_ADDRESS;
@@ -160,9 +137,7 @@ export default async function handler(req, res) {
           ethResult = { ok: false, error: "Missing CONTRACT_ADDRESS for ETH" };
         } else {
           try {
-            const baseURL =
-              process.env.BASE_URL ||
-              (process.env.VERCEL_URL ? `https://${process.env.VERCEL_URL}` : "");
+            const baseURL = process.env.BASE_URL || (process.env.VERCEL_URL ? `https://${process.env.VERCEL_URL}` : "");
             if (!baseURL) throw new Error("Missing BASE_URL or VERCEL_URL for coinbase_send");
 
             const r = await fetch(`${baseURL}/api/coinbase_send`, {
@@ -180,7 +155,7 @@ export default async function handler(req, res) {
         }
       }
 
-      // 3) Stripe Payout (voliteľné)
+      // 3) Stripe payout (voliteľné)
       let payoutResult = { skipped: true };
       if ((process.env.ENABLE_STRIPE_PAYOUT ?? "false").toLowerCase() === "true") {
         try {
@@ -207,8 +182,7 @@ export default async function handler(req, res) {
 
     return res.status(404).json({
       error: "Unknown action",
-      actions: ["circle-ping","circle-add-address","circle-payout-test","circle-payout-status","splitchain"],
-      diag
+      actions: ["circle-ping","circle-add-address","circle-payout-test","circle-payout-status","splitchain"]
     });
   } catch (e) {
     return res.status(500).json({ error: e.message || String(e) });
