@@ -1,80 +1,102 @@
 // /api/chainvers.js
 const BASE = process.env.CIRCLE_BASE || "https://api.circle.com";
-const HDRS = (key) => ({ Authorization: `Bearer ${key}`, "Content-Type": "application/json" });
 
 export default async function handler(req, res) {
   try {
-    const { action } = req.query || {};
+    const { action, id } = req.query || {};
     const key = process.env.CIRCLE_API_KEY;
-    if (!key) return res.status(500).json({ error: "Missing CIRCLE_API_KEY" });
 
-    // 1) zdravý ping (overí kľúč/prostredie)
-    if (action === "circle-ping") {
-      const r = await fetch(`${BASE}/v1/ping`, { headers: HDRS(key) });
-      const data = await r.json();
-      return res.status(r.status).json(data);
+    // --- diagnóza env ---
+    const diag = {
+      base: BASE,
+      has_key: Boolean(key),
+      key_prefix: key ? key.split(":")[0] : null,
+      key_colons: key ? (key.match(/:/g) || []).length : 0,
+      payout_chain: process.env.PAYOUT_CHAIN || null,
+      from_address: process.env.FROM_ADDRESS || null,
+      address_book_id: process.env.CIRCLE_ADDRESS_BOOK_ID || null,
+      node_version: process.version,
+      env_vercel_url: process.env.VERCEL_URL || null,
+      action,
+    };
+
+    // pomocný fetch wrapper s logovaním
+    async function call(endpoint, opts = {}) {
+      const url = `${BASE}${endpoint}`;
+      const headers = {
+        "Authorization": `Bearer ${key}`,
+        "Content-Type": "application/json",
+        ...(opts.headers || {})
+      };
+      const body = opts.body ? (typeof opts.body === "string" ? opts.body : JSON.stringify(opts.body)) : undefined;
+
+      console.log("▶️  [CIRCLE] CALL", { url, method: opts.method || "GET", has_body: Boolean(body) });
+      const r = await fetch(url, { ...opts, headers, body });
+      const text = await r.text();
+      let json = null;
+      try { json = JSON.parse(text); } catch { /* ignore */ }
+
+      console.log("◀️  [CIRCLE] RESP", { status: r.status, ok: r.ok, text_preview: text.slice(0, 600) });
+      return { r, json, text };
     }
 
-    // 2) pridaj recipienta (tvoju FROM_ADDRESS) do Address Book
+    // základná validácia
+    if (!key) return res.status(500).json({ error: "Missing CIRCLE_API_KEY", diag });
+    if ((key.match(/:/g) || []).length !== 2) {
+      return res.status(400).json({ error: "Malformed CIRCLE_API_KEY (must contain exactly two ':' separators)", diag });
+    }
+
+    // router
+    if (action === "circle-ping") {
+      const { r, json, text } = await call("/v1/ping");
+      return res.status(r.status).json(json ?? { raw: text, diag });
+    }
+
     if (action === "circle-add-address") {
-      if (!process.env.FROM_ADDRESS) return res.status(400).json({ error: "Missing FROM_ADDRESS" });
+      if (!process.env.FROM_ADDRESS) return res.status(400).json({ error: "Missing FROM_ADDRESS", diag });
       const body = {
         idempotencyKey: uuid(),
         chain: process.env.PAYOUT_CHAIN || "BASE",
-        address: process.env.FROM_ADDRESS, // ← Tvoja EOA
+        address: process.env.FROM_ADDRESS,
         metadata: { nickname: "Treasury", email: "ops@example.local" }
       };
-      const r = await fetch(`${BASE}/v1/addressBook/recipients`, {
-        method: "POST", headers: HDRS(key), body: JSON.stringify(body)
-      });
-      const data = await r.json();
-      if (!r.ok) return res.status(r.status).json({ error: data });
-      return res.status(200).json({
-        ok: true,
-        addressId: data?.data?.id,
-        status: data?.data?.status, // pending|active|...
-        raw: data
-      });
+      const { r, json, text } = await call("/v1/addressBook/recipients", { method: "POST", body });
+      if (!r.ok) return res.status(r.status).json({ error: json ?? text, diag });
+      return res.status(200).json({ ok: true, addressId: json?.data?.id, status: json?.data?.status, raw: json, diag });
     }
 
-    // 3) testovací payout na Address Book recipienta (USDC/EURC -> tvoja adresa)
     if (action === "circle-payout-test") {
-      if (!process.env.CIRCLE_ADDRESS_BOOK_ID) return res.status(400).json({ error: "Missing CIRCLE_ADDRESS_BOOK_ID" });
+      if (!process.env.CIRCLE_ADDRESS_BOOK_ID) return res.status(400).json({ error: "Missing CIRCLE_ADDRESS_BOOK_ID", diag });
       const body = {
         idempotencyKey: uuid(),
         destination: { type: "address_book", id: process.env.CIRCLE_ADDRESS_BOOK_ID },
         amount: { amount: "10.00", currency: process.env.CIRCLE_PAYOUT_CURRENCY || "USDC" },
         chain: process.env.PAYOUT_CHAIN || "BASE"
       };
-      const r = await fetch(`${BASE}/v1/payouts`, {
-        method: "POST", headers: HDRS(key), body: JSON.stringify(body)
-      });
-      const data = await r.json();
-      if (!r.ok) return res.status(r.status).json({ error: data });
+      const { r, json, text } = await call("/v1/payouts", { method: "POST", body });
+      if (!r.ok) return res.status(r.status).json({ error: json ?? text, diag });
       return res.status(200).json({
         ok: true,
-        payoutId: data?.data?.id,
-        status: data?.data?.status,
-        chain: data?.data?.chain,
-        amount: data?.data?.amount,
-        destination: data?.data?.destination
+        payoutId: json?.data?.id,
+        status: json?.data?.status,
+        amount: json?.data?.amount,
+        chain: json?.data?.chain,
+        destination: json?.data?.destination,
+        diag
       });
     }
 
-    // 4) zistenie stavu payoutu podľa ID
     if (action === "circle-payout-status") {
-      const { id } = req.query || {};
-      if (!id) return res.status(400).json({ error: "Missing ?id=" });
-      const r = await fetch(`${BASE}/v1/payouts/${id}`, { headers: HDRS(key) });
-      const data = await r.json();
-      return res.status(r.status).json(data);
+      if (!id) return res.status(400).json({ error: "Missing ?id=", diag });
+      const { r, json, text } = await call(`/v1/payouts/${id}`);
+      return res.status(r.status).json(json ?? { raw: text, diag });
     }
 
-    // neznáma akcia
     return res.status(404).json({ error: "Unknown action", actions: [
       "circle-ping","circle-add-address","circle-payout-test","circle-payout-status"
-    ]});
+    ], diag });
   } catch (e) {
+    console.error("💥  [CHAINVERS] ERROR", e);
     return res.status(500).json({ error: e.message || String(e) });
   }
 }
