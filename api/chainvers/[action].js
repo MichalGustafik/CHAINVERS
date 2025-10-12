@@ -17,8 +17,16 @@ export default async function handler(req, res) {
       const query = req.query?.action;
       if (typeof query === "string") return query;
       if (Array.isArray(query)) return query[0];
+
       const bodyAction = req.body?.action;
       if (typeof bodyAction === "string") return bodyAction;
+
+      const urlPath = (req.url || "").split("?")[0] || "";
+      if (urlPath) {
+        const segments = urlPath.split("/").filter(Boolean);
+        if (segments.length) return segments[segments.length - 1];
+      }
+
       return undefined;
     })();
 
