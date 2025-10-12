@@ -55,15 +55,36 @@ export default async function handler(req, res) {
   seenEvents.add(event.id);
 
   try {
-    const handled = new Set(["checkout.session.completed","checkout.session.async_payment_succeeded"]);
+    const handled = new Set([
+      "checkout.session.completed",
+      "checkout.session.async_payment_succeeded",
+      "payment_intent.succeeded",
+    ]);
     if (handled.has(event.type)) {
-      const session = event.data.object;
-      const paymentIntentId = session.payment_intent;
-      const amount = (session.amount_total ?? 0) / 100;
-      const currency = (session.currency ?? "eur").toUpperCase();
+      const obj = event.data.object || {};
 
-      const confirmPayload = { paymentIntentId, crop_data: session.metadata?.crop_data ?? null, user_address: session.metadata?.user_address || null };
-      const splitPayload   = { paymentIntentId, amount, currency };
+      const isCheckoutSession = obj.object === "checkout.session";
+      const paymentIntentId = isCheckoutSession
+        ? obj.payment_intent
+        : obj.id;
+
+      const cents = isCheckoutSession
+        ? obj.amount_total ?? 0
+        : (obj.amount_received ?? obj.amount ?? 0);
+      const amount = Number(cents) / 100;
+      const currency = String(obj.currency ?? "eur").toUpperCase();
+
+      if (!paymentIntentId || !Number.isFinite(amount)) {
+        throw new Error("Missing payment intent data in Stripe webhook payload");
+      }
+
+      const metadata = obj.metadata || {};
+      const confirmPayload = {
+        paymentIntentId,
+        crop_data: metadata.crop_data ?? null,
+        user_address: metadata.user_address || null,
+      };
+      const splitPayload = { paymentIntentId, amount, currency };
 
       const splitchainUrl =
         process.env.SPLITCHAIN_URL
