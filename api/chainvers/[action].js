@@ -1,4 +1,4 @@
-// pages/api/chainvers.js
+// pages/api/chainvers/[action].js
 const BASE = process.env.CIRCLE_BASE || "https://api.circle.com";
 const HDRS = (key) => ({ Authorization: `Bearer ${key}`, "Content-Type": "application/json" });
 const seenPayments = new Set(); // idempotencia pre splitchain
@@ -13,54 +13,24 @@ export default async function handler(req, res) {
       "splitchain",
     ]);
 
-    const derivedQuery = (() => {
-      const query = {};
-      if (req.query && typeof req.query === "object") {
-        Object.assign(query, req.query);
-      }
-      if (typeof req.url === "string") {
-        try {
-          const url = new URL(req.url, `https://${req.headers.host || "localhost"}`);
-          for (const [key, value] of url.searchParams.entries()) {
-            if (!(key in query)) query[key] = value;
-          }
-        } catch {
-          // ignore URL parse errors
-        }
-      }
-      if (typeof req.body === "object" && req.body !== null) {
-        for (const [key, value] of Object.entries(req.body)) {
-          if (value !== undefined && !(key in query)) query[key] = value;
-        }
-      }
-      return query;
-    })();
-
-    const inferredAction = (() => {
-      const pathHints = [
-        req.headers?.["x-vercel-original-path"],
-        req.headers?.["x-vercel-forwarded-path"],
-        req.headers?.["x-forwarded-path"],
-        req.headers?.["x-forwarded-uri"],
-        req.headers?.["x-original-path"],
-        req.headers?.["x-original-url"],
-        req.headers?.["x-now-route"],
-        req.headers?.["x-matched-path"],
-        req.headers?.["x-invoke-path"],
-        typeof req.url === "string" ? req.url : undefined,
-      ];
-      for (const hint of pathHints) {
-        if (typeof hint !== "string" || !hint) continue;
-        const candidate = hint.split("?")[0].split("/").pop();
-        if (candidate && knownActions.has(candidate)) {
-          return candidate;
-        }
-      }
+    const rawAction = (() => {
+      const query = req.query?.action;
+      if (typeof query === "string") return query;
+      if (Array.isArray(query)) return query[0];
+      const bodyAction = req.body?.action;
+      if (typeof bodyAction === "string") return bodyAction;
       return undefined;
     })();
 
-    const action = derivedQuery.action || inferredAction;
-    const id = derivedQuery.id;
+    const action = rawAction?.toLowerCase();
+    if (!action || !knownActions.has(action)) {
+      return res.status(404).json({
+        error: "Unknown action",
+        actions: Array.from(knownActions),
+      });
+    }
+
+    const id = req.query?.id || req.body?.id;
     const key = process.env.CIRCLE_API_KEY;
 
     // --- helpers ---
@@ -70,22 +40,34 @@ export default async function handler(req, res) {
       const body = opts.body ? (typeof opts.body === "string" ? opts.body : JSON.stringify(opts.body)) : undefined;
       const r = await fetch(url, { ...opts, headers, body });
       const text = await r.text();
-      let json = null; try { json = JSON.parse(text); } catch {}
+      let json = null;
+      try {
+        json = JSON.parse(text);
+      } catch {}
       return { r, json, text };
     }
+
     function uuid() {
       if (globalThis.crypto?.randomUUID) return crypto.randomUUID();
-      return "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(/[xy]/g, c => {
-        const r = Math.random()*16|0, v = c==="x"? r : (r & 0x3 | 0x8);
+      return "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(/[xy]/g, (c) => {
+        const r = (Math.random() * 16) | 0;
+        const v = c === "x" ? r : (r & 0x3) | 0x8;
         return v.toString(16);
       });
     }
+
     async function readJsonBody(req) {
       if (req.body && typeof req.body === "object") return req.body;
-      const chunks = []; for await (const ch of req) chunks.push(ch);
+      const chunks = [];
+      for await (const ch of req) chunks.push(ch);
       const raw = Buffer.concat(chunks).toString("utf8");
-      try { return raw ? JSON.parse(raw) : {}; } catch { return {}; }
+      try {
+        return raw ? JSON.parse(raw) : {};
+      } catch {
+        return {};
+      }
     }
+
     const round2 = (x) => Math.round((Number(x) + Number.EPSILON) * 100) / 100;
 
     // ===== Circle: ping =====
@@ -105,11 +87,11 @@ export default async function handler(req, res) {
         idempotencyKey: uuid(),
         chain: (process.env.PAYOUT_CHAIN || "BASE").toUpperCase(),
         address: process.env.FROM_ADDRESS,
-        metadata: { nickname: "Treasury", email: "ops@example.local" }
+        metadata: { nickname: "Treasury", email: "ops@example.local" },
       };
       const { r, json, text } = await call("/v1/addressBook/recipients", { method: "POST", body });
-      if (!r.ok) return res.status(r.status).json({ ok:false, error: json ?? text });
-      return res.status(200).json({ ok:true, addressId: json?.data?.id, status: json?.data?.status, raw: json });
+      if (!r.ok) return res.status(r.status).json({ ok: false, error: json ?? text });
+      return res.status(200).json({ ok: true, addressId: json?.data?.id, status: json?.data?.status, raw: json });
     }
 
     // ===== Circle: TEST PAYOUT na Address Book recipienta =====
@@ -121,13 +103,17 @@ export default async function handler(req, res) {
         idempotencyKey: uuid(),
         destination: { type: "address_book", id: process.env.CIRCLE_ADDRESS_BOOK_ID },
         amount: { amount: "10.00", currency: process.env.CIRCLE_PAYOUT_CURRENCY || "USDC" },
-        chain: (process.env.PAYOUT_CHAIN || "BASE").toUpperCase()
+        chain: (process.env.PAYOUT_CHAIN || "BASE").toUpperCase(),
       };
       const { r, json, text } = await call("/v1/payouts", { method: "POST", body });
-      if (!r.ok) return res.status(r.status).json({ ok:false, error: json ?? text });
+      if (!r.ok) return res.status(r.status).json({ ok: false, error: json ?? text });
       return res.status(200).json({
-        ok:true, payoutId: json?.data?.id, status: json?.data?.status,
-        chain: json?.data?.chain, amount: json?.data?.amount, destination: json?.data?.destination
+        ok: true,
+        payoutId: json?.data?.id,
+        status: json?.data?.status,
+        chain: json?.data?.chain,
+        amount: json?.data?.amount,
+        destination: json?.data?.destination,
       });
     }
 
@@ -149,18 +135,18 @@ export default async function handler(req, res) {
       if (!paymentIntentId || typeof amount !== "number" || !currency) {
         return res.status(400).json({ error: "Missing paymentIntentId, amount or currency" });
       }
-      if (seenPayments.has(paymentIntentId)) return res.status(200).json({ ok:true, deduped:true });
+      if (seenPayments.has(paymentIntentId)) return res.status(200).json({ ok: true, deduped: true });
       seenPayments.add(paymentIntentId);
 
       const pPrintify = parseFloat(process.env.SPLIT_PRINTIFY_PERCENT ?? "0.50");
-      const pEth      = parseFloat(process.env.SPLIT_ETH_PERCENT ?? "0.30");
-      const pProfit   = parseFloat(process.env.SPLIT_PROFIT_PERCENT ?? "0.20");
-      const total     = (pPrintify + pEth + pProfit) || 1;
+      const pEth = parseFloat(process.env.SPLIT_ETH_PERCENT ?? "0.30");
+      const pProfit = parseFloat(process.env.SPLIT_PROFIT_PERCENT ?? "0.20");
+      const total = (pPrintify + pEth + pProfit) || 1;
 
       const split = {
         printify: round2(amount * (pPrintify / total)),
-        eth:      round2(amount * (pEth / total)),
-        profit:   round2(amount * (pProfit / total)),
+        eth: round2(amount * (pEth / total)),
+        profit: round2(amount * (pProfit / total)),
       };
       const upperCurrency = String(currency).toUpperCase();
 
@@ -168,17 +154,22 @@ export default async function handler(req, res) {
       let payoutResult = { skipped: true }; // Stripe Payouts voliteľne
 
       return res.status(200).json({
-        ok:true,
+        ok: true,
         paymentIntentId,
         split,
-        results: { printify: {status:"reserved", note:`Keep ${split.printify} ${upperCurrency} on card.`}, eth: ethResult, profit: payoutResult },
+        results: {
+          printify: { status: "reserved", note: `Keep ${split.printify} ${upperCurrency} on card.` },
+          eth: ethResult,
+          profit: payoutResult,
+        },
         ms: Date.now() - start,
       });
     }
 
-    return res.status(404).json({ error: "Unknown action", actions: [
-      "circle-ping","circle-add-address","circle-payout-test","circle-payout-status","splitchain"
-    ]});
+    return res.status(404).json({
+      error: "Unknown action",
+      actions: Array.from(knownActions),
+    });
   } catch (e) {
     return res.status(500).json({ error: e.message || String(e) });
   }
