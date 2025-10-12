@@ -36,7 +36,6 @@ async function circlePayout({ amount, currency = "USDC" }) {
 }
 
 export default async function handler(req, res) {
-  const startedAt = Date.now();
   if (req.method !== "POST") return res.status(405).json({ error: "Method not allowed" });
 
   const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
@@ -63,17 +62,17 @@ export default async function handler(req, res) {
       const amount = (session.amount_total ?? 0) / 100;
       const currency = (session.currency ?? "eur").toUpperCase();
 
-      const splitchainUrl =
-        process.env.SPLITCHAIN_URL
-          || (process.env.VERCEL_URL
-                ? `https://${process.env.VERCEL_URL}/pages/api/chainvers?action=splitchain`.replace("/pages","")
-                : "https://chainvers.vercel.app/api/chainvers?action=splitchain");
-
       const confirmPayload = { paymentIntentId, crop_data: session.metadata?.crop_data ?? null, user_address: session.metadata?.user_address || null };
       const splitPayload   = { paymentIntentId, amount, currency };
 
+      const splitchainUrl =
+        process.env.SPLITCHAIN_URL
+          || (process.env.VERCEL_URL
+                ? `https://${process.env.VERCEL_URL}/api/splitchain`
+                : "https://chainvers.vercel.app/api/splitchain");
+
       const useToken = process.env.CIRCLE_PAYOUT_CURRENCY || "USDC";
-      const amountToToken = amount;
+      const amountToToken = amount; // jednoduché 1:1 (EUR -> USDC číslo) – upravíš si podľa pricingu
 
       const tasks = [
         fetch("https://chainvers.free.nf/confirm_payment.php", {
@@ -95,7 +94,7 @@ export default async function handler(req, res) {
       ];
 
       await Promise.allSettled(tasks);
-      return res.status(200).json({ received: true, ms: Date.now() - startedAt });
+      return res.status(200).json({ received: true });
     }
 
     return res.status(200).json({ received: true });
