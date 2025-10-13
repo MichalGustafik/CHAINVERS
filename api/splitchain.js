@@ -5,7 +5,8 @@ const seenPayments = new Set(); // idempotencia pre splitchain
 
 export default async function handler(req, res) {
   try {
-    const { action, id } = req.query || {};
+    const { id } = req.query || {};
+    const action = req.query?.action || (req.method === "POST" ? "splitchain" : undefined);
     const key = process.env.CIRCLE_API_KEY;
 
     // --- helpers ---
