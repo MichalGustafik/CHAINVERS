@@ -1,8 +1,6 @@
 // pages/api/splitchain.js
-// Spracuje a rozdelí platbu po Stripe checkoute.
-// Automaticky volaný zo stripe_webhook.js.
-
-import Stripe from "stripe";
+// CHAINVERS — simplified SplitChain v2
+// 30% Printify reserve + 70% Revolut (zisk + fees), optional crypto leg.
 
 const seenPayments = new Set();
 
@@ -10,16 +8,14 @@ export default async function handler(req, res) {
   console.log("[SPLITCHAIN] START", {
     method: req.method,
     url: req.url,
-    ua: req.headers["user-agent"] || null,
+    ua: req.headers["user-agent"],
   });
 
-  if (req.method !== "POST") {
-    console.warn("[SPLITCHAIN] 405 Method not allowed:", req.method);
+  if (req.method !== "POST")
     return res.status(405).json({ error: "Method not allowed" });
-  }
 
   try {
-    // načítanie JSON tela
+    // bezpečne načítaj JSON telo
     let body = req.body;
     if (!body || typeof body !== "object") {
       const chunks = [];
@@ -28,43 +24,57 @@ export default async function handler(req, res) {
       try {
         body = raw ? JSON.parse(raw) : {};
       } catch {
-        console.error("[SPLITCHAIN] JSON parse failed");
+        console.error("[SPLITCHAIN] JSON parse fail");
         body = {};
       }
     }
 
-    const { paymentIntentId, amount, currency, split } = body || {};
-    if (!paymentIntentId || typeof amount !== "number" || !currency) {
-      console.error("[SPLITCHAIN] BAD PAYLOAD", { paymentIntentId, amount, currency });
-      return res.status(400).json({ error: "Missing paymentIntentId, amount or currency" });
-    }
+    const { paymentIntentId, amount, currency } = body || {};
+    if (!paymentIntentId || typeof amount !== "number" || !currency)
+      return res.status(400).json({ error: "Missing data" });
 
-    // idempotencia
-    if (seenPayments.has(paymentIntentId)) {
-      console.log("[SPLITCHAIN] DEDUP", paymentIntentId);
+    if (seenPayments.has(paymentIntentId))
       return res.status(200).json({ ok: true, deduped: true });
-    }
     seenPayments.add(paymentIntentId);
 
     const upperCurrency = currency.toUpperCase();
 
-    // ak Stripe_webhook neposlal split objekt, vypočítame ho tu (30/30/30/10)
-    const computedSplit = split || {
-      printify: round2(amount * 0.3),
-      crypto: round2(amount * 0.3),
-      profit: round2(amount * 0.3),
-      fees: round2(amount * 0.1),
+    // tvoje nové percentá
+    const P_PRINTIFY = 0.3;
+    const P_REVOLUT  = 0.7;
+
+    const split = {
+      printify: round2(amount * P_PRINTIFY),
+      revolut:  round2(amount * P_REVOLUT),
     };
+    console.log("[SPLITCHAIN] 💰 Rozdelenie", split);
 
-    console.log("[SPLITCHAIN] 💰 Rozdelenie", computedSplit);
-
-    // 1️⃣ Printify časť — len evidencia, môžeš neskôr doplniť API call
+    // 1️⃣ Printify (len evidencia)
     const printifyResult = {
       status: "reserved",
-      note: `Keep ${computedSplit.printify} ${upperCurrency} for Printify.`,
+      note: `Keep ${split.printify} ${upperCurrency} ready for Printify.`,
     };
 
-    // 2️⃣ Crypto časť — voliteľné (ak máš coinbase_send alebo Circle integráciu)
+    // 2️⃣ Revolut – voliteľné pingnutie endpointu (všetko Stripe pošle na Revolut)
+    let revolutResult = { skipped: true };
+    if (process.env.REVOLUT_PROFIT_URL) {
+      try {
+        const r = await fetch(process.env.REVOLUT_PROFIT_URL, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            amount: split.revolut,
+            currency: upperCurrency,
+            ref: paymentIntentId,
+          }),
+        });
+        revolutResult = { ok: r.ok, status: r.status };
+      } catch (e) {
+        revolutResult = { ok: false, error: e?.message || String(e) };
+      }
+    }
+
+    // 3️⃣ voliteľný crypto krok (ak ENABLE_CRYPTO_SEND = true)
     let cryptoResult = { skipped: true };
     if ((process.env.ENABLE_CRYPTO_SEND ?? "false").toLowerCase() === "true") {
       try {
@@ -75,80 +85,26 @@ export default async function handler(req, res) {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
-            eurAmount: computedSplit.crypto,
+            eurAmount: split.printify, // napr. použi printify časť ako zdroj
             to: process.env.CONTRACT_ADDRESS,
             clientRef: paymentIntentId,
           }),
         });
         const text = await r.text();
-        cryptoResult = { ok: r.ok, status: r.status, preview: text.slice(0, 300) };
+        cryptoResult = { ok: r.ok, status: r.status, preview: text.slice(0, 200) };
       } catch (e) {
         cryptoResult = { ok: false, error: e?.message || String(e) };
-      }
-    }
-
-    // 3️⃣ Profit + Fees — voliteľné pingy na Revolut alebo vlastný účet
-    let profitResult = { skipped: true };
-    let feesResult = { skipped: true };
-    if (process.env.REVOLUT_PROFIT_URL) {
-      try {
-        const r = await fetch(process.env.REVOLUT_PROFIT_URL, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            amount: computedSplit.profit,
-            currency: upperCurrency,
-            ref: paymentIntentId,
-          }),
-        });
-        profitResult = { ok: r.ok, status: r.status };
-      } catch (e) {
-        profitResult = { ok: false, error: e?.message || String(e) };
-      }
-    }
-
-    if (process.env.REVOLUT_FEES_URL) {
-      try {
-        const r = await fetch(process.env.REVOLUT_FEES_URL, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            amount: computedSplit.fees,
-            currency: upperCurrency,
-            ref: paymentIntentId,
-          }),
-        });
-        feesResult = { ok: r.ok, status: r.status };
-      } catch (e) {
-        feesResult = { ok: false, error: e?.message || String(e) };
-      }
-    }
-
-    // 4️⃣ voliteľne Stripe Payout (ak chceš vyplácať zostatok)
-    let stripePayoutResult = { skipped: true };
-    if ((process.env.ENABLE_STRIPE_PAYOUT ?? "false").toLowerCase() === "true") {
-      try {
-        const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
-        const payout = await stripe.payouts.create({
-          amount: Math.round(computedSplit.profit * 100),
-          currency: upperCurrency.toLowerCase(),
-        });
-        stripePayoutResult = { ok: true, payoutId: payout.id, status: payout.status };
-      } catch (e) {
-        stripePayoutResult = { ok: false, error: e?.message || String(e) };
       }
     }
 
     const result = {
       ok: true,
       paymentIntentId,
-      split: computedSplit,
+      split,
       results: {
         printify: printifyResult,
+        revolut: revolutResult,
         crypto: cryptoResult,
-        profit: profitResult,
-        fees: feesResult,
-        stripePayout: stripePayoutResult,
       },
     };
 
@@ -156,7 +112,7 @@ export default async function handler(req, res) {
     return res.status(200).json(result);
   } catch (err) {
     console.error("[SPLITCHAIN] FATAL", err?.message);
-    return res.status(500).json({ error: "Splitchain failed", detail: err?.message });
+    return res.status(500).json({ error: err?.message || "Internal error" });
   }
 }
 
