@@ -1,5 +1,10 @@
 import Stripe from "stripe";
 
+// V Node 18+ je fetch vstavaný, ale pre istotu fallback:
+if (typeof fetch === "undefined") {
+  global.fetch = (...args) => import("node-fetch").then(({ default: f }) => f(...args));
+}
+
 export const config = { api: { bodyParser: false } };
 
 // ==========================
@@ -87,7 +92,7 @@ async function createPaymentProxy(req, res) {
 }
 
 // ==========================
-// 2️⃣ STRIPE SESSION STATUS (for thankyou.php)
+// 2️⃣ STRIPE SESSION STATUS
 // ==========================
 async function stripeSessionStatus(req, res) {
   const sessionId = req.query.session_id;
