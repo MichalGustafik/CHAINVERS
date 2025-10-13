@@ -1,6 +1,6 @@
 import Stripe from "stripe";
 
-// V Node 18+ je fetch vstavaný, pre istotu fallback:
+// Node 18+: fetch je vstavaný; fallback pre istotu
 if (typeof fetch === "undefined") {
   global.fetch = (...args) => import("node-fetch").then(({ default: f }) => f(...args));
 }
@@ -12,16 +12,20 @@ export const config = { api: { bodyParser: false } };
 // ==========================
 const STRIPE_SECRET = process.env.STRIPE_SECRET_KEY;
 const STRIPE_WHSEC = process.env.STRIPE_WEBHOOK_SECRET;
+
 const CIRCLE_API_KEY = process.env.CIRCLE_API_KEY;
 const CIRCLE_BASE = process.env.CIRCLE_BASE || "https://api.circle.com";
 const PAYOUT_CHAIN = (process.env.PAYOUT_CHAIN || "BASE").toUpperCase();
 const CONTRACT_ADDRESS = process.env.CONTRACT_ADDRESS;
 
-// InfinityFree doména, kam sa Stripe po platbe vráti
+// InfinityFree doména (kam sa Stripe po platbe vracia aj kam logujeme)
 const INF_FREE_URL = "https://chainvers.free.nf";
 
+// Voliteľné: ak už máš uložený recipient v Address Booku
+let CACHED_RECIPIENT_ID = process.env.CIRCLE_ADDRESS_BOOK_ID || null;
+
 // ==========================
-// Lokálna pamäť pre payouty (ephemeral)
+// Lokálna pamäť payoutov (ephemeral)
 // ==========================
 const PayoutDB = new Map();
 
@@ -36,7 +40,7 @@ export default async function handler(req, res) {
     if (action === "stripe_session_status") return stripeSessionStatus(req, res);
     if (action === "stripe_webhook") return stripeWebhook(req, res);
     if (action === "payout_status") return payoutStatus(req, res);
-    if (action === "circle_payout") return circlePayout(req, res);
+    if (action === "circle_payout") return circlePayout(req, res); // manuálne testovanie
     if (action === "ping") return res.status(200).json({ ok: true, now: new Date().toISOString() });
 
     return res.status(400).json({ error: "Unknown ?action=" });
@@ -76,11 +80,9 @@ async function createPaymentProxy(req, res) {
         },
       ],
       metadata: {
-        // presne ako to používaš na IF
         crop_data: JSON.stringify(crop_data || {}),
         user_address: user_address || "unknown",
       },
-      // ✅ Po platbe sa užívateľ vráti na InfinityFree
       success_url: `${INF_FREE_URL}/thankyou.php?session_id={CHECKOUT_SESSION_ID}`,
       cancel_url: `${INF_FREE_URL}/index.php`,
     });
@@ -119,15 +121,13 @@ async function stripeSessionStatus(req, res) {
 }
 
 // ==========================
-// 3️⃣ STRIPE WEBHOOK
+// 3️⃣ STRIPE WEBHOOK → spusti Circle payout
 // ==========================
 async function stripeWebhook(req, res) {
   if (req.method !== "POST") return res.status(405).json({ error: "Method not allowed" });
 
   const stripe = new Stripe(STRIPE_SECRET);
-  const chunks = [];
-  for await (const ch of req) chunks.push(ch);
-  const rawBody = Buffer.concat(chunks);
+  const rawBody = await readRaw(req);
 
   let event;
   try {
@@ -146,7 +146,7 @@ async function stripeWebhook(req, res) {
   const currency = (s.currency ?? "eur").toUpperCase();
   const metadata = s.metadata || {};
 
-  // 3.1) IHNEĎ zapíšeme na InfinityFree (aby mal IF vždy istotu)
+  // 3.1) Zapíš na IF — aby mal IF hneď sumu/stav
   try {
     const confirmPayload = {
       paymentIntentId: pi,
@@ -154,14 +154,14 @@ async function stripeWebhook(req, res) {
       currency,
       crop_data: safeParseJSON(metadata.crop_data),
       user_address: metadata.user_address || null,
-      status: "paid", // Stripe confirmed
+      status: "paid",
       source: "stripe_webhook",
-      ts: Date.now()
+      ts: Date.now(),
     };
     const r = await fetch(`${INF_FREE_URL}/confirm_payment.php`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(confirmPayload)
+      body: JSON.stringify(confirmPayload),
     });
     const txt = await r.text();
     console.log("[IF confirm_payment.php] status:", r.status, "body:", txt.slice(0, 300));
@@ -169,7 +169,7 @@ async function stripeWebhook(req, res) {
     console.error("[IF confirm_payment.php] failed", e?.message || e);
   }
 
-  // 3.2) Ulož lokálny stav payoutu a spusti Circle
+  // 3.2) Ulož lokálne a spusti Circle payout (fire-and-forget)
   PayoutDB.set(pi, {
     payoutId: null,
     status: "queued",
@@ -186,41 +186,37 @@ async function stripeWebhook(req, res) {
 }
 
 // ==========================
-// 4️⃣ CIRCLE PAYOUT (manuálny endpoint, ak chceš)
+// 4️⃣ MANUÁLNY CIRCLE PAYOUT (na test)
 // ==========================
 async function circlePayout(req, res) {
   const body = await readJson(req);
   const amount = body.amount;
-  const currency = body.currency || "USDC"; // POZOR: Circle očakáva token (USDC/EURC), nie fiat
+  const currency = body.currency || "USDC"; // Circle = token (USDC/EURC)
   const address = body.to || CONTRACT_ADDRESS;
 
   if (!address) return res.status(400).json({ error: "Missing CONTRACT_ADDRESS/to" });
   if (!amount) return res.status(400).json({ error: "Missing amount" });
 
-  const payload = {
-    idempotencyKey: uuid(),
-    destination: { type: "crypto", address },
-    amount: { amount: String(amount), currency },
-    chain: PAYOUT_CHAIN,
-  };
+  try {
+    const recipientId = await ensureAddressBookRecipient(address);
+    const payload = {
+      idempotencyKey: uuid(),
+      destination: { type: "address_book", id: recipientId },
+      amount: { amount: String(amount), currency },
+      chain: PAYOUT_CHAIN,
+    };
 
-  console.log("[Circle payout] →", payload);
+    console.log("[Circle payout] →", payload);
 
-  const r = await fetch(`${CIRCLE_BASE}/v1/payouts`, {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${CIRCLE_API_KEY}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify(payload),
-  });
+    const r = await circleFetch("/v1/payouts", { method: "POST", body: payload });
+    console.log("[Circle payout] ←", r.status, JSON.stringify(r.json).slice(0, 500));
 
-  const txt = await r.text();
-  let j = null; try { j = JSON.parse(txt); } catch {}
-  console.log("[Circle payout] ←", r.status, txt.slice(0, 500));
-
-  if (!r.ok) return res.status(r.status).json({ ok: false, error: j || txt });
-  return res.status(200).json({ ok: true, result: j?.data || j });
+    if (!r.ok) return res.status(r.status).json({ ok: false, error: r.json || r.text });
+    return res.status(200).json({ ok: true, result: r.json?.data || r.json });
+  } catch (e) {
+    console.error("[circlePayout] failed", e?.message || e);
+    return res.status(500).json({ ok: false, error: e?.message || String(e) });
+  }
 }
 
 // ==========================
@@ -236,12 +232,8 @@ async function payoutStatus(req, res) {
   // ak poznáme payoutId, skúsime živý stav z Circle
   if (local.payoutId) {
     try {
-      const r = await fetch(`${CIRCLE_BASE}/v1/payouts/${local.payoutId}`, {
-        headers: { Authorization: `Bearer ${CIRCLE_API_KEY}` },
-      });
-      const txt = await r.text();
-      let j = null; try { j = JSON.parse(txt); } catch {}
-      if (r.ok) local.status = (j?.data?.status || local.status);
+      const r = await circleFetch(`/v1/payouts/${local.payoutId}`);
+      if (r.ok) local.status = (r.json?.data?.status || local.status);
       PayoutDB.set(pi, { ...local, updatedAt: Date.now() });
     } catch (e) {
       console.warn("[payout_status] circle fetch failed:", e?.message || e);
@@ -258,42 +250,75 @@ async function payoutStatus(req, res) {
 }
 
 // ==========================
-// HELPERS
+// HELPERS – Circle (Address Book workflow)
 // ==========================
-async function triggerCirclePayout(pi, amount, currencyFromStripe) {
-  // POZOR: Circle 'currency' je token (USDC/EURC). Ak prijímaš EUR z karty,
-  // tu posielame token (napr. USDC). Číslo amount nechávaš podľa tvojej logiky (napr. 30%).
+async function ensureAddressBookRecipient(address) {
+  if (!CIRCLE_API_KEY) throw new Error("Missing CIRCLE_API_KEY");
+  if (!address) throw new Error("Missing destination address (CONTRACT_ADDRESS)");
+
+  // ak máme v ENV/cache, použi
+  if (CACHED_RECIPIENT_ID) return CACHED_RECIPIENT_ID;
+
+  // 1) create recipient
+  const createBody = {
+    idempotencyKey: uuid(),
+    chain: PAYOUT_CHAIN,        // napr. "BASE"
+    address,                    // tvoja kontrakt/EOA adresa
+    metadata: { nickname: "Treasury", note: "CHAINVERS contract" },
+  };
+  const createRes = await circleFetch("/v1/addressBook/recipients", { method: "POST", body: createBody });
+  if (!createRes.ok) {
+    throw new Error(`Circle AddressBook create failed: ${JSON.stringify(createRes.json || createRes.text)}`);
+  }
+  const recipientId = createRes.json?.data?.id;
+  let status = createRes.json?.data?.status || "unknown";
+  console.log("[Circle AddressBook] created", { recipientId, status });
+
+  // 2) poll status → active
+  const start = Date.now();
+  const timeoutMs = 60_000;    // 60s
+  const intervalMs = 2_000;    // 2s
+  while (status !== "active" && Date.now() - start < timeoutMs) {
+    await sleep(intervalMs);
+    const getRes = await circleFetch(`/v1/addressBook/recipients/${recipientId}`);
+    if (!getRes.ok) throw new Error(`Circle AddressBook get failed: ${JSON.stringify(getRes.json || getRes.text)}`);
+    status = getRes.json?.data?.status || status;
+    console.log("[Circle AddressBook] poll", { recipientId, status });
+  }
+  if (status !== "active") {
+    throw new Error(`Recipient not active after polling (${status})`);
+  }
+
+  // cache + hint (skopíruj si do ENV, nech to neriešime znova)
+  CACHED_RECIPIENT_ID = recipientId;
+  console.log(`[Circle AddressBook] ACTIVE id=${recipientId}  ➜ Ulož do Vercel ENV: CIRCLE_ADDRESS_BOOK_ID=${recipientId}`);
+  return recipientId;
+}
+
+async function triggerCirclePayout(pi, amount /* number */, currencyFromStripe /* "EUR"|... */) {
+  if (!CONTRACT_ADDRESS) throw new Error("Missing CONTRACT_ADDRESS");
+
+  // 1) Ensure recipient
+  const recipientId = await ensureAddressBookRecipient(CONTRACT_ADDRESS);
+
+  // 2) Create payout (USDC/EURC token – uprav si podľa reality)
   const payload = {
     idempotencyKey: uuid(),
-    destination: { type: "crypto", address: CONTRACT_ADDRESS },
+    destination: { type: "address_book", id: recipientId },
     amount: { amount: String(amount), currency: "USDC" },
     chain: PAYOUT_CHAIN,
   };
 
-  // sanity checks
-  if (!CIRCLE_API_KEY) throw new Error("Missing CIRCLE_API_KEY");
-  if (!CONTRACT_ADDRESS) throw new Error("Missing CONTRACT_ADDRESS");
-
   console.log("[Circle trigger] →", payload);
 
-  const r = await fetch(`${CIRCLE_BASE}/v1/payouts`, {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${CIRCLE_API_KEY}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify(payload),
-  });
-
-  const txt = await r.text();
-  let j = null; try { j = JSON.parse(txt); } catch {}
-  console.log("[Circle trigger] ←", r.status, txt.slice(0, 500));
+  const r = await circleFetch("/v1/payouts", { method: "POST", body: payload });
+  console.log("[Circle trigger] ←", r.status, JSON.stringify(r.json || r.text).slice(0, 500));
 
   if (!r.ok) {
-    throw new Error(`Circle payout failed: ${r.status} ${txt}`);
+    throw new Error(`Circle payout failed: ${r.status} ${JSON.stringify(r.json || r.text)}`);
   }
 
-  const data = j?.data || j;
+  const data = r.json?.data || r.json;
   // ulož lokálne mapovanie pre payout_status
   const prev = PayoutDB.get(pi) || {};
   PayoutDB.set(pi, {
@@ -305,7 +330,7 @@ async function triggerCirclePayout(pi, amount, currencyFromStripe) {
     updatedAt: Date.now(),
   });
 
-  // (voliteľne) môžeš odoslať aj update späť na IF
+  // (voliteľne) pošli update na IF
   try {
     await fetch(`${INF_FREE_URL}/confirm_payment.php`, {
       method: "POST",
@@ -321,12 +346,38 @@ async function triggerCirclePayout(pi, amount, currencyFromStripe) {
   } catch {}
 }
 
+// ==========================
+// Generic helpers
+// ==========================
+async function circleFetch(path, { method = "GET", body } = {}) {
+  const url = `${CIRCLE_BASE}${path}`;
+  const headers = {
+    Authorization: `Bearer ${CIRCLE_API_KEY}`,
+    "Content-Type": "application/json",
+  };
+  const init = { method, headers };
+  if (body !== undefined) init.body = typeof body === "string" ? body : JSON.stringify(body);
+
+  const res = await fetch(url, init);
+  const text = await res.text();
+  let json = null; try { json = JSON.parse(text); } catch {}
+  if (process.env.DEBUG_CIRCLE === "true") {
+    console.log("[circle] req", method, url, "payload:", body);
+    console.log("[circle] res", res.status, text.slice(0, 800));
+  }
+  return { ok: res.ok, status: res.status, json, text };
+}
+
 async function readJson(req) {
   if (req.body && typeof req.body === "object") return req.body;
+  const raw = await readRaw(req);
+  try { return JSON.parse(raw); } catch { return {}; }
+}
+
+async function readRaw(req) {
   const chunks = [];
   for await (const ch of req) chunks.push(ch);
-  const raw = Buffer.concat(chunks).toString("utf8");
-  try { return JSON.parse(raw); } catch { return {}; }
+  return Buffer.concat(chunks);
 }
 
 function safeParseJSON(x) {
@@ -334,10 +385,13 @@ function safeParseJSON(x) {
   try { return JSON.parse(x); } catch { return null; }
 }
 
+function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+
 function uuid() {
   if (globalThis.crypto?.randomUUID) return crypto.randomUUID();
   return "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(/[xy]/g, (c) => {
-    const r = (Math.random() * 16) | 0, v = c === "x" ? r : (r & 0x3) | 0x8;
+    const r = (Math.random() * 16) | 0,
+      v = c === "x" ? r : (r & 0x3) | 0x8;
     return v.toString(16);
   });
 }
