@@ -4,6 +4,7 @@ export const config = { api: { bodyParser: false } };
 const BASE = process.env.CIRCLE_BASE || "https://api.circle.com";
 const HDRS = (key) => ({ Authorization: `Bearer ${key}`, "Content-Type": "application/json" });
 const seenPayments = new Set(); // idempotencia pre splitchain
+const splitCache = new Map();
 const seenStripeEvents = new Set();
 const BODY_CACHE = Symbol.for("CHAINVERS_BODY_CACHE");
 
@@ -209,6 +210,32 @@ export default async function handler(req, res) {
       return { split, results: { printify, circleBalance, circlePayout, contract }, currency };
     }
 
+    async function ensureSplitchain({ paymentIntentId, amount, currency, metadata }) {
+      if (!paymentIntentId) {
+        return { ok: false, error: "Missing paymentIntentId" };
+      }
+      if (typeof amount !== "number" || Number.isNaN(amount)) {
+        return { ok: false, error: "Invalid amount" };
+      }
+      const upperCurrency = String(currency || "").toUpperCase();
+      if (!upperCurrency) {
+        return { ok: false, error: "Missing currency" };
+      }
+      const cached = splitCache.get(paymentIntentId);
+      if (seenPayments.has(paymentIntentId)) {
+        return { ok: true, paymentIntentId, deduped: true, flow: cached || null };
+      }
+      seenPayments.add(paymentIntentId);
+      try {
+        const flow = await orchestrateSplitFlow({ paymentIntentId, amount, currency: upperCurrency, metadata });
+        splitCache.set(paymentIntentId, flow);
+        return { ok: true, paymentIntentId, deduped: false, flow };
+      } catch (err) {
+        seenPayments.delete(paymentIntentId);
+        throw err;
+      }
+    }
+
     // ===== Circle: ping =====
     if (action === "circle-ping") {
       if (!key) return res.status(500).json({ error: "Missing CIRCLE_API_KEY" });
@@ -324,11 +351,43 @@ export default async function handler(req, res) {
       if (!session_id) return res.status(400).json({ error: "Missing session_id" });
       const stripe = await getStripe();
       const session = await stripe.checkout.sessions.retrieve(session_id);
+      let splitchain = null;
+      if (session.payment_status === "paid") {
+        const amountCents = typeof session.amount_total === "number"
+          ? session.amount_total
+          : typeof session.amount_subtotal === "number"
+            ? session.amount_subtotal
+            : null;
+        if (amountCents !== null && session.payment_intent) {
+          const amount = amountCents / 100;
+          let metadata = null;
+          if (session.metadata) {
+            metadata = { ...session.metadata };
+            if (metadata.crop_data) {
+              try { metadata.crop_data = JSON.parse(metadata.crop_data); } catch {}
+            }
+          }
+          const result = await ensureSplitchain({
+            paymentIntentId: session.payment_intent,
+            amount,
+            currency: session.currency || "",
+            metadata: metadata || undefined,
+          });
+          splitchain = {
+            ok: result.ok,
+            deduped: !!result?.deduped,
+            paymentIntentId: result?.paymentIntentId,
+            ...(result?.flow || {}),
+            error: result?.error,
+          };
+        }
+      }
       return res.status(200).json({
         id: session.id,
         payment_status: session.payment_status,
         payment_intent: session.payment_intent,
         metadata: session.metadata,
+        splitchain,
       });
     }
 
@@ -362,8 +421,13 @@ export default async function handler(req, res) {
           crop_data: cropData,
           user_address: session.metadata?.user_address || null,
         };
-        const flow = await orchestrateSplitFlow({ paymentIntentId, amount, currency, metadata });
-        return res.status(200).json({ received: true, flow });
+        const result = await ensureSplitchain({ paymentIntentId, amount, currency, metadata });
+        return res.status(200).json({
+          received: true,
+          flow: result.flow || null,
+          deduped: !!result.deduped,
+          paymentIntentId: result.paymentIntentId,
+        });
       }
       return res.status(200).json({ received: true });
     }
@@ -378,11 +442,23 @@ export default async function handler(req, res) {
       if (!paymentIntentId || typeof amount !== "number" || !currency) {
         return res.status(400).json({ error: "Missing paymentIntentId, amount or currency" });
       }
-      if (seenPayments.has(paymentIntentId)) return res.status(200).json({ ok:true, deduped:true });
-      seenPayments.add(paymentIntentId);
-      const upperCurrency = String(currency).toUpperCase();
-      const flow = await orchestrateSplitFlow({ paymentIntentId, amount, currency: upperCurrency, metadata: body?.metadata || {} });
-      return res.status(200).json({ ok: true, paymentIntentId, ...flow, ms: Date.now() - start });
+      const result = await ensureSplitchain({
+        paymentIntentId,
+        amount,
+        currency,
+        metadata: body?.metadata || {},
+      });
+      if (!result.ok && result.error) {
+        return res.status(400).json({ error: result.error });
+      }
+      const responseBody = {
+        ok: true,
+        paymentIntentId: result.paymentIntentId,
+        ...(result.flow || {}),
+        deduped: !!result.deduped,
+        ms: Date.now() - start,
+      };
+      return res.status(200).json(responseBody);
     }
 
     return res.status(404).json({ error: "Unknown action", actions: [
