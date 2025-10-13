@@ -1,0 +1,13 @@
+{
+  "rewrites": [
+    { "source": "/api/circle-ping", "destination": "/api/chainvers?action=circle-ping" },
+    { "source": "/api/circle-add-address", "destination": "/api/chainvers?action=circle-add-address" },
+    { "source": "/api/circle-payout-test", "destination": "/api/chainvers?action=circle-payout-test" },
+    { "source": "/api/circle-payout-status", "destination": "/api/chainvers?action=circle-payout-status" },
+    { "source": "/api/splitchain", "destination": "/api/chainvers?action=splitchain" },
+    { "source": "/api/stripe_payment", "destination": "/api/chainvers?action=stripe-payment-intent" },
+    { "source": "/api/stripe_checkout", "destination": "/api/chainvers?action=stripe-checkout-session" },
+    { "source": "/api/stripe_session_status", "destination": "/api/chainvers?action=stripe-session-status" },
+    { "source": "/api/stripe_webhook", "destination": "/api/chainvers?action=stripe-webhook" }
+  ]
+}
