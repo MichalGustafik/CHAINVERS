@@ -2,7 +2,9 @@ import Stripe from "stripe";
 
 export const config = { api: { bodyParser: false } };
 
-// --- ENV ---
+// ==========================
+// ENV premenné
+// ==========================
 const STRIPE_SECRET = process.env.STRIPE_SECRET_KEY;
 const STRIPE_WHSEC = process.env.STRIPE_WEBHOOK_SECRET;
 const CIRCLE_API_KEY = process.env.CIRCLE_API_KEY;
@@ -11,20 +13,24 @@ const PAYOUT_CHAIN = (process.env.PAYOUT_CHAIN || "BASE").toUpperCase();
 const CONTRACT_ADDRESS = process.env.CONTRACT_ADDRESS;
 const BASE_URL = process.env.BASE_URL || (process.env.VERCEL_URL ? `https://${process.env.VERCEL_URL}` : "");
 
-// --- memory ---
-const PayoutDB = new Map(); // key: paymentIntentId → { status, payoutId, amount, currency, updatedAt }
+// ==========================
+// Lokálna pamäť pre payouty
+// ==========================
+const PayoutDB = new Map();
 
-// --- ROUTER ---
+// ==========================
+// Hlavný router
+// ==========================
 export default async function handler(req, res) {
   const action = (req.query?.action || "").toString().toLowerCase();
 
   try {
-    if (action === "stripe_checkout") return stripeCheckout(req, res);
     if (action === "create_payment_proxy") return createPaymentProxy(req, res);
+    if (action === "stripe_checkout") return stripeCheckout(req, res);
     if (action === "stripe_webhook") return stripeWebhook(req, res);
-    if (action === "stripe_session_status") return stripeSessionStatus(req, res); // ✅ pre tvoje thankyou.php
-    if (action === "payout_status") return payoutStatus(req, res);
+    if (action === "stripe_session_status") return stripeSessionStatus(req, res);
     if (action === "circle_payout") return circlePayout(req, res);
+    if (action === "payout_status") return payoutStatus(req, res);
     if (action === "ping") return res.status(200).json({ ok: true, now: new Date().toISOString() });
 
     return res.status(400).json({ error: "Unknown ?action=" });
@@ -34,9 +40,50 @@ export default async function handler(req, res) {
   }
 }
 
-/* ────────────────────────────────────────────
-   STRIPE CHECKOUT
-──────────────────────────────────────────── */
+// ==========================
+// 1️⃣ CREATE PAYMENT PROXY
+// ==========================
+async function createPaymentProxy(req, res) {
+  if (req.method !== "POST") return res.status(405).json({ error: "Method not allowed" });
+  try {
+    const body = await readJson(req);
+    const { amount, currency, description, crop_data, user_address } = body;
+
+    if (!amount || !currency) {
+      return res.status(400).json({ error: "Missing amount or currency" });
+    }
+
+    const stripe = new Stripe(STRIPE_SECRET);
+
+    const session = await stripe.checkout.sessions.create({
+      mode: "payment",
+      payment_method_types: ["card"],
+      line_items: [{
+        price_data: {
+          currency: currency.toLowerCase(),
+          product_data: { name: description || "CHAINVERS Purchase" },
+          unit_amount: Math.round(Number(amount) * 100),
+        },
+        quantity: 1,
+      }],
+      metadata: {
+        crop_data: JSON.stringify(crop_data || {}),
+        user_address: user_address || "unknown",
+      },
+      success_url: `${BASE_URL}/thankyou.php?session_id={CHECKOUT_SESSION_ID}`,
+      cancel_url: `${BASE_URL}/index.php`,
+    });
+
+    return res.status(200).json({ checkout_url: session.url });
+  } catch (err) {
+    console.error("[createPaymentProxy] error", err);
+    return res.status(500).json({ error: err?.message || String(err) });
+  }
+}
+
+// ==========================
+// 2️⃣ STRIPE CHECKOUT (voliteľné)
+// ==========================
 async function stripeCheckout(req, res) {
   if (req.method !== "POST") return res.status(405).json({ error: "Method not allowed" });
   const body = await readJson(req);
@@ -47,25 +94,25 @@ async function stripeCheckout(req, res) {
   const session = await stripe.checkout.sessions.create({
     mode: "payment",
     line_items: [{
-      price_data: { currency, product_data: { name: "CHAINVERS Order" }, unit_amount: amount },
-      quantity: 1
+      price_data: { currency, product_data: { name: "CHAINVERS Order" }, unit_amount: amount * 100 },
+      quantity: 1,
     }],
     success_url: body.success_url,
     cancel_url: body.cancel_url,
-    metadata: body.metadata || {}
+    metadata: body.metadata || {},
   });
 
   return res.status(200).json({ id: session.id, url: session.url });
 }
 
-/* ────────────────────────────────────────────
-   STRIPE SESSION STATUS (for thankyou.php)
-──────────────────────────────────────────── */
+// ==========================
+// 3️⃣ STRIPE SESSION STATUS (thankyou.php)
+// ==========================
 async function stripeSessionStatus(req, res) {
   const sessionId = req.query.session_id;
   if (!sessionId) return res.status(400).json({ error: "Missing session_id" });
-  const stripe = new Stripe(STRIPE_SECRET);
 
+  const stripe = new Stripe(STRIPE_SECRET);
   try {
     const session = await stripe.checkout.sessions.retrieve(sessionId, { expand: ["payment_intent"] });
     const pi = session.payment_intent?.id;
@@ -76,7 +123,7 @@ async function stripeSessionStatus(req, res) {
       id: session.id,
       payment_status,
       payment_intent: pi,
-      metadata
+      metadata,
     });
   } catch (e) {
     console.error("[stripeSessionStatus] error", e);
@@ -84,9 +131,9 @@ async function stripeSessionStatus(req, res) {
   }
 }
 
-/* ────────────────────────────────────────────
-   STRIPE WEBHOOK → spustí payout
-──────────────────────────────────────────── */
+// ==========================
+// 4️⃣ STRIPE WEBHOOK
+// ==========================
 async function stripeWebhook(req, res) {
   if (req.method !== "POST") return res.status(405).json({ error: "Method not allowed" });
 
@@ -120,9 +167,9 @@ async function stripeWebhook(req, res) {
   return res.status(200).json({ received: true });
 }
 
-/* ────────────────────────────────────────────
-   CIRCLE PAYOUT
-──────────────────────────────────────────── */
+// ==========================
+// 5️⃣ CIRCLE PAYOUT
+// ==========================
 async function circlePayout(req, res) {
   const body = await readJson(req);
   const amount = body.amount;
@@ -146,9 +193,9 @@ async function circlePayout(req, res) {
   return res.status(200).json({ ok: true, result: j?.data || j });
 }
 
-/* ────────────────────────────────────────────
-   Payout STATUS (for thankyou.php)
-──────────────────────────────────────────── */
+// ==========================
+// 6️⃣ PAYOUT STATUS
+// ==========================
 async function payoutStatus(req, res) {
   const pi = req.query.pi;
   if (!pi) return res.status(400).json({ error: "Missing ?pi" });
@@ -156,14 +203,14 @@ async function payoutStatus(req, res) {
   const local = PayoutDB.get(pi);
   if (!local) return res.status(200).json({ ok: true, state: "unknown" });
 
-  // ak má payoutId → pozri v Circle
   if (local.payoutId) {
     try {
       const r = await fetch(`${CIRCLE_BASE}/v1/payouts/${local.payoutId}`, {
-        headers: { Authorization: `Bearer ${CIRCLE_API_KEY}` }
+        headers: { Authorization: `Bearer ${CIRCLE_API_KEY}` },
       });
       const txt = await r.text();
-      let j = null; try { j = JSON.parse(txt); } catch {}
+      let j = null;
+      try { j = JSON.parse(txt); } catch {}
       if (r.ok) local.status = j?.data?.status || local.status;
       PayoutDB.set(pi, { ...local, updatedAt: Date.now() });
     } catch {}
@@ -178,9 +225,9 @@ async function payoutStatus(req, res) {
   });
 }
 
-/* ────────────────────────────────────────────
-   HELPERS
-──────────────────────────────────────────── */
+// ==========================
+// 7️⃣ HELPERS
+// ==========================
 async function triggerCirclePayout(pi, amount, currency) {
   try {
     const payload = {
