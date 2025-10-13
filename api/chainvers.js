@@ -11,7 +11,9 @@ const CIRCLE_API_KEY = process.env.CIRCLE_API_KEY;
 const CIRCLE_BASE = process.env.CIRCLE_BASE || "https://api.circle.com";
 const PAYOUT_CHAIN = (process.env.PAYOUT_CHAIN || "BASE").toUpperCase();
 const CONTRACT_ADDRESS = process.env.CONTRACT_ADDRESS;
-const BASE_URL = process.env.BASE_URL || (process.env.VERCEL_URL ? `https://${process.env.VERCEL_URL}` : "");
+const BASE_URL =
+  process.env.BASE_URL ||
+  (process.env.VERCEL_URL ? `https://${process.env.VERCEL_URL}` : "");
 
 // ==========================
 // Lokálna pamäť pre payouty
@@ -26,11 +28,10 @@ export default async function handler(req, res) {
 
   try {
     if (action === "create_payment_proxy") return createPaymentProxy(req, res);
-    if (action === "stripe_checkout") return stripeCheckout(req, res);
-    if (action === "stripe_webhook") return stripeWebhook(req, res);
     if (action === "stripe_session_status") return stripeSessionStatus(req, res);
-    if (action === "circle_payout") return circlePayout(req, res);
+    if (action === "stripe_webhook") return stripeWebhook(req, res);
     if (action === "payout_status") return payoutStatus(req, res);
+    if (action === "circle_payout") return circlePayout(req, res);
     if (action === "ping") return res.status(200).json({ ok: true, now: new Date().toISOString() });
 
     return res.status(400).json({ error: "Unknown ?action=" });
@@ -45,6 +46,7 @@ export default async function handler(req, res) {
 // ==========================
 async function createPaymentProxy(req, res) {
   if (req.method !== "POST") return res.status(405).json({ error: "Method not allowed" });
+
   try {
     const body = await readJson(req);
     const { amount, currency, description, crop_data, user_address } = body;
@@ -58,14 +60,16 @@ async function createPaymentProxy(req, res) {
     const session = await stripe.checkout.sessions.create({
       mode: "payment",
       payment_method_types: ["card"],
-      line_items: [{
-        price_data: {
-          currency: currency.toLowerCase(),
-          product_data: { name: description || "CHAINVERS Purchase" },
-          unit_amount: Math.round(Number(amount) * 100),
+      line_items: [
+        {
+          price_data: {
+            currency: currency.toLowerCase(),
+            product_data: { name: description || "CHAINVERS objednávka" },
+            unit_amount: Math.round(Number(amount) * 100),
+          },
+          quantity: 1,
         },
-        quantity: 1,
-      }],
+      ],
       metadata: {
         crop_data: JSON.stringify(crop_data || {}),
         user_address: user_address || "unknown",
@@ -82,31 +86,7 @@ async function createPaymentProxy(req, res) {
 }
 
 // ==========================
-// 2️⃣ STRIPE CHECKOUT (voliteľné)
-// ==========================
-async function stripeCheckout(req, res) {
-  if (req.method !== "POST") return res.status(405).json({ error: "Method not allowed" });
-  const body = await readJson(req);
-  const stripe = new Stripe(STRIPE_SECRET);
-  const amount = Number(body.amount);
-  const currency = (body.currency || "eur").toLowerCase();
-
-  const session = await stripe.checkout.sessions.create({
-    mode: "payment",
-    line_items: [{
-      price_data: { currency, product_data: { name: "CHAINVERS Order" }, unit_amount: amount * 100 },
-      quantity: 1,
-    }],
-    success_url: body.success_url,
-    cancel_url: body.cancel_url,
-    metadata: body.metadata || {},
-  });
-
-  return res.status(200).json({ id: session.id, url: session.url });
-}
-
-// ==========================
-// 3️⃣ STRIPE SESSION STATUS (thankyou.php)
+// 2️⃣ STRIPE SESSION STATUS (for thankyou.php)
 // ==========================
 async function stripeSessionStatus(req, res) {
   const sessionId = req.query.session_id;
@@ -114,7 +94,9 @@ async function stripeSessionStatus(req, res) {
 
   const stripe = new Stripe(STRIPE_SECRET);
   try {
-    const session = await stripe.checkout.sessions.retrieve(sessionId, { expand: ["payment_intent"] });
+    const session = await stripe.checkout.sessions.retrieve(sessionId, {
+      expand: ["payment_intent"],
+    });
     const pi = session.payment_intent?.id;
     const payment_status = session.payment_status;
     const metadata = session.metadata || {};
@@ -132,7 +114,7 @@ async function stripeSessionStatus(req, res) {
 }
 
 // ==========================
-// 4️⃣ STRIPE WEBHOOK
+// 3️⃣ STRIPE WEBHOOK
 // ==========================
 async function stripeWebhook(req, res) {
   if (req.method !== "POST") return res.status(405).json({ error: "Method not allowed" });
@@ -144,13 +126,20 @@ async function stripeWebhook(req, res) {
 
   let event;
   try {
-    event = stripe.webhooks.constructEvent(rawBody, req.headers["stripe-signature"], STRIPE_WHSEC);
+    event = stripe.webhooks.constructEvent(
+      rawBody,
+      req.headers["stripe-signature"],
+      STRIPE_WHSEC
+    );
   } catch (err) {
     console.error("[stripeWebhook] bad signature", err?.message);
     return res.status(400).send(`Webhook Error: ${err.message}`);
   }
 
-  const okTypes = new Set(["checkout.session.completed", "checkout.session.async_payment_succeeded"]);
+  const okTypes = new Set([
+    "checkout.session.completed",
+    "checkout.session.async_payment_succeeded",
+  ]);
   if (!okTypes.has(event.type)) return res.status(200).json({ received: true });
 
   const s = event.data.object;
@@ -158,43 +147,54 @@ async function stripeWebhook(req, res) {
   const amount = (s.amount_total ?? 0) / 100;
   const currency = (s.currency ?? "eur").toUpperCase();
 
-  // uložíme "queued"
-  PayoutDB.set(pi, { payoutId: null, status: "queued", amount, currency, updatedAt: Date.now() });
+  PayoutDB.set(pi, {
+    payoutId: null,
+    status: "queued",
+    amount,
+    currency,
+    updatedAt: Date.now(),
+  });
 
-  // spustíme payout (asynchrónne)
   triggerCirclePayout(pi, amount, currency).catch(console.error);
-
   return res.status(200).json({ received: true });
 }
 
 // ==========================
-// 5️⃣ CIRCLE PAYOUT
+// 4️⃣ CIRCLE PAYOUT
 // ==========================
 async function circlePayout(req, res) {
   const body = await readJson(req);
   const amount = body.amount;
   const currency = body.currency || "USDC";
   const address = body.to || CONTRACT_ADDRESS;
+
   const payload = {
     idempotencyKey: uuid(),
     destination: { type: "crypto", address },
     amount: { amount: String(amount), currency },
     chain: PAYOUT_CHAIN,
   };
+
   const r = await fetch(`${CIRCLE_BASE}/v1/payouts`, {
     method: "POST",
-    headers: { Authorization: `Bearer ${CIRCLE_API_KEY}`, "Content-Type": "application/json" },
+    headers: {
+      Authorization: `Bearer ${CIRCLE_API_KEY}`,
+      "Content-Type": "application/json",
+    },
     body: JSON.stringify(payload),
   });
+
   const txt = await r.text();
   let j = null;
-  try { j = JSON.parse(txt); } catch {}
+  try {
+    j = JSON.parse(txt);
+  } catch {}
   if (!r.ok) return res.status(r.status).json({ ok: false, error: j || txt });
   return res.status(200).json({ ok: true, result: j?.data || j });
 }
 
 // ==========================
-// 6️⃣ PAYOUT STATUS
+// 5️⃣ PAYOUT STATUS
 // ==========================
 async function payoutStatus(req, res) {
   const pi = req.query.pi;
@@ -210,7 +210,9 @@ async function payoutStatus(req, res) {
       });
       const txt = await r.text();
       let j = null;
-      try { j = JSON.parse(txt); } catch {}
+      try {
+        j = JSON.parse(txt);
+      } catch {}
       if (r.ok) local.status = j?.data?.status || local.status;
       PayoutDB.set(pi, { ...local, updatedAt: Date.now() });
     } catch {}
@@ -226,7 +228,7 @@ async function payoutStatus(req, res) {
 }
 
 // ==========================
-// 7️⃣ HELPERS
+// HELPERS
 // ==========================
 async function triggerCirclePayout(pi, amount, currency) {
   try {
@@ -238,15 +240,26 @@ async function triggerCirclePayout(pi, amount, currency) {
     };
     const r = await fetch(`${CIRCLE_BASE}/v1/payouts`, {
       method: "POST",
-      headers: { Authorization: `Bearer ${CIRCLE_API_KEY}`, "Content-Type": "application/json" },
+      headers: {
+        Authorization: `Bearer ${CIRCLE_API_KEY}`,
+        "Content-Type": "application/json",
+      },
       body: JSON.stringify(payload),
     });
     const txt = await r.text();
     let j = null;
-    try { j = JSON.parse(txt); } catch {}
+    try {
+      j = JSON.parse(txt);
+    } catch {}
     if (!r.ok) throw new Error(txt);
     const data = j?.data || j;
-    PayoutDB.set(pi, { payoutId: data.id, status: data.status || "created", amount, currency, updatedAt: Date.now() });
+    PayoutDB.set(pi, {
+      payoutId: data.id,
+      status: data.status || "created",
+      amount,
+      currency,
+      updatedAt: Date.now(),
+    });
   } catch (e) {
     console.error("[triggerCirclePayout]", e);
   }
@@ -257,13 +270,18 @@ async function readJson(req) {
   const chunks = [];
   for await (const ch of req) chunks.push(ch);
   const raw = Buffer.concat(chunks).toString("utf8");
-  try { return JSON.parse(raw); } catch { return {}; }
+  try {
+    return JSON.parse(raw);
+  } catch {
+    return {};
+  }
 }
 
 function uuid() {
   if (globalThis.crypto?.randomUUID) return crypto.randomUUID();
-  return "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(/[xy]/g, c => {
-    const r = Math.random() * 16 | 0, v = c === "x" ? r : (r & 0x3 | 0x8);
+  return "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(/[xy]/g, (c) => {
+    const r = (Math.random() * 16) | 0,
+      v = c === "x" ? r : (r & 0x3) | 0x8;
     return v.toString(16);
   });
 }
