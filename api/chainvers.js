@@ -3,17 +3,17 @@ import Stripe from "stripe";
 export const config = { api: { bodyParser: false } };
 
 // ==========================
-// KONŠTANTY (natvrdo definované)
+// ENV premenné
 // ==========================
-const STRIPE_SECRET = "sk_test_XXXXXX"; // 🔹 Sem vlož svoj Stripe Secret Key
-const STRIPE_WHSEC = "whsec_XXXXXX";    // 🔹 Sem vlož svoj Stripe Webhook Secret
-const CIRCLE_API_KEY = "TEST_API_KEY:xxxx:xxxx"; // 🔹 Circle API key
-const CIRCLE_BASE = "https://api.circle.com";
-const PAYOUT_CHAIN = "BASE";
-const CONTRACT_ADDRESS = "0x1234567890abcdef..."; // 🔹 Tvoja smart kontrakt adresa
+const STRIPE_SECRET = process.env.STRIPE_SECRET_KEY;
+const STRIPE_WHSEC = process.env.STRIPE_WEBHOOK_SECRET;
+const CIRCLE_API_KEY = process.env.CIRCLE_API_KEY;
+const CIRCLE_BASE = process.env.CIRCLE_BASE || "https://api.circle.com";
+const PAYOUT_CHAIN = (process.env.PAYOUT_CHAIN || "BASE").toUpperCase();
+const CONTRACT_ADDRESS = process.env.CONTRACT_ADDRESS;
 
-// 🔹 Tvoj InfinityFree web (frontend)
-const FRONTEND_URL = "https://chainvers.free.nf";
+// InfinityFree doména, kam sa má Stripe po platbe vrátiť
+const INF_FREE_URL = "https://chainvers.free.nf";
 
 // ==========================
 // Lokálna pamäť pre payouty
@@ -74,8 +74,9 @@ async function createPaymentProxy(req, res) {
         crop_data: JSON.stringify(crop_data || {}),
         user_address: user_address || "unknown",
       },
-      success_url: `${FRONTEND_URL}/thankyou.php?session_id={CHECKOUT_SESSION_ID}`,
-      cancel_url: `${FRONTEND_URL}/index.php`,
+      // ✅ Po platbe sa užívateľ vráti na InfinityFree
+      success_url: `${INF_FREE_URL}/thankyou.php?session_id={CHECKOUT_SESSION_ID}`,
+      cancel_url: `${INF_FREE_URL}/index.php`,
     });
 
     return res.status(200).json({ checkout_url: session.url });
