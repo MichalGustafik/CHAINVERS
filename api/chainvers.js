@@ -380,7 +380,7 @@ async function triggerCirclePayout(pi, amount /* number */, currencyFromStripe /
 }
 
 // ==========================
-// A) PRIDANÉ – CHAINVERS ORDERS (pre accptpay.php)
+// A) PRIDANÉ – CHAINVERS ORDERS (opravná verzia s debug & demo)
 // ==========================
 async function chainversOrders(req, res) {
   if (req.method !== "POST") return res.status(405).json({ ok:false, error:"method_not_allowed" });
@@ -393,48 +393,73 @@ async function chainversOrders(req, res) {
   const body = await readJson(req);
   if (body?.kind !== "LIST_PENDING") return res.status(400).json({ ok:false, error:"bad_kind" });
 
-  // 1) Načítaj posledné zaplatené Stripe Checkout Sessions (24h)
+  const forceDemo = String(req.query?.demo || "") === "1"; // <- pridané
   let orders = [];
-  if (STRIPE_SECRET) {
+
+  if (!forceDemo && STRIPE_SECRET) {
     try {
-      const since = Math.floor(Date.now()/1000) - 24*3600;
-      const list = await fetch(
-        "https://api.stripe.com/v1/checkout/sessions?limit=20&expand[]=data.payment_intent&created[gte]="+since,
+      const since = Math.floor(Date.now() / 1000) - 24 * 3600;
+      const resp = await fetch(
+        `https://api.stripe.com/v1/checkout/sessions?limit=20&expand[]=data.payment_intent&created[gte]=${since}`,
         { headers: { Authorization: `Bearer ${STRIPE_SECRET}` } }
       );
-      const js = await list.json();
+
+      const txt = await resp.text();
+      let js = null;
+      try { js = JSON.parse(txt); } catch {}
+
+      if (!resp.ok) {
+        console.warn("[chainversOrders] stripe !ok", resp.status, txt.slice(0, 400));
+        return res.status(502).json({
+          ok: false,
+          source: "stripe",
+          status: resp.status,
+          body: txt.slice(0, 400),
+        });
+      }
+
       orders = (js?.data || [])
         .filter((s) => s.payment_status === "paid")
         .map((s) => ({
           order_id: s.metadata?.order_id || s.id,
-          user_id:  s.metadata?.user_id  || (s.customer_details?.email || "unknown"),
-          amount:   Number(s.amount_total ? s.amount_total/100 : s.amount_subtotal/100 || 0),
+          user_id: s.metadata?.user_id || (s.customer_details?.email || "unknown"),
+          amount: Number(
+            s.amount_total ? s.amount_total / 100 : s.amount_subtotal / 100 || 0
+          ),
           currency: String(s.currency || "eur").toUpperCase(),
           description: s.metadata?.description || "Order",
-          target: s.metadata?.target ? safeParseJSON(s.metadata.target) : undefined,
         }));
     } catch (e) {
       console.warn("[chainversOrders] stripe load failed:", e?.message || e);
+      return res.status(500).json({
+        ok: false,
+        error: "stripe_fetch_failed",
+        detail: String(e?.message || e),
+      });
     }
   }
 
-  // DEMO fallback (zapni, ak potrebuješ hneď niečo vidieť)
+  // DEMO fallback
   if (!orders.length) {
+    if (!STRIPE_SECRET) console.warn("[chainversOrders] Missing STRIPE_SECRET – using demo");
     orders = [
-      { order_id: 'demo-1001', user_id: 'user-42', amount: 29.9, currency: 'EUR', description: 'Poster A' },
-      { order_id: 'demo-1002', user_id: 'user-99', amount: 12.5, currency: 'EUR', description: 'Sticker Pack' },
+      { order_id: "demo-1001", user_id: "user-42", amount: 29.9, currency: "EUR", description: "Poster A" },
+      { order_id: "demo-1002", user_id: "user-99", amount: 12.5, currency: "EUR", description: "Sticker Pack" },
     ];
   }
 
-  // 2) Coinbase Commerce charge pre každú objednávku (predvyplnená suma)
+  // Coinbase Commerce pre každú objednávku
   const enriched = [];
   for (const o of orders) {
-    const url = await createCoinbaseCharge(o).catch(()=>null);
+    const url = await createCoinbaseCharge(o).catch(() => null);
     enriched.push({ ...o, coinbase_url: url || undefined });
   }
 
-  return res.status(200).json({ ok:true, orders: enriched });
+  return res.status(200).json({ ok: true, orders: enriched });
 }
+
+
+
 
 // Pomocník: Coinbase Commerce charge
 async function createCoinbaseCharge(o) {
