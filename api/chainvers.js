@@ -527,6 +527,12 @@ function cbHeaders(method, pathAndQuery, body) {
 }
 async function cbPost(path, body) {
   const headers = cbHeaders("POST", path, body);
-  const r = await fetch(`${CB_API_BASE}${path}`, { method:"POST", headers, body: JSON.stringify(body) });
-  const t = await r.text(); let j=null; try{ j=JSON.parse(t);}catch{}
-  return { ok: r.ok, status: r.status, json: j, tex
+  const r = await fetch(`${CB_API_BASE}${path}`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify(body),
+  });
+  const t = await r.text();
+  let j: any = null; try { j = JSON.parse(t); } catch {}
+  return { ok: r.ok, status: r.status, json: j, text: t };
+}
