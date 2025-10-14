@@ -1,78 +1,101 @@
 // pages/api/chainvers.js
 import Stripe from "stripe";
-import crypto from "crypto";
 
-// Vercel: zachováme raw body pre Stripe webhook
+// Node 18+: fetch je vstavaný; fallback pre istotu
+if (typeof fetch === "undefined") {
+  global.fetch = (...args) => import("node-fetch").then(({ default: f }) => f(...args));
+}
+
 export const config = { api: { bodyParser: false } };
 
-/**
- * ENV – nastav na Verceli:
- * STRIPE_SECRET_KEY, STRIPE_WEBHOOK_SECRET
- * INF_FREE_URL (napr. https://chainvers.free.nf)
- * (voliteľné) COINBASE_API_KEY, COINBASE_API_SECRET, COINBASE_API_PASSPHRASE, COINBASE_BASE_URL
- * (voliteľné) CONTRACT_ADDRESS
- */
-const STRIPE_KEY   = process.env.STRIPE_SECRET_KEY;
-const STRIPE_WHSEC = process.env.STRIPE_WEBHOOK_SECRET || "";
-const INF_FREE_URL = process.env.INF_FREE_URL || "https://chainvers.free.nf";
+/* =========================
+   ENV (potrebné na Verceli)
+   =========================
+   STRIPE_SECRET_KEY
+   STRIPE_WEBHOOK_SECRET
 
-const CB_KEY       = process.env.COINBASE_API_KEY || "";
-const CB_SECRET    = process.env.COINBASE_API_SECRET || "";
-const CB_PASSPH    = process.env.COINBASE_API_PASSPHRASE || "";
-const CB_BASE_URL  = process.env.COINBASE_BASE_URL || "https://api.coinbase.com";
-const CONTRACT_ADDRESS = process.env.CONTRACT_ADDRESS || "";
+   // TrueLayer:
+   TRUELAYER_CLIENT_ID
+   TRUELAYER_CLIENT_SECRET
 
-const Local = { payouts: new Map() };
+   // Tvoja cieľová IBAN/účet (kam TL pošle €) – dočasne bankový účet,
+   // následne si to zmeníš na onramp/crypto účet (Coinbase Business, atď.)
+   BENEFICIARY_IBAN
+   BENEFICIARY_NAME    (napr. "Chainvers Treasury")
 
-// ------------------------------
+   // (voliteľné) Logovanie:
+   DEBUG_TL=true
+*/
+
+const STRIPE_SECRET = process.env.STRIPE_SECRET_KEY;
+const STRIPE_WHSEC  = process.env.STRIPE_WEBHOOK_SECRET;
+
+const TL_CLIENT_ID     = process.env.TRUELAYER_CLIENT_ID;
+const TL_CLIENT_SECRET = process.env.TRUELAYER_CLIENT_SECRET;
+
+// pevne v kóde (ako si chcel) – NECHODÍ do ENV
+const TL_REDIRECT_URI  = "https://chainvers.vercel.app/api/chainvers?action=truelayer_callback";
+
+const BENEFICIARY_IBAN = process.env.BENEFICIARY_IBAN || "LT00TEST000000000000"; // uprav si
+const BENEFICIARY_NAME = process.env.BENEFICIARY_NAME || "Chainvers Treasury";
+
+const INF_FREE_URL = "https://chainvers.free.nf";
+
+// jednoduchá pamäť
+const PayoutDB = new Map();
+const TLTokenDB = new Map(); // mapovanie user/session → TL tokens (demo)
+
+// ==========================
 // Router
-// ------------------------------
+// ==========================
 export default async function handler(req, res) {
   const action = String(req.query?.action || "").toLowerCase();
 
   try {
-    if (action === "create_payment_proxy")  return createPaymentProxy(req, res);
+    if (action === "create_payment_proxy") return createPaymentProxy(req, res);
     if (action === "stripe_session_status") return stripeSessionStatus(req, res);
-    if (action === "stripe_webhook")        return stripeWebhook(req, res);
-    if (action === "coinbase_test_buy")     return coinbaseTestBuy(req, res);
-    if (action === "coinbase_test_withdraw")return coinbaseTestWithdraw(req, res);
-    if (action === "ping")                  return res.status(200).json({ ok: true, now: new Date().toISOString() });
+    if (action === "stripe_webhook") return stripeWebhook(req, res);
 
-    return res.status(404).json({ error: "Unknown ?action=" });
+    // TrueLayer:
+    if (action === "truelayer_link") return truelayerLink(req, res);
+    if (action === "truelayer_callback") return truelayerCallback(req, res);
+    if (action === "truelayer_pay") return truelayerPay(req, res);
+
+    if (action === "ping") return res.status(200).json({ ok: true, now: new Date().toISOString() });
+
+    return res.status(400).json({ error: "Unknown ?action=" });
   } catch (e) {
     console.error("[CHAINVERS] ERROR", e);
     return res.status(500).json({ error: e?.message || String(e) });
   }
 }
 
-// ------------------------------
-// 1) Stripe – Create Checkout Session (proxy pre InfinityFree PHP)
-// ------------------------------
+// ==========================
+// Stripe – Create Checkout Session (proxy)
+// ==========================
 async function createPaymentProxy(req, res) {
   if (req.method !== "POST") return res.status(405).json({ error: "Method not allowed" });
 
-  if (!STRIPE_KEY || !STRIPE_KEY.startsWith("sk_")) {
-    return res.status(500).json({ error: "Missing STRIPE_SECRET_KEY" });
-  }
-
   try {
     const body = await readJson(req);
-    const { amount, currency, description, crop_data, user_address } = body || {};
+    const { amount, currency, description, crop_data, user_address } = body;
+
     if (!amount || !currency) return res.status(400).json({ error: "Missing amount or currency" });
 
-    const stripe = new Stripe(STRIPE_KEY, { apiVersion: "2024-06-20" });
-
+    const stripe = new Stripe(STRIPE_SECRET);
     const session = await stripe.checkout.sessions.create({
       mode: "payment",
       payment_method_types: ["card"],
-      line_items: [{
-        price_data: {
-          currency: String(currency).toLowerCase(),
-          product_data: { name: description || "CHAINVERS objednávka" },
-          unit_amount: Math.round(Number(amount) * 100),
+      line_items: [
+        {
+          price_data: {
+            currency: String(currency).toLowerCase(),
+            product_data: { name: description || "CHAINVERS objednávka" },
+            unit_amount: Math.round(Number(amount) * 100),
+          },
+          quantity: 1,
         },
-        quantity: 1,
-      }],
+      ],
       metadata: {
         crop_data: JSON.stringify(crop_data || {}),
         user_address: user_address || "unknown",
@@ -88,22 +111,25 @@ async function createPaymentProxy(req, res) {
   }
 }
 
-// ------------------------------
-// 2) Stripe – Session Status (pre IF thankyou.php)
-// ------------------------------
+// ==========================
+// Stripe – Session Status (pre thankyou.php na IF)
+// ==========================
 async function stripeSessionStatus(req, res) {
-  const sessionId = req.query?.session_id;
+  const sessionId = req.query.session_id;
   if (!sessionId) return res.status(400).json({ error: "Missing session_id" });
 
+  const stripe = new Stripe(STRIPE_SECRET);
   try {
-    const stripe = new Stripe(STRIPE_KEY, { apiVersion: "2024-06-20" });
     const session = await stripe.checkout.sessions.retrieve(sessionId, { expand: ["payment_intent"] });
+    const pi = session.payment_intent?.id;
+    const payment_status = session.payment_status;
+    const metadata = session.metadata || {};
 
     return res.status(200).json({
       id: session.id,
-      payment_status: session.payment_status,
-      payment_intent: session.payment_intent?.id,
-      metadata: session.metadata || {},
+      payment_status,
+      payment_intent: pi,
+      metadata,
     });
   } catch (e) {
     console.error("[stripeSessionStatus] error", e);
@@ -111,14 +137,13 @@ async function stripeSessionStatus(req, res) {
   }
 }
 
-// ------------------------------
-// 3) Stripe – Webhook: po úspechu zapíš na IF (accptpay.php)
-// ------------------------------
+// ==========================
+// Stripe – Webhook: po úspešnej platbe spustíme TL platbu € (automatizácia)
+// ==========================
 async function stripeWebhook(req, res) {
   if (req.method !== "POST") return res.status(405).json({ error: "Method not allowed" });
-  if (!STRIPE_WHSEC) return res.status(200).json({ ok: true, note: "webhook_secret_missing (noop)" });
 
-  const stripe = new Stripe(STRIPE_KEY, { apiVersion: "2024-06-20" });
+  const stripe = new Stripe(STRIPE_SECRET);
   const rawBody = await readRaw(req);
 
   let event;
@@ -129,137 +154,188 @@ async function stripeWebhook(req, res) {
     return res.status(400).send(`Webhook Error: ${err.message}`);
   }
 
-  const handled = new Set(["checkout.session.completed", "checkout.session.async_payment_succeeded"]);
-  if (!handled.has(event.type)) return res.status(200).json({ received: true });
+  const okTypes = new Set(["checkout.session.completed", "checkout.session.async_payment_succeeded"]);
+  if (!okTypes.has(event.type)) return res.status(200).json({ received: true });
 
-  const s = event.data.object;
+  const s = event.data.object; // checkout.session
   const pi = s.payment_intent;
   const amount = (s.amount_total ?? 0) / 100;
-  const currency = (s.currency ?? "EUR").toUpperCase();
-  const meta = s.metadata || {};
+  const currency = (s.currency ?? "eur").toUpperCase();
+  const metadata = s.metadata || {};
 
-  // 3.1) zapíš na InfinityFree (accptpay.php – všetko v jednom)
+  // 1) ihneď zapíš na IF
   try {
-    const payload = {
+    const confirmPayload = {
       paymentIntentId: pi,
       amount,
       currency,
-      crop_data: safeParseJSON(meta.crop_data),
-      user_address: meta.user_address || null,
+      crop_data: safeParseJSON(metadata.crop_data),
+      user_address: metadata.user_address || null,
       status: "paid",
       source: "stripe_webhook",
       ts: Date.now(),
     };
-
-    const r = await fetch(`${INF_FREE_URL}/accptpay.php`, {
+    const r = await fetch(`${INF_FREE_URL}/confirm_payment.php`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(payload),
+      body: JSON.stringify(confirmPayload),
     });
     const txt = await r.text();
-    console.log("[IF accptpay.php]", r.status, txt.slice(0, 300));
+    console.log("[IF confirm_payment.php] status:", r.status, "body:", txt.slice(0, 300));
   } catch (e) {
-    console.warn("[IF accptpay.php] failed:", e?.message || e);
+    console.error("[IF confirm_payment.php] failed", e?.message || e);
   }
 
-  // 3.2) (voliteľne) lokálny stav
-  Local.payouts.set(pi, { state: "queued", amount, currency, at: Date.now() });
+  // 2) automaticky spusti TL platbu (ak máme uložený TL access_token pre tvoj účet)
+  // Pozn.: V produkcii si mapuj používateľa/systémový účet → access_token.
+  const systemKey = "SYSTEM"; // demo – jeden spoločný účet Revolut
+  const tlTokens = TLTokenDB.get(systemKey);
+  if (tlTokens?.access_token) {
+    try {
+      const tl = await tlCreateImmediatePayment(tlTokens.access_token, {
+        amountEUR: amount, // uprav si percento/rozpad podľa logiky
+        iban: BENEFICIARY_IBAN,
+        name: BENEFICIARY_NAME,
+        reference: `CHAINVERS ${pi}`,
+      });
+      console.log("[TL payment] ok", tl);
+      PayoutDB.set(pi, { status: "tl_initiated", tl_payment_id: tl?.id || tl?.result?.id || null, amount, currency, at: Date.now() });
+    } catch (e) {
+      console.error("[TL payment] failed", e?.message || e);
+      PayoutDB.set(pi, { status: "tl_failed", error: e?.message || String(e), amount, currency, at: Date.now() });
+    }
+  } else {
+    console.warn("[TL payment] skipped – no access_token yet (spusť /api/chainvers?action=truelayer_link a prepoj Revolut).");
+  }
 
   return res.status(200).json({ received: true });
 }
 
-// ------------------------------
-// 4) Coinbase – manuálne testy (neovplyvňujú Stripe create)
-// ------------------------------
-async function coinbaseTestBuy(req, res) {
+// ==========================
+// TrueLayer – 1) LINK (autorizácia Revolut účtu)
+// ==========================
+async function truelayerLink(req, res) {
+  if (!TL_CLIENT_ID || !TL_CLIENT_SECRET) {
+    return res.status(500).json({ error: "Missing TRUELAYER_CLIENT_ID/TRUELAYER_CLIENT_SECRET" });
+  }
+
+  const auth = new URL("https://auth.truelayer.com/");
+  auth.searchParams.set("response_type", "code");
+  auth.searchParams.set("client_id", TL_CLIENT_ID);
+  auth.searchParams.set("scope", "accounts balance transactions direct_debits cards payments");
+  auth.searchParams.set("redirect_uri", TL_REDIRECT_URI);         // pevne v kóde
+  auth.searchParams.set("providers", "revolut");                   // konkrétne Revolut
+  auth.searchParams.set("state", "chainvers_state");               // doplň si CSRF ochranu ak chceš
+  // auth.searchParams.set("enable_mock", "true");                 // sandbox, ak používaš mock provider
+
+  // presmeruj používateľa do Rev/TrueLayer OAuth
+  return res.redirect(auth.toString());
+}
+
+// ==========================
+// TrueLayer – 2) CALLBACK (výmena code → access_token)
+// ==========================
+async function truelayerCallback(req, res) {
+  const code = req.query?.code;
+  if (!code) return res.status(400).send("Missing ?code");
+
+  const tokenRes = await fetch("https://auth.truelayer.com/connect/token", {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    body: new URLSearchParams({
+      grant_type: "authorization_code",
+      client_id: TL_CLIENT_ID,
+      client_secret: TL_CLIENT_SECRET,
+      redirect_uri: TL_REDIRECT_URI, // pevne v kóde
+      code,
+    }),
+  });
+  const tokenData = await tokenRes.json();
+  if (process.env.DEBUG_TL === "true") console.log("[TL token] ", tokenData);
+
+  if (!tokenRes.ok) {
+    return res.status(tokenRes.status).send(`TL token error: ${JSON.stringify(tokenData)}`);
+  }
+
+  // demo: uložíme pod "SYSTEM" – v produkcii viaž na konkrétneho používateľa
+  TLTokenDB.set("SYSTEM", {
+    access_token: tokenData.access_token,
+    refresh_token: tokenData.refresh_token,
+    scope: tokenData.scope,
+    token_type: tokenData.token_type,
+    expires_in: tokenData.expires_in,
+    obtained_at: Date.now(),
+  });
+
+  // jednoduchá spätná stránka
+  return res.status(200).send("TrueLayer prepojené ✔ – teraz môžeš spúšťať platby.");
+}
+
+// ==========================
+// TrueLayer – 3) manuálna platba (na test)
+// POST { amount: number }
+// ==========================
+async function truelayerPay(req, res) {
+  const body = await readJson(req);
+  const amount = Number(body?.amount || 0);
+  if (!amount) return res.status(400).json({ error: "Missing amount" });
+
+  const tl = TLTokenDB.get("SYSTEM");
+  if (!tl?.access_token) return res.status(400).json({ error: "TrueLayer not linked – open /api/chainvers?action=truelayer_link" });
+
   try {
-    const q = req.method === "POST" ? await readJson(req) : req.query;
-    const product = String(q.product || "USDC-EUR");
-    const amountEur = Number(q.amount || 10);
-    const out = await cb_placeMarketBuy(product, amountEur);
-    return res.status(200).json(out);
+    const out = await tlCreateImmediatePayment(tl.access_token, {
+      amountEUR: amount,
+      iban: BENEFICIARY_IBAN,
+      name: BENEFICIARY_NAME,
+      reference: `CHAINVERS manual ${Date.now()}`,
+    });
+    return res.status(200).json({ ok: true, result: out });
   } catch (e) {
-    console.error("[coinbaseTestBuy] error", e);
-    return res.status(500).json({ error: e?.message || String(e) });
+    return res.status(500).json({ ok: false, error: e?.message || String(e) });
   }
 }
 
-async function coinbaseTestWithdraw(req, res) {
-  try {
-    const q = req.method === "POST" ? await readJson(req) : req.query;
-    const asset = String(q.asset || "USDC");
-    const amount = String(q.amount || "5");
-    const address = String(q.address || CONTRACT_ADDRESS);
-    const out = await cb_withdrawToAddress({ asset, amount, address });
-    return res.status(200).json(out);
-  } catch (e) {
-    console.error("[coinbaseTestWithdraw] error", e);
-    return res.status(500).json({ error: e?.message || String(e) });
-  }
-}
+/* =========================
+   TrueLayer helpers
+   ========================= */
+async function tlCreateImmediatePayment(accessToken, { amountEUR, iban, name, reference }) {
+  // amount v minor units (centy)
+  const amount_in_minor = Math.round(Number(amountEUR) * 100);
 
-/* ======================================================================
-   COINBASE HELPERS (Advanced Trade / Exchange) — voliteľné
-   ====================================================================== */
-async function cb_placeMarketBuy(product_id, amountEur) {
-  requireCBEnv();
-  const path = "/api/v3/brokerage/orders";
-  const body = {
-    client_order_id: uuid(),
-    product_id,
-    side: "BUY",
-    order_configuration: { market_market_ioc: { quote_size: String(amountEur) } },
-  };
-  const r = await cbSignedFetch("POST", path, body);
-  if (!r.ok) throw new Error(`CB BUY failed: ${r.status} ${r.text}`);
-  return r.json;
-}
-
-async function cb_withdrawToAddress({ asset, amount, address }) {
-  requireCBEnv();
-  const path = "/withdrawals/crypto";
-  const body = { currency: asset, amount: String(amount), crypto_address: address };
-  const r = await cbSignedFetch("POST", path, body);
-  if (!r.ok) throw new Error(`CB WITHDRAW failed: ${r.status} ${r.text}`);
-  return r.json;
-}
-
-async function cbSignedFetch(method, path, bodyObj) {
-  const timestamp = String(Math.floor(Date.now() / 1000));
-  const body = bodyObj ? JSON.stringify(bodyObj) : "";
-  const prehash = timestamp + method.toUpperCase() + path + body;
-  const hmac = crypto.createHmac("sha256", CB_SECRET).update(prehash).digest("base64");
-
-  const url = CB_BASE_URL + path;
-  const headers = {
-    "CB-ACCESS-KEY": CB_KEY,
-    "CB-ACCESS-PASSPHRASE": CB_PASSPH,
-    "CB-ACCESS-SIGN": hmac,
-    "CB-ACCESS-TIMESTAMP": timestamp,
-    "Content-Type": "application/json",
+  const payload = {
+    amount_in_minor,
+    currency: "EUR",
+    beneficiary: {
+      type: "external_account",
+      account_holder_name: name,
+      account_identifier: { type: "iban", iban },
+      reference: reference?.slice(0, 18) || "CHAINVERS", // bankové referencie majú limity
+    },
   };
 
-  const resp = await fetch(url, { method, headers, body: body || undefined });
-  const text = await resp.text();
-  let json = null; try { json = JSON.parse(text); } catch {}
-  return { ok: resp.ok, status: resp.status, text, json };
+  if (process.env.DEBUG_TL === "true") console.log("[TL pay →]", payload);
+
+  const r = await fetch("https://pay-api.truelayer.com/single-immediate-payments", {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${accessToken}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(payload),
+  });
+
+  const txt = await r.text();
+  let json = null; try { json = JSON.parse(txt); } catch {}
+  if (process.env.DEBUG_TL === "true") console.log("[TL pay ←]", r.status, txt.slice(0, 800));
+
+  if (!r.ok) throw new Error(`TL payment failed: ${r.status} ${txt}`);
+  return json;
 }
 
-function requireCBEnv() {
-  if (!CB_KEY || !CB_SECRET || !CB_PASSPH) {
-    throw new Error("Missing Coinbase API credentials in ENV");
-  }
-}
-
-// heuristika: po nákupe odhadneme send amount (USDC ~ 1:1 EUR; ETH hrubý odhad)
-async function inferSendAmount(asset, eurValue) {
-  if (asset === "USDC") return String(Math.max(0.01, Math.round(eurValue * 100) / 100));
-  return String((eurValue / 2000).toFixed(6));
-}
-
-/* ======================================================================
-   UTIL
-   ====================================================================== */
+/* =========================
+   Util
+   ========================= */
 async function readJson(req) {
   if (req.body && typeof req.body === "object") return req.body;
   const raw = await readRaw(req);
@@ -272,15 +348,4 @@ async function readRaw(req) {
   return Buffer.concat(chunks);
 }
 
-function safeParseJSON(x) {
-  if (!x || typeof x !== "string") return null;
-  try { return JSON.parse(x); } catch { return null; }
-}
-
-function uuid() {
-  if (globalThis.crypto?.randomUUID) return crypto.randomUUID();
-  return "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(/[xy]/g, (c) => {
-    const r = (Math.random() * 16) | 0, v = c === "x" ? r : (r & 0x3) | 0x8;
-    return v.toString(16);
-  });
-}
+function safeParseJSON(x) { if (!x || typeof x !== "string") return null; try { return JSON.parse(x); } catch { return null; } }
