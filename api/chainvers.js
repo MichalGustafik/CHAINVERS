@@ -138,7 +138,7 @@ async function stripeSessionStatus(req, res) {
   try {
     const session = await stripe.checkout.sessions.retrieve(sessionId, { expand: ["payment_intent"] });
     const pi = session.payment_intent?.id;
-    const payment_status = session.payment_status;
+    the payment_status = session.payment_status;
     const metadata = session.metadata || {};
 
     return res.status(200).json({
@@ -418,6 +418,14 @@ async function chainversOrders(req, res) {
     }
   }
 
+  // DEMO fallback (zapni, ak potrebuješ hneď niečo vidieť)
+  if (!orders.length) {
+    orders = [
+      { order_id: 'demo-1001', user_id: 'user-42', amount: 29.9, currency: 'EUR', description: 'Poster A' },
+      { order_id: 'demo-1002', user_id: 'user-99', amount: 12.5, currency: 'EUR', description: 'Sticker Pack' },
+    ];
+  }
+
   // 2) Coinbase Commerce charge pre každú objednávku (predvyplnená suma)
   const enriched = [];
   for (const o of orders) {
@@ -521,67 +529,4 @@ async function cbPost(path, body) {
   const headers = cbHeaders("POST", path, body);
   const r = await fetch(`${CB_API_BASE}${path}`, { method:"POST", headers, body: JSON.stringify(body) });
   const t = await r.text(); let j=null; try{ j=JSON.parse(t);}catch{}
-  return { ok: r.ok, status: r.status, json: j, text: t };
-}
-
-// Self-custody odoslanie na kontrakt cez ethers
-async function selfCustodySendEther(valueEth) {
-  const { ethers } = await import("ethers");
-  const provider = new ethers.JsonRpcProvider(RPC_URL);
-  const wallet   = new ethers.Wallet(PRIVATE_KEY, provider);
-  const abi      = JSON.parse(CONTRACT_ABI_STR);
-  const c        = new ethers.Contract(CONTRACT_ADDRESS, abi, wallet);
-  const tx       = await c[CONTRACT_FUNCTION]({ value: ethers.parseEther(String(valueEth)) });
-  return await tx.wait();
-}
-
-// ==========================
-// Generic helpers (PÔVODNÉ)
-// ==========================
-async function circleFetch(path, { method = "GET", body } = {}) {
-  const url = `${CIRCLE_BASE}${path}`;
-  const headers = {
-    Authorization: `Bearer ${CIRCLE_API_KEY}`,
-    "Content-Type": "application/json",
-  };
-  const init = { method, headers };
-  if (body !== undefined) init.body = typeof body === "string" ? body : JSON.stringify(body);
-
-  const res = await fetch(url, init);
-  const text = await res.text();
-  let json = null; try { json = JSON.parse(text); } catch {}
-  if (process.env.DEBUG_CIRCLE === "true") {
-    console.log("[circle] req", method, url, "payload:", body);
-    console.log("[circle] res", res.status, text.slice(0, 800));
-  }
-  return { ok: res.ok, status: res.status, json, text };
-}
-
-async function readJson(req) {
-  if (req.body && typeof req.body === "object") return req.body;
-  const raw = await readRaw(req);
-  try { return JSON.parse(raw); } catch { return {}; }
-}
-
-async function readRaw(req) {
-  const chunks = [];
-  for await (const ch of req) chunks.push(ch);
-  return Buffer.concat(chunks);
-}
-
-function safeParseJSON(x) {
-  if (!x || typeof x !== "string") return null;
-  try { return JSON.parse(x); } catch { return null; }
-}
-
-function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
-
-function uuid() {
-  // @ts-ignore
-  if (globalThis.crypto?.randomUUID) return crypto.randomUUID();
-  return "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(/[xy]/g, (c) => {
-    const r = (Math.random() * 16) | 0,
-      v = c === "x" ? r : (r & 0x3) | 0x8;
-    return v.toString(16);
-  });
-}
+  return { ok: r.ok, status: r.status, json: j, tex
