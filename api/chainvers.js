@@ -536,3 +536,70 @@ async function cbPost(path, body) {
   let j: any = null; try { j = JSON.parse(t); } catch {}
   return { ok: r.ok, status: r.status, json: j, text: t };
 }
+
+// (voliteľné) GET helper na Coinbase Advanced Trade – hodí sa na debug
+async function cbGet(path) {
+  const headers = cbHeaders("GET", path, undefined);
+  const r = await fetch(`${CB_API_BASE}${path}`, { method: "GET", headers });
+  const t = await r.text();
+  let j = null; try { j = JSON.parse(t); } catch {}
+  return { ok: r.ok, status: r.status, json: j, text: t };
+}
+
+/**
+ * Self-custody odoslanie (stub)
+ * - nechávam ako jednoduchý stub, aby ti nepadal kód, ak máš WITHDRAW_MODE="self_custody"
+ * - keď budeš chcieť reálne posielať on-chain, doplníme ethers v2 a transakciu
+ */
+async function selfCustodySendEther(valueEth) {
+  throw new Error("self_custody nie je zapojené (potrebuje ethers + RPC_URL + PRIVATE_KEY). Použi WITHDRAW_MODE=coinbase alebo doplníme implementáciu.");
+}
+
+/* ===== Circle HTTP helper (ponechané z pôvodného kódu) ===== */
+async function circleFetch(path, { method = "GET", body } = {}) {
+  const url = `${CIRCLE_BASE}${path}`;
+  const headers = {
+    Authorization: `Bearer ${CIRCLE_API_KEY}`,
+    "Content-Type": "application/json",
+  };
+  const init = { method, headers };
+  if (body !== undefined) init.body = typeof body === "string" ? body : JSON.stringify(body);
+
+  const res = await fetch(url, init);
+  const text = await res.text();
+  let json = null; try { json = JSON.parse(text); } catch {}
+  if (process.env.DEBUG_CIRCLE === "true") {
+    console.log("[circle] req", method, url, "payload:", body);
+    console.log("[circle] res", res.status, text.slice(0, 800));
+  }
+  return { ok: res.ok, status: res.status, json, text };
+}
+
+/* ===== Common helpers (ako v tvojom pôvodnom súbore) ===== */
+async function readJson(req) {
+  if (req.body && typeof req.body === "object") return req.body;
+  const raw = await readRaw(req);
+  try { return JSON.parse(raw); } catch { return {}; }
+}
+
+async function readRaw(req) {
+  const chunks = [];
+  for await (const ch of req) chunks.push(ch);
+  return Buffer.concat(chunks);
+}
+
+function safeParseJSON(x) {
+  if (!x || typeof x !== "string") return null;
+  try { return JSON.parse(x); } catch { return null; }
+}
+
+function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+
+function uuid() {
+  if (globalThis.crypto?.randomUUID) return crypto.randomUUID();
+  return "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(/[xy]/g, (c) => {
+    const r = (Math.random() * 16) | 0,
+      v = c === "x" ? r : (r & 0x3) | 0x8;
+    return v.toString(16);
+  });
+}
