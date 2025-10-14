@@ -54,9 +54,12 @@ const CONTRACT_ABI_STR = process.env.CONTRACT_ABI || ""; // JSON string ABI
 const CONTRACT_FUNCTION= process.env.CONTRACT_FUNCTION || "deposit";
 
 // ==========================
-/* Lokálna pamäť payoutov (ephemeral) – PÔVODNÉ */
+// Lokálna pamäť payoutov (ephemeral) – PÔVODNÉ
 // ==========================
 const PayoutDB = new Map();
+
+// (malá cache pre Commerce charges, aby sa netvorilo duplicity pri refreshi)
+const ChargesCache = new Map(); // order_id -> hosted_url
 
 // ==========================
 // Hlavný router (PÔVODNÝ + PRIDANÉ AKCIE)
@@ -128,7 +131,7 @@ async function createPaymentProxy(req, res) {
 }
 
 // ==========================
-// 2️⃣ STRIPE SESSION STATUS (PÔVODNÉ)
+// 2️⃣ STRIPE SESSION STATUS (PÔVODNÉ + drobný fix)
 // ==========================
 async function stripeSessionStatus(req, res) {
   const sessionId = req.query.session_id;
@@ -138,7 +141,7 @@ async function stripeSessionStatus(req, res) {
   try {
     const session = await stripe.checkout.sessions.retrieve(sessionId, { expand: ["payment_intent"] });
     const pi = session.payment_intent?.id;
-    the payment_status = session.payment_status;
+    const payment_status = session.payment_status; // FIX preklepu
     const metadata = session.metadata || {};
 
     return res.status(200).json({
@@ -380,7 +383,7 @@ async function triggerCirclePayout(pi, amount /* number */, currencyFromStripe /
 }
 
 // ==========================
-// A) PRIDANÉ – CHAINVERS ORDERS (opravná verzia s debug & demo)
+// A) PRIDANÉ – CHAINVERS ORDERS (pre accptpay.php)
 // ==========================
 async function chainversOrders(req, res) {
   if (req.method !== "POST") return res.status(405).json({ ok:false, error:"method_not_allowed" });
@@ -393,77 +396,59 @@ async function chainversOrders(req, res) {
   const body = await readJson(req);
   if (body?.kind !== "LIST_PENDING") return res.status(400).json({ ok:false, error:"bad_kind" });
 
-  const forceDemo = String(req.query?.demo || "") === "1"; // <- pridané
+  // 1) Načítaj posledné zaplatené Stripe Checkout Sessions (24h)
   let orders = [];
-
-  if (!forceDemo && STRIPE_SECRET) {
+  if (STRIPE_SECRET) {
     try {
-      const since = Math.floor(Date.now() / 1000) - 24 * 3600;
-      const resp = await fetch(
-        `https://api.stripe.com/v1/checkout/sessions?limit=20&expand[]=data.payment_intent&created[gte]=${since}`,
+      const since = Math.floor(Date.now()/1000) - 24*3600;
+      const list = await fetch(
+        "https://api.stripe.com/v1/checkout/sessions?limit=20&expand[]=data.payment_intent&created[gte]="+since,
         { headers: { Authorization: `Bearer ${STRIPE_SECRET}` } }
       );
-
-      const txt = await resp.text();
-      let js = null;
-      try { js = JSON.parse(txt); } catch {}
-
-      if (!resp.ok) {
-        console.warn("[chainversOrders] stripe !ok", resp.status, txt.slice(0, 400));
-        return res.status(502).json({
-          ok: false,
-          source: "stripe",
-          status: resp.status,
-          body: txt.slice(0, 400),
-        });
+      const txt = await list.text();
+      let js = null; try { js = JSON.parse(txt); } catch {}
+      if (!list.ok) {
+        console.warn("[chainversOrders] stripe !ok", list.status, txt.slice(0,200));
+      } else {
+        orders = (js?.data || [])
+          .filter((s) => s.payment_status === "paid")
+          .map((s) => ({
+            order_id: s.metadata?.order_id || s.id,
+            user_id:  s.metadata?.user_id  || (s.customer_details?.email || "unknown"),
+            amount:   Number(s.amount_total ? s.amount_total/100 : s.amount_subtotal/100 || 0),
+            currency: String(s.currency || "eur").toUpperCase(),
+            description: s.metadata?.description || "Order",
+            target: s.metadata?.target ? safeParseJSON(s.metadata.target) : undefined,
+          }));
       }
-
-      orders = (js?.data || [])
-        .filter((s) => s.payment_status === "paid")
-        .map((s) => ({
-          order_id: s.metadata?.order_id || s.id,
-          user_id: s.metadata?.user_id || (s.customer_details?.email || "unknown"),
-          amount: Number(
-            s.amount_total ? s.amount_total / 100 : s.amount_subtotal / 100 || 0
-          ),
-          currency: String(s.currency || "eur").toUpperCase(),
-          description: s.metadata?.description || "Order",
-        }));
     } catch (e) {
       console.warn("[chainversOrders] stripe load failed:", e?.message || e);
-      return res.status(500).json({
-        ok: false,
-        error: "stripe_fetch_failed",
-        detail: String(e?.message || e),
-      });
     }
   }
 
-  // DEMO fallback
+  // DEMO fallback (ak nič nie je)
   if (!orders.length) {
-    if (!STRIPE_SECRET) console.warn("[chainversOrders] Missing STRIPE_SECRET – using demo");
     orders = [
-      { order_id: "demo-1001", user_id: "user-42", amount: 29.9, currency: "EUR", description: "Poster A" },
-      { order_id: "demo-1002", user_id: "user-99", amount: 12.5, currency: "EUR", description: "Sticker Pack" },
+      { order_id: 'demo-1001', user_id: 'user-42', amount: 29.9, currency: 'EUR', description: 'Poster A' },
+      { order_id: 'demo-1002', user_id: 'user-99', amount: 12.5, currency: 'EUR', description: 'Sticker Pack' },
     ];
   }
 
-  // Coinbase Commerce pre každú objednávku
+  // 2) Coinbase Commerce charge pre každú objednávku (predvyplnená suma)
   const enriched = [];
   for (const o of orders) {
-    const url = await createCoinbaseCharge(o).catch(() => null);
+    const url = await createCoinbaseCharge(o).catch(()=>null);
     enriched.push({ ...o, coinbase_url: url || undefined });
   }
 
-  return res.status(200).json({ ok: true, orders: enriched });
+  return res.status(200).json({ ok:true, orders: enriched });
 }
-
-
-
 
 // Pomocník: Coinbase Commerce charge
 async function createCoinbaseCharge(o) {
   if (!CC_API_KEY) return null;
+  if (ChargesCache.has(o.order_id)) return ChargesCache.get(o.order_id);
+
   const body = {
     name:        `CHAINVERS ${o.order_id}`,
     description: o.description || "CHAINVERS order",
@@ -486,7 +471,9 @@ async function createCoinbaseCharge(o) {
     console.warn("[Coinbase Commerce] create error", r.status, txt.slice(0,300));
     return null;
   }
-  return j?.data?.hosted_url || null;
+  const url = j?.data?.hosted_url || null;
+  if (url) ChargesCache.set(o.order_id, url);
+  return url;
 }
 
 // ==========================
@@ -539,17 +526,19 @@ async function splitchain(req, res) {
 
 // Coinbase Advanced Trade – podpísané požiadavky
 function cbHeaders(method, pathAndQuery, body) {
-  const ts = Math.floor(Date.now()/1000).toString();
-  const payload = ts + method.toUpperCase() + pathAndQuery + (body ? JSON.stringify(body) : "");
+  const ts = Math.floor(Date.now() / 1000).toString();
+  const payload =
+    ts + method.toUpperCase() + pathAndQuery + (body ? JSON.stringify(body) : "");
   const hmac = crypto.createHmac("sha256", CB_API_SECRET).update(payload).digest("hex");
   return {
     "CB-ACCESS-KEY": CB_API_KEY,
     "CB-ACCESS-SIGN": hmac,
     "CB-ACCESS-TIMESTAMP": ts,
     "CB-ACCESS-PASSPHRASE": CB_API_PASSPHRASE,
-    "Content-Type": "application/json"
+    "Content-Type": "application/json",
   };
 }
+
 async function cbPost(path, body) {
   const headers = cbHeaders("POST", path, body);
   const r = await fetch(`${CB_API_BASE}${path}`, {
@@ -558,16 +547,22 @@ async function cbPost(path, body) {
     body: JSON.stringify(body),
   });
   const t = await r.text();
-  let j: any = null; try { j = JSON.parse(t); } catch {}
+  let j = null;
+  try {
+    j = JSON.parse(t);
+  } catch {}
   return { ok: r.ok, status: r.status, json: j, text: t };
 }
 
-// (voliteľné) GET helper na Coinbase Advanced Trade – hodí sa na debug
+// voliteľný debug GET helper
 async function cbGet(path) {
   const headers = cbHeaders("GET", path, undefined);
   const r = await fetch(`${CB_API_BASE}${path}`, { method: "GET", headers });
   const t = await r.text();
-  let j = null; try { j = JSON.parse(t); } catch {}
+  let j = null;
+  try {
+    j = JSON.parse(t);
+  } catch {}
   return { ok: r.ok, status: r.status, json: j, text: t };
 }
 
@@ -577,10 +572,12 @@ async function cbGet(path) {
  * - keď budeš chcieť reálne posielať on-chain, doplníme ethers v2 a transakciu
  */
 async function selfCustodySendEther(valueEth) {
-  throw new Error("self_custody nie je zapojené (potrebuje ethers + RPC_URL + PRIVATE_KEY). Použi WITHDRAW_MODE=coinbase alebo doplníme implementáciu.");
+  throw new Error(
+    "self_custody nie je zapojené (potrebuje ethers + RPC_URL + PRIVATE_KEY). Použi WITHDRAW_MODE=coinbase alebo doplníme implementáciu."
+  );
 }
 
-/* ===== Circle HTTP helper (ponechané z pôvodného kódu) ===== */
+// Circle API helper
 async function circleFetch(path, { method = "GET", body } = {}) {
   const url = `${CIRCLE_BASE}${path}`;
   const headers = {
@@ -588,11 +585,15 @@ async function circleFetch(path, { method = "GET", body } = {}) {
     "Content-Type": "application/json",
   };
   const init = { method, headers };
-  if (body !== undefined) init.body = typeof body === "string" ? body : JSON.stringify(body);
+  if (body !== undefined)
+    init.body = typeof body === "string" ? body : JSON.stringify(body);
 
   const res = await fetch(url, init);
   const text = await res.text();
-  let json = null; try { json = JSON.parse(text); } catch {}
+  let json = null;
+  try {
+    json = JSON.parse(text);
+  } catch {}
   if (process.env.DEBUG_CIRCLE === "true") {
     console.log("[circle] req", method, url, "payload:", body);
     console.log("[circle] res", res.status, text.slice(0, 800));
@@ -600,11 +601,15 @@ async function circleFetch(path, { method = "GET", body } = {}) {
   return { ok: res.ok, status: res.status, json, text };
 }
 
-/* ===== Common helpers (ako v tvojom pôvodnom súbore) ===== */
+// Pomocné utility
 async function readJson(req) {
   if (req.body && typeof req.body === "object") return req.body;
   const raw = await readRaw(req);
-  try { return JSON.parse(raw); } catch { return {}; }
+  try {
+    return JSON.parse(raw);
+  } catch {
+    return {};
+  }
 }
 
 async function readRaw(req) {
@@ -615,10 +620,16 @@ async function readRaw(req) {
 
 function safeParseJSON(x) {
   if (!x || typeof x !== "string") return null;
-  try { return JSON.parse(x); } catch { return null; }
+  try {
+    return JSON.parse(x);
+  } catch {
+    return null;
+  }
 }
 
-function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+function sleep(ms) {
+  return new Promise((r) => setTimeout(r, ms));
+}
 
 function uuid() {
   if (globalThis.crypto?.randomUUID) return crypto.randomUUID();
