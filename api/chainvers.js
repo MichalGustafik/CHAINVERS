@@ -1,14 +1,18 @@
+// chainvers.js
+
 import Stripe from "stripe";
+import crypto from "crypto"; // PRIDANÉ: pre Coinbase Advanced Trade podpis
 
 // Node 18+: fetch je vstavaný; fallback pre istotu
 if (typeof fetch === "undefined") {
+  // @ts-ignore
   global.fetch = (...args) => import("node-fetch").then(({ default: f }) => f(...args));
 }
 
 export const config = { api: { bodyParser: false } };
 
 // ==========================
-// ENV premenné
+// ENV premenné (TVOJE PÔVODNÉ)
 // ==========================
 const STRIPE_SECRET = process.env.STRIPE_SECRET_KEY;
 const STRIPE_WHSEC = process.env.STRIPE_WEBHOOK_SECRET;
@@ -25,12 +29,37 @@ const INF_FREE_URL = "https://chainvers.free.nf";
 let CACHED_RECIPIENT_ID = process.env.CIRCLE_ADDRESS_BOOK_ID || null;
 
 // ==========================
-// Lokálna pamäť payoutov (ephemeral)
+// PRIDANÉ – CHAINVERS ORDERS + COINBASE
+// ==========================
+const CHAINVERS_ORDERS_TOKEN = process.env.CHAINVERS_ORDERS_TOKEN; // shared s accptpay.php
+
+// Coinbase Commerce (predvyplnený payment link)
+const CC_API_KEY  = process.env.COINBASE_COMMERCE_API_KEY || "";
+const CC_API_BASE = "https://api.commerce.coinbase.com";
+
+// Coinbase Advanced Trade (EUR→ETH + withdraw)
+const CB_API_BASE       = "https://api.coinbase.com/api/v3/brokerage";
+const CB_API_KEY        = process.env.COINBASE_API_KEY || "";
+const CB_API_SECRET     = process.env.COINBASE_API_SECRET || "";
+const CB_API_PASSPHRASE = process.env.COINBASE_API_PASSPHRASE || "";
+
+const WITHDRAW_MODE      = process.env.WITHDRAW_MODE || "coinbase"; // 'coinbase' | 'self_custody'
+const WITHDRAW_CHAIN     = process.env.WITHDRAW_CHAIN || "ethereum"; // napr. 'ethereum','base'
+const WITHDRAW_VALUE_ETH = process.env.WITHDRAW_VALUE_ETH || "0.01"; // koľko ETH poslať
+
+// Self-custody (ak nepoužiješ custodial withdraw)
+const RPC_URL          = process.env.RPC_URL || "";
+const PRIVATE_KEY      = process.env.PRIVATE_KEY || "";
+const CONTRACT_ABI_STR = process.env.CONTRACT_ABI || ""; // JSON string ABI
+const CONTRACT_FUNCTION= process.env.CONTRACT_FUNCTION || "deposit";
+
+// ==========================
+/* Lokálna pamäť payoutov (ephemeral) – PÔVODNÉ */
 // ==========================
 const PayoutDB = new Map();
 
 // ==========================
-// Hlavný router
+// Hlavný router (PÔVODNÝ + PRIDANÉ AKCIE)
 // ==========================
 export default async function handler(req, res) {
   const action = (req.query?.action || "").toString().toLowerCase();
@@ -43,6 +72,10 @@ export default async function handler(req, res) {
     if (action === "circle_payout") return circlePayout(req, res); // manuálne testovanie
     if (action === "ping") return res.status(200).json({ ok: true, now: new Date().toISOString() });
 
+    // PRIDANÉ:
+    if (action === "chainvers_orders") return chainversOrders(req, res);
+    if (action === "splitchain")       return splitchain(req, res);
+
     return res.status(400).json({ error: "Unknown ?action=" });
   } catch (e) {
     console.error("[CHAINVERS] ERROR", e);
@@ -51,7 +84,7 @@ export default async function handler(req, res) {
 }
 
 // ==========================
-// 1️⃣ CREATE PAYMENT PROXY
+// 1️⃣ CREATE PAYMENT PROXY (PÔVODNÉ)
 // ==========================
 async function createPaymentProxy(req, res) {
   if (req.method !== "POST") return res.status(405).json({ error: "Method not allowed" });
@@ -95,7 +128,7 @@ async function createPaymentProxy(req, res) {
 }
 
 // ==========================
-// 2️⃣ STRIPE SESSION STATUS (pre thankyou.php na IF)
+// 2️⃣ STRIPE SESSION STATUS (PÔVODNÉ)
 // ==========================
 async function stripeSessionStatus(req, res) {
   const sessionId = req.query.session_id;
@@ -121,7 +154,7 @@ async function stripeSessionStatus(req, res) {
 }
 
 // ==========================
-// 3️⃣ STRIPE WEBHOOK → spusti Circle payout
+// 3️⃣ STRIPE WEBHOOK → spusti Circle payout (PÔVODNÉ)
 // ==========================
 async function stripeWebhook(req, res) {
   if (req.method !== "POST") return res.status(405).json({ error: "Method not allowed" });
@@ -186,7 +219,7 @@ async function stripeWebhook(req, res) {
 }
 
 // ==========================
-// 4️⃣ MANUÁLNY CIRCLE PAYOUT (na test)
+// 4️⃣ MANUÁLNY CIRCLE PAYOUT (PÔVODNÉ)
 // ==========================
 async function circlePayout(req, res) {
   const body = await readJson(req);
@@ -220,7 +253,7 @@ async function circlePayout(req, res) {
 }
 
 // ==========================
-// 5️⃣ PAYOUT STATUS
+// 5️⃣ PAYOUT STATUS (PÔVODNÉ)
 // ==========================
 async function payoutStatus(req, res) {
   const pi = req.query.pi;
@@ -250,7 +283,7 @@ async function payoutStatus(req, res) {
 }
 
 // ==========================
-// HELPERS – Circle (Address Book workflow)
+// HELPERS – Circle (Address Book workflow) (PÔVODNÉ)
 // ==========================
 async function ensureAddressBookRecipient(address) {
   if (!CIRCLE_API_KEY) throw new Error("Missing CIRCLE_API_KEY");
@@ -347,7 +380,163 @@ async function triggerCirclePayout(pi, amount /* number */, currencyFromStripe /
 }
 
 // ==========================
-// Generic helpers
+// A) PRIDANÉ – CHAINVERS ORDERS (pre accptpay.php)
+// ==========================
+async function chainversOrders(req, res) {
+  if (req.method !== "POST") return res.status(405).json({ ok:false, error:"method_not_allowed" });
+
+  const auth = (req.headers.authorization || "").replace(/^Bearer\s+/i, "");
+  if (!CHAINVERS_ORDERS_TOKEN || auth !== CHAINVERS_ORDERS_TOKEN) {
+    return res.status(401).json({ ok:false, error:"bad_token" });
+  }
+
+  const body = await readJson(req);
+  if (body?.kind !== "LIST_PENDING") return res.status(400).json({ ok:false, error:"bad_kind" });
+
+  // 1) Načítaj posledné zaplatené Stripe Checkout Sessions (24h)
+  let orders = [];
+  if (STRIPE_SECRET) {
+    try {
+      const since = Math.floor(Date.now()/1000) - 24*3600;
+      const list = await fetch(
+        "https://api.stripe.com/v1/checkout/sessions?limit=20&expand[]=data.payment_intent&created[gte]="+since,
+        { headers: { Authorization: `Bearer ${STRIPE_SECRET}` } }
+      );
+      const js = await list.json();
+      orders = (js?.data || [])
+        .filter((s) => s.payment_status === "paid")
+        .map((s) => ({
+          order_id: s.metadata?.order_id || s.id,
+          user_id:  s.metadata?.user_id  || (s.customer_details?.email || "unknown"),
+          amount:   Number(s.amount_total ? s.amount_total/100 : s.amount_subtotal/100 || 0),
+          currency: String(s.currency || "eur").toUpperCase(),
+          description: s.metadata?.description || "Order",
+          target: s.metadata?.target ? safeParseJSON(s.metadata.target) : undefined,
+        }));
+    } catch (e) {
+      console.warn("[chainversOrders] stripe load failed:", e?.message || e);
+    }
+  }
+
+  // 2) Coinbase Commerce charge pre každú objednávku (predvyplnená suma)
+  const enriched = [];
+  for (const o of orders) {
+    const url = await createCoinbaseCharge(o).catch(()=>null);
+    enriched.push({ ...o, coinbase_url: url || undefined });
+  }
+
+  return res.status(200).json({ ok:true, orders: enriched });
+}
+
+// Pomocník: Coinbase Commerce charge
+async function createCoinbaseCharge(o) {
+  if (!CC_API_KEY) return null;
+  const body = {
+    name:        `CHAINVERS ${o.order_id}`,
+    description: o.description || "CHAINVERS order",
+    local_price: { amount: o.amount.toFixed(2), currency: o.currency || "EUR" },
+    pricing_type: "fixed_price",
+    metadata: { order_id: o.order_id, user_id: o.user_id }
+  };
+  const r = await fetch(`${CC_API_BASE}/charges`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "X-CC-Api-Key": CC_API_KEY,
+      "X-CC-Version": "2018-03-22"
+    },
+    body: JSON.stringify(body)
+  });
+  const txt = await r.text();
+  let j=null; try{ j=JSON.parse(txt);}catch{}
+  if (!r.ok) {
+    console.warn("[Coinbase Commerce] create error", r.status, txt.slice(0,300));
+    return null;
+  }
+  return j?.data?.hosted_url || null;
+}
+
+// ==========================
+// B) PRIDANÉ – SPLITCHAIN (Accept -> EUR→ETH -> send to contract)
+// ==========================
+async function splitchain(req, res) {
+  if (req.method !== "POST") return res.status(405).json({ ok:false, error:"method_not_allowed" });
+
+  const body = await readJson(req);
+  const { token, kind, order_id, amount, currency } = body || {};
+  if (!token || token !== process.env.SPLITCHAIN_SHARED_TOKEN) {
+    return res.status(401).json({ ok:false, error:"bad_token" });
+  }
+  if (kind !== "ORDER_ACCEPTED") return res.status(400).json({ ok:false, error:"bad_kind" });
+  if (!amount || !currency) return res.status(400).json({ ok:false, error:"need_amount_currency" });
+  if (String(currency).toUpperCase() !== "EUR") return res.status(400).json({ ok:false, error:"expected_EUR" });
+
+  // 1) EUR -> ETH (market IOC)
+  const buy = await cbPost("/orders", {
+    product_id: "ETH-EUR",
+    side: "BUY",
+    order_configuration: { market_market_ioc: { quote_size: Number(amount).toFixed(2) } }
+  });
+
+  if (!buy.ok) {
+    return res.status(502).json({ ok:false, step:"buy", status:buy.status, body: buy.json || buy.text });
+  }
+
+  // 2) on-chain send
+  if (WITHDRAW_MODE === "coinbase") {
+    const wd = await cbPost("/withdrawals/crypto", {
+      amount: WITHDRAW_VALUE_ETH,   // jednoduché — môžeš dopočítať z fills/portfolio
+      asset: "ETH",
+      crypto_address: CONTRACT_ADDRESS,
+      chain: WITHDRAW_CHAIN
+    });
+    if (!wd.ok) {
+      return res.status(502).json({ ok:false, step:"withdraw", status:wd.status, body: wd.json || wd.text });
+    }
+    return res.status(200).json({ ok:true, mode:"coinbase", buy: buy.json, withdraw: wd.json });
+  } else {
+    if (!RPC_URL || !PRIVATE_KEY || !CONTRACT_ABI_STR) {
+      return res.status(500).json({ ok:false, error:"self_custody_env_missing" });
+    }
+    const receipt = await selfCustodySendEther(WITHDRAW_VALUE_ETH).catch(e => ({ error: e?.message || String(e) }));
+    if (receipt?.error) return res.status(500).json({ ok:false, step:"self_custody", error: receipt.error });
+    return res.status(200).json({ ok:true, mode:"self_custody", buy: buy.json, tx: receipt });
+  }
+}
+
+// Coinbase Advanced Trade – podpísané požiadavky
+function cbHeaders(method, pathAndQuery, body) {
+  const ts = Math.floor(Date.now()/1000).toString();
+  const payload = ts + method.toUpperCase() + pathAndQuery + (body ? JSON.stringify(body) : "");
+  const hmac = crypto.createHmac("sha256", CB_API_SECRET).update(payload).digest("hex");
+  return {
+    "CB-ACCESS-KEY": CB_API_KEY,
+    "CB-ACCESS-SIGN": hmac,
+    "CB-ACCESS-TIMESTAMP": ts,
+    "CB-ACCESS-PASSPHRASE": CB_API_PASSPHRASE,
+    "Content-Type": "application/json"
+  };
+}
+async function cbPost(path, body) {
+  const headers = cbHeaders("POST", path, body);
+  const r = await fetch(`${CB_API_BASE}${path}`, { method:"POST", headers, body: JSON.stringify(body) });
+  const t = await r.text(); let j=null; try{ j=JSON.parse(t);}catch{}
+  return { ok: r.ok, status: r.status, json: j, text: t };
+}
+
+// Self-custody odoslanie na kontrakt cez ethers
+async function selfCustodySendEther(valueEth) {
+  const { ethers } = await import("ethers");
+  const provider = new ethers.JsonRpcProvider(RPC_URL);
+  const wallet   = new ethers.Wallet(PRIVATE_KEY, provider);
+  const abi      = JSON.parse(CONTRACT_ABI_STR);
+  const c        = new ethers.Contract(CONTRACT_ADDRESS, abi, wallet);
+  const tx       = await c[CONTRACT_FUNCTION]({ value: ethers.parseEther(String(valueEth)) });
+  return await tx.wait();
+}
+
+// ==========================
+// Generic helpers (PÔVODNÉ)
 // ==========================
 async function circleFetch(path, { method = "GET", body } = {}) {
   const url = `${CIRCLE_BASE}${path}`;
@@ -388,6 +577,7 @@ function safeParseJSON(x) {
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
 function uuid() {
+  // @ts-ignore
   if (globalThis.crypto?.randomUUID) return crypto.randomUUID();
   return "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(/[xy]/g, (c) => {
     const r = (Math.random() * 16) | 0,
