@@ -1,5 +1,5 @@
-// /api/chainvers.js  
-// CHAINVERS – Vercel API pre InfinityFree (objednávky + Stripe + verejné zobrazenie paid sessions)
+// /api/chainvers.js
+// CHAINVERS – Stripe webhook + načítanie zaplatených objednávok + zápis do InfinityFree
 
 import Stripe from "stripe";
 
@@ -9,13 +9,12 @@ if (typeof fetch === "undefined") {
   global.fetch = (...args) => import("node-fetch").then(({ default: f }) => f(...args));
 }
 
-// kvôli Stripe Webhooku – zakázaný bodyParser
 export const config = { api: { bodyParser: false } };
 
 // ==========================
 // ENV premenné
 // ==========================
-const STRIPE_SECRET = process.env.STRIPE_SECRET_KEY;  // musí začínať "sk_"
+const STRIPE_SECRET = process.env.STRIPE_SECRET_KEY;
 const STRIPE_WHSEC  = process.env.STRIPE_WEBHOOK_SECRET || "";
 const INF_FREE_URL  = process.env.INF_FREE_URL || "https://chainvers.free.nf";
 
@@ -26,12 +25,9 @@ export default async function handler(req, res) {
   const action = (req.query?.action || "").toString().toLowerCase();
 
   try {
-    if (action === "ping")                return ping(req, res);
-    if (action === "orders_public")       return ordersPublic(req, res);
-
-    // (voliteľné) budúce akcie:
-    // if (action === "create_payment_proxy") return createPaymentProxy(req, res);
-    // if (action === "stripe_webhook") return stripeWebhook(req, res);
+    if (action === "ping")           return ping(req, res);
+    if (action === "orders_public")  return ordersPublic(req, res);
+    if (action === "stripe_webhook") return stripeWebhook(req, res);
 
     return res.status(400).json({ ok:false, error:"unknown_action" });
   } catch (e) {
@@ -41,25 +37,78 @@ export default async function handler(req, res) {
 }
 
 // ==========================
-// ping – na wakeup z InfinityFree
+// Ping (na prebudenie z InfinityFree)
 // ==========================
 async function ping(req, res) {
   return res.status(200).json({ ok:true, now:new Date().toISOString() });
 }
 
 // ==========================
-// 1️⃣ orders_public – zobrazí zaplatené sessiony zo Stripe
+// 1️⃣ STRIPE WEBHOOK – po úspešnej platbe uloží dáta na InfinityFree
+// ==========================
+async function stripeWebhook(req, res) {
+  if (req.method !== "POST") return res.status(405).json({ ok:false, error:"method_not_allowed" });
+  if (!STRIPE_WHSEC) return res.status(200).json({ ok:true, note:"webhook_secret_missing" });
+
+  const stripe = new Stripe(STRIPE_SECRET);
+  const rawBody = await readRaw(req);
+
+  let event;
+  try {
+    event = stripe.webhooks.constructEvent(rawBody, req.headers["stripe-signature"], STRIPE_WHSEC);
+  } catch (err) {
+    console.error("[stripeWebhook] bad signature:", err?.message);
+    return res.status(400).send(`Webhook Error: ${err.message}`);
+  }
+
+  if (event.type === "checkout.session.completed" || event.type === "checkout.session.async_payment_succeeded") {
+    const s = event.data.object;
+    const pi = s.payment_intent;
+    const amount = (s.amount_total ?? 0) / 100;
+    const currency = (s.currency ?? "eur").toUpperCase();
+    const metadata = s.metadata || {};
+
+    console.log("[stripeWebhook] ✅ PAID:", s.id, amount, currency);
+
+    // 🔹 odoslať na InfinityFree → confirm_payment.php
+    try {
+      const payload = {
+        paymentIntentId: pi,
+        amount,
+        currency,
+        user_address: metadata.user_address || "unknown",
+        crop_data: safeParseJSON(metadata.crop_data),
+        status: "paid",
+        ts: Date.now(),
+        source: "stripe_webhook"
+      };
+
+      const r = await fetch(`${INF_FREE_URL}/confirm_payment.php`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload)
+      });
+
+      const txt = await r.text();
+      console.log(`[confirm_payment.php] → ${r.status}: ${txt.slice(0, 120)}`);
+    } catch (err) {
+      console.error("[confirm_payment] send failed", err);
+    }
+  }
+
+  return res.status(200).json({ ok:true, received:true });
+}
+
+// ==========================
+// 2️⃣ orders_public – vráti zoznam zaplatených objednávok
 // ==========================
 async function ordersPublic(req, res) {
   try {
     if (!STRIPE_SECRET || !STRIPE_SECRET.startsWith("sk_")) {
-      console.error("[orders_public] ❌ STRIPE_SECRET_KEY chýba alebo nie je sk_");
-      return res.status(500).json({ ok:false, error:"missing_stripe_secret_key" });
+      return res.status(500).json({ ok:false, error:"Missing STRIPE_SECRET_KEY" });
     }
 
     const stripe = new Stripe(STRIPE_SECRET, { apiVersion: "2024-06-20" });
-
-    // posledných 7 dní
     const since = Math.floor(Date.now()/1000) - 7*24*3600;
 
     const sessions = await stripe.checkout.sessions.list({
@@ -79,15 +128,10 @@ async function ordersPublic(req, res) {
         created_at: new Date(s.created * 1000).toISOString(),
       }));
 
-    console.log(`[orders_public] ✅ Načítaných ${paid.length} zaplatených sessionov`);
     return res.status(200).json({ ok:true, count: paid.length, orders: paid });
   } catch (err) {
     console.error("[orders_public] ERROR", err);
-    return res.status(500).json({
-      ok:false,
-      error:"stripe_error",
-      message: err?.message || String(err),
-    });
+    return res.status(500).json({ ok:false, error:"stripe_error", message:err?.message || String(err) });
   }
 }
 
@@ -125,9 +169,12 @@ function uuid() {
 }
 
 // ==========================
-// TEST ENDPOINTY (voliteľné)
+// TEST ENDPOINTY
 // ==========================
+// 🔹 ping
 // https://chainvers.vercel.app/api/chainvers?action=ping
+// 🔹 orders_public
 // https://chainvers.vercel.app/api/chainvers?action=orders_public
-// ==========================
-
+// 🔹 Stripe webhook
+// nastav vo Stripe Dashboard:
+// https://chainvers.vercel.app/api/chainvers?action=stripe_webhook
