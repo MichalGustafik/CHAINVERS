@@ -12,6 +12,7 @@ export const config = { api: { bodyParser: false } };
  * (voliteľné) COINBASE_API_KEY, COINBASE_API_SECRET, COINBASE_API_PASSPHRASE, COINBASE_BASE_URL
  * (voliteľné) CONTRACT_ADDRESS
  */
+
 const STRIPE_KEY   = process.env.STRIPE_SECRET_KEY;
 const STRIPE_WHSEC = process.env.STRIPE_WEBHOOK_SECRET || "";
 const INF_FREE_URL = process.env.INF_FREE_URL || "https://chainvers.free.nf";
@@ -28,7 +29,16 @@ const Local = { payouts: new Map() };
 // Router
 // ------------------------------
 export default async function handler(req, res) {
+  // CORS pre IF a frontend
+  res.setHeader("Access-Control-Allow-Origin", "*");
+  res.setHeader("Access-Control-Allow-Methods", "POST, GET, OPTIONS");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Stripe-Signature");
+
+  if (req.method === "OPTIONS") return res.status(200).end();
+
   const action = String(req.query?.action || "").toLowerCase();
+
+  console.log("[CHAINVERS] Incoming", { method: req.method, action });
 
   try {
     if (action === "create_payment_proxy")  return createPaymentProxy(req, res);
@@ -36,7 +46,7 @@ export default async function handler(req, res) {
     if (action === "stripe_webhook")        return stripeWebhook(req, res);
     if (action === "coinbase_test_buy")     return coinbaseTestBuy(req, res);
     if (action === "coinbase_test_withdraw")return coinbaseTestWithdraw(req, res);
-    if (action === "ping")                  return res.status(200).json({ ok: true, now: new Date().toISOString() });
+    if (action === "ping")                  return res.status(200).json({ ok: true, now: new Date().toISOString(), env: !!STRIPE_KEY });
 
     return res.status(404).json({ error: "Unknown ?action=" });
   } catch (e) {
@@ -52,6 +62,7 @@ async function createPaymentProxy(req, res) {
   if (req.method !== "POST") return res.status(405).json({ error: "Method not allowed" });
 
   if (!STRIPE_KEY || !STRIPE_KEY.startsWith("sk_")) {
+    console.error("[createPaymentProxy] Missing STRIPE_SECRET_KEY");
     return res.status(500).json({ error: "Missing STRIPE_SECRET_KEY" });
   }
 
@@ -81,6 +92,7 @@ async function createPaymentProxy(req, res) {
       cancel_url: `${INF_FREE_URL}/index.php`,
     });
 
+    console.log("[createPaymentProxy] session created", session.id);
     return res.status(200).json({ checkout_url: session.url });
   } catch (err) {
     console.error("[createPaymentProxy] error", err);
@@ -129,8 +141,11 @@ async function stripeWebhook(req, res) {
     return res.status(400).send(`Webhook Error: ${err.message}`);
   }
 
+  // Okamžite potvrď Stripe, aby nevypršal timeout
+  res.status(200).json({ received: true });
+
   const handled = new Set(["checkout.session.completed", "checkout.session.async_payment_succeeded"]);
-  if (!handled.has(event.type)) return res.status(200).json({ received: true });
+  if (!handled.has(event.type)) return;
 
   const s = event.data.object;
   const pi = s.payment_intent;
@@ -138,7 +153,6 @@ async function stripeWebhook(req, res) {
   const currency = (s.currency ?? "EUR").toUpperCase();
   const meta = s.metadata || {};
 
-  // 3.1) zapíš na InfinityFree (accptpay.php – všetko v jednom)
   try {
     const payload = {
       paymentIntentId: pi,
@@ -156,16 +170,14 @@ async function stripeWebhook(req, res) {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),
     });
+
     const txt = await r.text();
     console.log("[IF accptpay.php]", r.status, txt.slice(0, 300));
   } catch (e) {
     console.warn("[IF accptpay.php] failed:", e?.message || e);
   }
 
-  // 3.2) (voliteľne) lokálny stav
   Local.payouts.set(pi, { state: "queued", amount, currency, at: Date.now() });
-
-  return res.status(200).json({ received: true });
 }
 
 // ------------------------------
@@ -249,12 +261,6 @@ function requireCBEnv() {
   if (!CB_KEY || !CB_SECRET || !CB_PASSPH) {
     throw new Error("Missing Coinbase API credentials in ENV");
   }
-}
-
-// heuristika: po nákupe odhadneme send amount (USDC ~ 1:1 EUR; ETH hrubý odhad)
-async function inferSendAmount(asset, eurValue) {
-  if (asset === "USDC") return String(Math.max(0.01, Math.round(eurValue * 100) / 100));
-  return String((eurValue / 2000).toFixed(6));
 }
 
 /* ======================================================================
