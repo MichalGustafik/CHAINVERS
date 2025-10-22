@@ -4,6 +4,9 @@ import crypto from "crypto";
 
 export const config = { api: { bodyParser: false } };
 
+// ======================================================
+//  ENVIRONMENT VARS
+// ======================================================
 function readEnv() {
   const env = {
     STRIPE_SECRET_KEY: process.env.STRIPE_SECRET_KEY || "",
@@ -26,8 +29,9 @@ function mask(v) {
   return s.slice(0, 6) + "..." + s.slice(-4);
 }
 
-const Local = { payouts: new Map() };
-
+// ======================================================
+//  MAIN HANDLER
+// ======================================================
 export default async function handler(req, res) {
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "POST, GET, OPTIONS");
@@ -38,13 +42,12 @@ export default async function handler(req, res) {
   console.log("[CHAINVERS] Incoming", { method: req.method, action });
 
   try {
-    if (action === "create_payment_proxy")   return createPaymentProxy(req, res);
-    if (action === "stripe_session_status")  return stripeSessionStatus(req, res);
-    if (action === "stripe_webhook")         return stripeWebhook(req, res);
-    if (action === "coinbase_auto_buy")      return coinbaseAutoBuy(req, res);
-    if (action === "coinbase_advanced_buy")  return coinbaseAdvancedBuy(req, res);
-    if (action === "ping")                   return res.status(200).json({ ok: true, now: new Date().toISOString() });
-    if (action === "env")                    return debugEnv(req, res);
+    if (action === "create_payment_proxy") return createPaymentProxy(req, res);
+    if (action === "stripe_session_status") return stripeSessionStatus(req, res);
+    if (action === "stripe_webhook") return stripeWebhook(req, res);
+    if (action === "coinbase_auto_buy") return coinbaseAutoBuy(req, res);
+    if (action === "ping") return res.status(200).json({ ok: true, now: new Date().toISOString() });
+    if (action === "env") return debugEnv(req, res);
     return res.status(404).json({ error: "Unknown ?action=" });
   } catch (e) {
     console.error("[CHAINVERS] ERROR", e);
@@ -53,7 +56,7 @@ export default async function handler(req, res) {
 }
 
 // ======================================================
-// Debug ENV
+//  DEBUG ENV
 // ======================================================
 async function debugEnv(req, res) {
   const E = readEnv();
@@ -62,7 +65,7 @@ async function debugEnv(req, res) {
     STRIPE_WEBHOOK_SECRET: mask(E.STRIPE_WEBHOOK_SECRET),
     INF_FREE_URL: E.INF_FREE_URL,
     COINBASE_API_KEY: mask(E.COINBASE_API_KEY),
-    COINBASE_API_SECRET: E.COINBASE_API_SECRET ? "🔒 [PRIVATE KEY PRESENT]" : null,
+    COINBASE_API_SECRET: E.COINBASE_API_SECRET ? "🔒 present" : null,
     COINBASE_BASE_URL: E.COINBASE_BASE_URL,
     CONTRACT_ADDRESS: mask(E.CONTRACT_ADDRESS),
   };
@@ -70,11 +73,9 @@ async function debugEnv(req, res) {
 }
 
 // ======================================================
-// STRIPE HANDLERS
+//  STRIPE: Create Checkout Session
 // ======================================================
-
 async function createPaymentProxy(req, res) {
-  if (req.method !== "POST") return res.status(405).json({ error: "Method not allowed" });
   const E = readEnv();
   if (!E.STRIPE_SECRET_KEY) return res.status(500).json({ error: "Missing STRIPE_SECRET_KEY" });
 
@@ -111,12 +112,15 @@ async function createPaymentProxy(req, res) {
   }
 }
 
+// ======================================================
+//  STRIPE: Session Status
+// ======================================================
 async function stripeSessionStatus(req, res) {
+  const E = readEnv();
   const sessionId = req.query?.session_id;
   if (!sessionId) return res.status(400).json({ error: "Missing session_id" });
 
   try {
-    const E = readEnv();
     const stripe = new Stripe(E.STRIPE_SECRET_KEY, { apiVersion: "2024-06-20" });
     const session = await stripe.checkout.sessions.retrieve(sessionId, { expand: ["payment_intent"] });
     return res.status(200).json({
@@ -131,12 +135,15 @@ async function stripeSessionStatus(req, res) {
   }
 }
 
+// ======================================================
+//  STRIPE: Webhook
+// ======================================================
 async function stripeWebhook(req, res) {
   const E = readEnv();
   const stripe = new Stripe(E.STRIPE_SECRET_KEY, { apiVersion: "2024-06-20" });
   const rawBody = await readRaw(req);
-  let event;
 
+  let event;
   try {
     event = stripe.webhooks.constructEvent(rawBody, req.headers["stripe-signature"], E.STRIPE_WEBHOOK_SECRET);
   } catch (err) {
@@ -165,6 +172,7 @@ async function stripeWebhook(req, res) {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload),
       });
+      console.log("[Webhook → accptpay] Data sent", payload);
     } catch (err) {
       console.error("[Webhook → accptpay] failed:", err.message);
     }
@@ -172,55 +180,59 @@ async function stripeWebhook(req, res) {
 }
 
 // ======================================================
-// COINBASE ADVANCED TRADE API  (no org_id, no passphrase)
+//  COINBASE AUTO BUY (volané z accptpay.php)
 // ======================================================
-
-async function coinbaseAdvancedBuy(req, res) {
+async function coinbaseAutoBuy(req, res) {
   try {
     const q = req.method === "POST" ? await readJson(req) : req.query;
-    const amountEur = Number(q.amount || 10);
-    const productId = String(q.product || "ETH-EUR");
+    const amountEur = Number(q.amount || 0);
+    const product = String(q.product || "ETH-EUR");
 
-    console.log(`[coinbaseAdvancedBuy] BUY ${amountEur} EUR of ${productId}`);
+    if (!amountEur || amountEur <= 0)
+      return res.status(400).json({ error: "Missing or invalid amount" });
 
-    const result = await cb_advancedPlaceMarketBuy(productId, amountEur);
-    return res.status(200).json({ ok: true, result });
+    console.log(`[coinbaseAutoBuy] Spúšťam automatizovaný nákup ${amountEur} € → ${product}`);
+
+    const E = readEnv();
+    const timestamp = Math.floor(Date.now() / 1000);
+    const path = "/api/v3/brokerage/orders";
+    const body = {
+      client_order_id: crypto.randomUUID(),
+      product_id: product,
+      side: "BUY",
+      order_configuration: { market_market_ioc: { quote_size: String(amountEur) } },
+    };
+    const bodyStr = JSON.stringify(body);
+    const prehash = timestamp + "POST" + path + bodyStr;
+    const signature = crypto.createHmac("sha256", E.COINBASE_API_SECRET)
+      .update(prehash)
+      .digest("base64");
+
+    const headers = {
+      "CB-ACCESS-KEY": E.COINBASE_API_KEY,
+      "CB-ACCESS-SIGN": signature,
+      "CB-ACCESS-TIMESTAMP": timestamp,
+      "Content-Type": "application/json",
+    };
+
+    const url = `${E.COINBASE_BASE_URL}${path}`;
+    const r = await fetch(url, { method: "POST", headers, body: bodyStr });
+    const text = await r.text();
+    let json = {}; try { json = JSON.parse(text); } catch {}
+
+    console.log("[coinbaseAutoBuy] Výsledok:", json);
+
+    if (!r.ok) return res.status(500).json({ error: json || text });
+
+    return res.status(200).json({ ok: true, data: json });
   } catch (err) {
-    console.error("[coinbaseAdvancedBuy] error", err.message);
+    console.error("[coinbaseAutoBuy] error:", err);
     return res.status(500).json({ error: err.message });
   }
 }
 
-async function cb_advancedPlaceMarketBuy(product_id, amountEur) {
-  const E = readEnv();
-  const timestamp = Math.floor(Date.now() / 1000);
-  const path = "/api/v3/brokerage/orders";
-  const body = {
-    client_order_id: crypto.randomUUID(),
-    product_id,
-    side: "BUY",
-    order_configuration: { market_market_ioc: { quote_size: String(amountEur) } },
-  };
-  const bodyStr = JSON.stringify(body);
-  const prehash = timestamp + "POST" + path + bodyStr;
-  const signature = crypto.createHmac("sha256", E.COINBASE_API_SECRET).update(prehash).digest("base64");
-
-  const headers = {
-    "CB-ACCESS-KEY": E.COINBASE_API_KEY,
-    "CB-ACCESS-SIGN": signature,
-    "CB-ACCESS-TIMESTAMP": timestamp,
-    "Content-Type": "application/json",
-  };
-
-  const url = `${E.COINBASE_BASE_URL}${path}`;
-  const r = await fetch(url, { method: "POST", headers, body: bodyStr });
-  const text = await r.text();
-  let json = {}; try { json = JSON.parse(text); } catch {}
-  return { ok: r.ok, status: r.status, json, raw: text };
-}
-
 // ======================================================
-// UTILITIES
+//  UTIL
 // ======================================================
 async function readJson(req) {
   if (req.body && typeof req.body === "object") return req.body;
