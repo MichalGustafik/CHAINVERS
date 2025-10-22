@@ -2,10 +2,8 @@
 import Stripe from "stripe";
 import crypto from "crypto";
 
-// Vercel: zachováme raw body pre Stripe webhook
 export const config = { api: { bodyParser: false } };
 
-/** Helper – čítanie ENV pri každom requeste (nie na module) */
 function readEnv() {
   const env = {
     STRIPE_SECRET_KEY: process.env.STRIPE_SECRET_KEY || "",
@@ -22,7 +20,6 @@ function readEnv() {
   return env;
 }
 
-/** Bezpečné maskovanie env do logu/odpovede */
 function mask(v) {
   if (!v) return null;
   const s = String(v);
@@ -30,12 +27,8 @@ function mask(v) {
   return s.slice(0, 6) + "..." + s.slice(-4);
 }
 
-// jednoduché lokálne úložisko
 const Local = { payouts: new Map() };
 
-// ------------------------------
-// Router
-// ------------------------------
 export default async function handler(req, res) {
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "POST, GET, OPTIONS");
@@ -51,6 +44,7 @@ export default async function handler(req, res) {
     if (action === "stripe_webhook")         return stripeWebhook(req, res);
     if (action === "coinbase_test_buy")      return coinbaseTestBuy(req, res);
     if (action === "coinbase_test_withdraw") return coinbaseTestWithdraw(req, res);
+    if (action === "coinbase_auto_buy")      return coinbaseAutoBuy(req, res);
     if (action === "ping")                   return res.status(200).json({ ok: true, now: new Date().toISOString() });
     if (action === "env")                    return debugEnv(req, res);
 
@@ -61,9 +55,6 @@ export default async function handler(req, res) {
   }
 }
 
-// ------------------------------
-// Debug ENV – bezpečné, maskované
-// ------------------------------
 async function debugEnv(req, res) {
   const E = readEnv();
   const out = {
@@ -79,21 +70,12 @@ async function debugEnv(req, res) {
   return res.status(200).json(out);
 }
 
-// ------------------------------
-// 1) Stripe – Create Checkout Session
-// ------------------------------
+// ---------------- STRIPE ----------------
+
 async function createPaymentProxy(req, res) {
   if (req.method !== "POST") return res.status(405).json({ error: "Method not allowed" });
   const E = readEnv();
-
-  if (!E.STRIPE_SECRET_KEY) {
-    console.error("[createPaymentProxy] STRIPE_SECRET_KEY is empty/undefined");
-    return res.status(500).json({ error: "Missing STRIPE_SECRET_KEY" });
-  }
-  if (!/^sk_(live|test)_/i.test(E.STRIPE_SECRET_KEY)) {
-    console.error("[createPaymentProxy] STRIPE_SECRET_KEY has unexpected format:", mask(E.STRIPE_SECRET_KEY));
-    return res.status(500).json({ error: "Invalid STRIPE_SECRET_KEY format (expected sk_*)." });
-  }
+  if (!E.STRIPE_SECRET_KEY) return res.status(500).json({ error: "Missing STRIPE_SECRET_KEY" });
 
   try {
     const body = await readJson(req);
@@ -101,7 +83,6 @@ async function createPaymentProxy(req, res) {
     if (!amount || !currency) return res.status(400).json({ error: "Missing amount or currency" });
 
     const stripe = new Stripe(E.STRIPE_SECRET_KEY, { apiVersion: "2024-06-20" });
-
     const session = await stripe.checkout.sessions.create({
       mode: "payment",
       payment_method_types: ["card"],
@@ -129,9 +110,6 @@ async function createPaymentProxy(req, res) {
   }
 }
 
-// ------------------------------
-// 2) Stripe – Session Status
-// ------------------------------
 async function stripeSessionStatus(req, res) {
   const sessionId = req.query?.session_id;
   if (!sessionId) return res.status(400).json({ error: "Missing session_id" });
@@ -140,7 +118,6 @@ async function stripeSessionStatus(req, res) {
     const E = readEnv();
     const stripe = new Stripe(E.STRIPE_SECRET_KEY, { apiVersion: "2024-06-20" });
     const session = await stripe.checkout.sessions.retrieve(sessionId, { expand: ["payment_intent"] });
-
     return res.status(200).json({
       id: session.id,
       payment_status: session.payment_status,
@@ -153,9 +130,6 @@ async function stripeSessionStatus(req, res) {
   }
 }
 
-// ------------------------------
-// 3) Stripe – Webhook
-// ------------------------------
 async function stripeWebhook(req, res) {
   if (req.method !== "POST") return res.status(405).json({ error: "Method not allowed" });
   const E = readEnv();
@@ -194,25 +168,21 @@ async function stripeWebhook(req, res) {
       source: "stripe_webhook",
       ts: Date.now(),
     };
-
     const r = await fetch(`${E.INF_FREE_URL}/accptpay.php`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),
     });
-
     const txt = await r.text();
     console.log("[IF accptpay.php]", r.status, txt.slice(0, 300));
   } catch (e) {
     console.warn("[IF accptpay.php] failed:", e?.message || e);
   }
-
   Local.payouts.set(pi, { state: "queued", amount, currency, at: Date.now() });
 }
 
-// ------------------------------
-// 4) Coinbase – testy (voliteľné)
-// ------------------------------
+// ---------------- COINBASE ----------------
+
 async function coinbaseTestBuy(req, res) {
   try {
     const q = req.method === "POST" ? await readJson(req) : req.query;
@@ -236,6 +206,37 @@ async function coinbaseTestWithdraw(req, res) {
     return res.status(200).json(out);
   } catch (e) {
     console.error("[coinbaseTestWithdraw] error", e?.message || e);
+    return res.status(500).json({ error: e?.message || String(e) });
+  }
+}
+
+// ---------------- AUTO BUY ----------------
+
+async function coinbaseAutoBuy(req, res) {
+  try {
+    const q = req.method === "POST" ? await readJson(req) : req.query;
+    const amountEur = Number(q.amount || 0);
+    const product = String(q.product || "ETH-EUR");
+    if (!amountEur || amountEur <= 0) return res.status(400).json({ error: "Missing or invalid amount" });
+
+    console.log(`[coinbaseAutoBuy] Spúšťam auto BUY ${amountEur} € → ${product}`);
+    const result = await cb_placeMarketBuy(product, amountEur);
+
+    const E = readEnv();
+    const tx = await cb_withdrawToAddress({
+      asset: product.split("-")[0],
+      amount: String(amountEur),
+      address: E.CONTRACT_ADDRESS || "0x0000000000000000000000000000000000000000",
+    });
+
+    return res.status(200).json({
+      ok: true,
+      note: "Auto-buy + withdraw completed",
+      buy: result,
+      withdraw: tx,
+    });
+  } catch (e) {
+    console.error("[coinbaseAutoBuy] error", e?.message || e);
     return res.status(500).json({ error: e?.message || String(e) });
   }
 }
@@ -267,14 +268,13 @@ async function cb_withdrawToAddress({ asset, amount, address }) {
 }
 
 async function cbSignedFetch(method, path, bodyObj) {
-  const { COINBASE_API_SECRET, COINBASE_API_KEY, COINBASE_API_PASSPHRASE, COINBASE_BASE_URL } = readEnv();
+  const { COINBASE_API_SECRET, COINBASE_API_KEY, COINBASE_BASE_URL, COINBASE_API_PASSPHRASE } = readEnv();
   const timestamp = String(Math.floor(Date.now() / 1000));
   const body = bodyObj ? JSON.stringify(bodyObj) : "";
   const prehash = timestamp + method.toUpperCase() + path + body;
   const hmac = crypto.createHmac("sha256", COINBASE_API_SECRET).update(prehash).digest("base64");
 
   const url = (COINBASE_BASE_URL || "https://api.coinbase.com") + path;
-
   const headers = {
     "CB-ACCESS-KEY": COINBASE_API_KEY,
     "CB-ACCESS-SIGN": hmac,
@@ -291,14 +291,10 @@ async function cbSignedFetch(method, path, bodyObj) {
 
 function requireCBEnv() {
   const { COINBASE_API_KEY, COINBASE_API_SECRET } = readEnv();
-  if (!COINBASE_API_KEY || !COINBASE_API_SECRET) {
+  if (!COINBASE_API_KEY || !COINBASE_API_SECRET)
     throw new Error("Missing Coinbase API credentials in ENV");
-  }
 }
 
-/* ======================================================================
-   UTIL
-   ====================================================================== */
 async function readJson(req) {
   if (req.body && typeof req.body === "object") return req.body;
   const raw = await readRaw(req);
