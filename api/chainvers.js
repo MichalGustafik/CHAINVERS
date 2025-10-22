@@ -37,7 +37,6 @@ const Local = { payouts: new Map() };
 // Router
 // ------------------------------
 export default async function handler(req, res) {
-  // CORS pre IF a frontend
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "POST, GET, OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type, Stripe-Signature");
@@ -81,7 +80,7 @@ async function debugEnv(req, res) {
 }
 
 // ------------------------------
-// 1) Stripe – Create Checkout Session (proxy pre IF)
+// 1) Stripe – Create Checkout Session
 // ------------------------------
 async function createPaymentProxy(req, res) {
   if (req.method !== "POST") return res.status(405).json({ error: "Method not allowed" });
@@ -173,7 +172,6 @@ async function stripeWebhook(req, res) {
     return res.status(400).send(`Webhook Error: ${err.message}`);
   }
 
-  // potvrď Stripe ASAP
   res.status(200).json({ received: true });
 
   const handled = new Set(["checkout.session.completed", "checkout.session.async_payment_succeeded"]);
@@ -181,7 +179,7 @@ async function stripeWebhook(req, res) {
 
   const s = event.data.object;
   const pi = s.payment_intent;
-  const amount = (s.amount_total ?? 0) / 100;
+  const amount = (s.amount_total ?? s.amount_subtotal ?? 0) / 100;
   const currency = (s.currency ?? "EUR").toUpperCase();
   const meta = s.metadata || {};
 
@@ -275,14 +273,15 @@ async function cbSignedFetch(method, path, bodyObj) {
   const prehash = timestamp + method.toUpperCase() + path + body;
   const hmac = crypto.createHmac("sha256", COINBASE_API_SECRET).update(prehash).digest("base64");
 
-  const url = COINBASE_BASE_URL + path;
+  const url = (COINBASE_BASE_URL || "https://api.coinbase.com") + path;
+
   const headers = {
     "CB-ACCESS-KEY": COINBASE_API_KEY,
-    "CB-ACCESS-PASSPHRASE": COINBASE_API_PASSPHRASE,
     "CB-ACCESS-SIGN": hmac,
     "CB-ACCESS-TIMESTAMP": timestamp,
     "Content-Type": "application/json",
   };
+  if (COINBASE_API_PASSPHRASE) headers["CB-ACCESS-PASSPHRASE"] = COINBASE_API_PASSPHRASE;
 
   const resp = await fetch(url, { method, headers, body: body || undefined });
   const text = await resp.text();
@@ -291,8 +290,8 @@ async function cbSignedFetch(method, path, bodyObj) {
 }
 
 function requireCBEnv() {
-  const { COINBASE_API_KEY, COINBASE_API_SECRET, COINBASE_API_PASSPHRASE } = readEnv();
-  if (!COINBASE_API_KEY || !COINBASE_API_SECRET || !COINBASE_API_PASSPHRASE) {
+  const { COINBASE_API_KEY, COINBASE_API_SECRET } = readEnv();
+  if (!COINBASE_API_KEY || !COINBASE_API_SECRET) {
     throw new Error("Missing Coinbase API credentials in ENV");
   }
 }
