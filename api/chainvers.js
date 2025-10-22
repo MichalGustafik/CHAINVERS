@@ -12,7 +12,6 @@ function readEnv() {
 
     COINBASE_API_KEY: process.env.COINBASE_API_KEY || "",
     COINBASE_API_SECRET: process.env.COINBASE_API_SECRET || "",
-    COINBASE_API_PASSPHRASE: process.env.COINBASE_API_PASSPHRASE || "",
     COINBASE_BASE_URL: process.env.COINBASE_BASE_URL || "https://api.coinbase.com",
 
     CONTRACT_ADDRESS: process.env.CONTRACT_ADDRESS || "",
@@ -42,12 +41,10 @@ export default async function handler(req, res) {
     if (action === "create_payment_proxy")   return createPaymentProxy(req, res);
     if (action === "stripe_session_status")  return stripeSessionStatus(req, res);
     if (action === "stripe_webhook")         return stripeWebhook(req, res);
-    if (action === "coinbase_test_buy")      return coinbaseTestBuy(req, res);
-    if (action === "coinbase_test_withdraw") return coinbaseTestWithdraw(req, res);
     if (action === "coinbase_auto_buy")      return coinbaseAutoBuy(req, res);
+    if (action === "coinbase_advanced_buy")  return coinbaseAdvancedBuy(req, res);
     if (action === "ping")                   return res.status(200).json({ ok: true, now: new Date().toISOString() });
     if (action === "env")                    return debugEnv(req, res);
-
     return res.status(404).json({ error: "Unknown ?action=" });
   } catch (e) {
     console.error("[CHAINVERS] ERROR", e);
@@ -55,22 +52,26 @@ export default async function handler(req, res) {
   }
 }
 
+// ======================================================
+// Debug ENV
+// ======================================================
 async function debugEnv(req, res) {
   const E = readEnv();
   const out = {
-    STRIPE_SECRET_KEY: E.STRIPE_SECRET_KEY ? mask(E.STRIPE_SECRET_KEY) : null,
-    STRIPE_WEBHOOK_SECRET: E.STRIPE_WEBHOOK_SECRET ? mask(E.STRIPE_WEBHOOK_SECRET) : null,
-    INF_FREE_URL: E.INF_FREE_URL || null,
-    COINBASE_API_KEY: E.COINBASE_API_KEY ? mask(E.COINBASE_API_KEY) : null,
-    COINBASE_API_SECRET: E.COINBASE_API_SECRET ? mask(E.COINBASE_API_SECRET) : null,
-    COINBASE_API_PASSPHRASE: E.COINBASE_API_PASSPHRASE ? mask(E.COINBASE_API_PASSPHRASE) : null,
-    COINBASE_BASE_URL: E.COINBASE_BASE_URL || null,
-    CONTRACT_ADDRESS: E.CONTRACT_ADDRESS ? mask(E.CONTRACT_ADDRESS) : null,
+    STRIPE_SECRET_KEY: mask(E.STRIPE_SECRET_KEY),
+    STRIPE_WEBHOOK_SECRET: mask(E.STRIPE_WEBHOOK_SECRET),
+    INF_FREE_URL: E.INF_FREE_URL,
+    COINBASE_API_KEY: mask(E.COINBASE_API_KEY),
+    COINBASE_API_SECRET: E.COINBASE_API_SECRET ? "🔒 [PRIVATE KEY PRESENT]" : null,
+    COINBASE_BASE_URL: E.COINBASE_BASE_URL,
+    CONTRACT_ADDRESS: mask(E.CONTRACT_ADDRESS),
   };
   return res.status(200).json(out);
 }
 
-// ---------------- STRIPE ----------------
+// ======================================================
+// STRIPE HANDLERS
+// ======================================================
 
 async function createPaymentProxy(req, res) {
   if (req.method !== "POST") return res.status(405).json({ error: "Method not allowed" });
@@ -131,14 +132,11 @@ async function stripeSessionStatus(req, res) {
 }
 
 async function stripeWebhook(req, res) {
-  if (req.method !== "POST") return res.status(405).json({ error: "Method not allowed" });
   const E = readEnv();
-  if (!E.STRIPE_WEBHOOK_SECRET) return res.status(200).json({ ok: true, note: "webhook_secret_missing (noop)" });
-
   const stripe = new Stripe(E.STRIPE_SECRET_KEY, { apiVersion: "2024-06-20" });
   const rawBody = await readRaw(req);
-
   let event;
+
   try {
     event = stripe.webhooks.constructEvent(rawBody, req.headers["stripe-signature"], E.STRIPE_WEBHOOK_SECRET);
   } catch (err) {
@@ -148,153 +146,82 @@ async function stripeWebhook(req, res) {
 
   res.status(200).json({ received: true });
 
-  const handled = new Set(["checkout.session.completed", "checkout.session.async_payment_succeeded"]);
-  if (!handled.has(event.type)) return;
-
-  const s = event.data.object;
-  const pi = s.payment_intent;
-  const amount = (s.amount_total ?? s.amount_subtotal ?? 0) / 100;
-  const currency = (s.currency ?? "EUR").toUpperCase();
-  const meta = s.metadata || {};
-
-  try {
+  if (event.type === "checkout.session.completed") {
+    const s = event.data.object;
+    const meta = s.metadata || {};
     const payload = {
-      paymentIntentId: pi,
-      amount,
-      currency,
+      paymentIntentId: s.payment_intent,
+      amount: (s.amount_total ?? 0) / 100,
+      currency: s.currency?.toUpperCase() ?? "EUR",
       crop_data: safeParseJSON(meta.crop_data),
-      user_address: meta.user_address || null,
+      user_address: meta.user_address || "unknown",
       status: "paid",
-      source: "stripe_webhook",
       ts: Date.now(),
     };
-    const r = await fetch(`${E.INF_FREE_URL}/accptpay.php`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(payload),
-    });
-    const txt = await r.text();
-    console.log("[IF accptpay.php]", r.status, txt.slice(0, 300));
-  } catch (e) {
-    console.warn("[IF accptpay.php] failed:", e?.message || e);
+
+    try {
+      await fetch(`${E.INF_FREE_URL}/accptpay.php`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+    } catch (err) {
+      console.error("[Webhook → accptpay] failed:", err.message);
+    }
   }
-  Local.payouts.set(pi, { state: "queued", amount, currency, at: Date.now() });
 }
 
-// ---------------- COINBASE ----------------
+// ======================================================
+// COINBASE ADVANCED TRADE API  (no org_id, no passphrase)
+// ======================================================
 
-async function coinbaseTestBuy(req, res) {
+async function coinbaseAdvancedBuy(req, res) {
   try {
     const q = req.method === "POST" ? await readJson(req) : req.query;
-    const product = String(q.product || "USDC-EUR");
     const amountEur = Number(q.amount || 10);
-    const out = await cb_placeMarketBuy(product, amountEur);
-    return res.status(200).json(out);
-  } catch (e) {
-    console.error("[coinbaseTestBuy] error", e?.message || e);
-    return res.status(500).json({ error: e?.message || String(e) });
+    const productId = String(q.product || "ETH-EUR");
+
+    console.log(`[coinbaseAdvancedBuy] BUY ${amountEur} EUR of ${productId}`);
+
+    const result = await cb_advancedPlaceMarketBuy(productId, amountEur);
+    return res.status(200).json({ ok: true, result });
+  } catch (err) {
+    console.error("[coinbaseAdvancedBuy] error", err.message);
+    return res.status(500).json({ error: err.message });
   }
 }
 
-async function coinbaseTestWithdraw(req, res) {
-  try {
-    const q = req.method === "POST" ? await readJson(req) : req.query;
-    const asset = String(q.asset || "USDC");
-    const amount = String(q.amount || "5");
-    const address = String(q.address || readEnv().CONTRACT_ADDRESS);
-    const out = await cb_withdrawToAddress({ asset, amount, address });
-    return res.status(200).json(out);
-  } catch (e) {
-    console.error("[coinbaseTestWithdraw] error", e?.message || e);
-    return res.status(500).json({ error: e?.message || String(e) });
-  }
-}
-
-// ---------------- AUTO BUY ----------------
-
-async function coinbaseAutoBuy(req, res) {
-  try {
-    const q = req.method === "POST" ? await readJson(req) : req.query;
-    const amountEur = Number(q.amount || 0);
-    const product = String(q.product || "ETH-EUR");
-    if (!amountEur || amountEur <= 0) return res.status(400).json({ error: "Missing or invalid amount" });
-
-    console.log(`[coinbaseAutoBuy] Spúšťam auto BUY ${amountEur} € → ${product}`);
-    const result = await cb_placeMarketBuy(product, amountEur);
-
-    const E = readEnv();
-    const tx = await cb_withdrawToAddress({
-      asset: product.split("-")[0],
-      amount: String(amountEur),
-      address: E.CONTRACT_ADDRESS || "0x0000000000000000000000000000000000000000",
-    });
-
-    return res.status(200).json({
-      ok: true,
-      note: "Auto-buy + withdraw completed",
-      buy: result,
-      withdraw: tx,
-    });
-  } catch (e) {
-    console.error("[coinbaseAutoBuy] error", e?.message || e);
-    return res.status(500).json({ error: e?.message || String(e) });
-  }
-}
-
-/* ======================================================================
-   COINBASE HELPERS
-   ====================================================================== */
-async function cb_placeMarketBuy(product_id, amountEur) {
-  requireCBEnv();
+async function cb_advancedPlaceMarketBuy(product_id, amountEur) {
+  const E = readEnv();
+  const timestamp = Math.floor(Date.now() / 1000);
   const path = "/api/v3/brokerage/orders";
   const body = {
-    client_order_id: uuid(),
+    client_order_id: crypto.randomUUID(),
     product_id,
     side: "BUY",
     order_configuration: { market_market_ioc: { quote_size: String(amountEur) } },
   };
-  const r = await cbSignedFetch("POST", path, body);
-  if (!r.ok) throw new Error(`CB BUY failed: ${r.status} ${r.text}`);
-  return r.json;
-}
+  const bodyStr = JSON.stringify(body);
+  const prehash = timestamp + "POST" + path + bodyStr;
+  const signature = crypto.createHmac("sha256", E.COINBASE_API_SECRET).update(prehash).digest("base64");
 
-async function cb_withdrawToAddress({ asset, amount, address }) {
-  requireCBEnv();
-  const path = "/withdrawals/crypto";
-  const body = { currency: asset, amount: String(amount), crypto_address: address };
-  const r = await cbSignedFetch("POST", path, body);
-  if (!r.ok) throw new Error(`CB WITHDRAW failed: ${r.status} ${r.text}`);
-  return r.json;
-}
-
-async function cbSignedFetch(method, path, bodyObj) {
-  const { COINBASE_API_SECRET, COINBASE_API_KEY, COINBASE_BASE_URL, COINBASE_API_PASSPHRASE } = readEnv();
-  const timestamp = String(Math.floor(Date.now() / 1000));
-  const body = bodyObj ? JSON.stringify(bodyObj) : "";
-  const prehash = timestamp + method.toUpperCase() + path + body;
-  const hmac = crypto.createHmac("sha256", COINBASE_API_SECRET).update(prehash).digest("base64");
-
-  const url = (COINBASE_BASE_URL || "https://api.coinbase.com") + path;
   const headers = {
-    "CB-ACCESS-KEY": COINBASE_API_KEY,
-    "CB-ACCESS-SIGN": hmac,
+    "CB-ACCESS-KEY": E.COINBASE_API_KEY,
+    "CB-ACCESS-SIGN": signature,
     "CB-ACCESS-TIMESTAMP": timestamp,
     "Content-Type": "application/json",
   };
-  if (COINBASE_API_PASSPHRASE) headers["CB-ACCESS-PASSPHRASE"] = COINBASE_API_PASSPHRASE;
 
-  const resp = await fetch(url, { method, headers, body: body || undefined });
-  const text = await resp.text();
-  let json = null; try { json = JSON.parse(text); } catch {}
-  return { ok: resp.ok, status: resp.status, text, json };
+  const url = `${E.COINBASE_BASE_URL}${path}`;
+  const r = await fetch(url, { method: "POST", headers, body: bodyStr });
+  const text = await r.text();
+  let json = {}; try { json = JSON.parse(text); } catch {}
+  return { ok: r.ok, status: r.status, json, raw: text };
 }
 
-function requireCBEnv() {
-  const { COINBASE_API_KEY, COINBASE_API_SECRET } = readEnv();
-  if (!COINBASE_API_KEY || !COINBASE_API_SECRET)
-    throw new Error("Missing Coinbase API credentials in ENV");
-}
-
+// ======================================================
+// UTILITIES
+// ======================================================
 async function readJson(req) {
   if (req.body && typeof req.body === "object") return req.body;
   const raw = await readRaw(req);
@@ -310,12 +237,4 @@ async function readRaw(req) {
 function safeParseJSON(x) {
   if (!x || typeof x !== "string") return null;
   try { return JSON.parse(x); } catch { return null; }
-}
-
-function uuid() {
-  if (globalThis.crypto?.randomUUID) return crypto.randomUUID();
-  return "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(/[xy]/g, (c) => {
-    const r = (Math.random() * 16) | 0, v = c === "x" ? r : (r & 0x3) | 0x8;
-    return v.toString(16);
-  });
 }
