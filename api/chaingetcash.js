@@ -2,17 +2,17 @@ import Web3 from 'web3';
 import fetch from 'node-fetch';
 
 // ===== ENV =====
-const PROVIDER_URL   = process.env.PROVIDER_URL;         // napr. https://base-mainnet.g.alchemy.com/v2/xxx
+const PROVIDER_URL   = process.env.PROVIDER_URL;         // RPC (Alchemy/Infura…)
 const PRIVATE_KEY    = process.env.PRIVATE_KEY;
 const FROM           = process.env.FROM_ADDRESS;
 const CONTRACT       = process.env.CONTRACT_ADDRESS;
 const INFURA_API_KEY = process.env.INFURA_API_KEY;       // voliteľné (gas API)
-const INF_FREE_URL   = process.env.INF_FREE_URL;         // https://your-inf-domain (s protokolom)
+const INF_FREE_URL   = process.env.INF_FREE_URL;         // https://tvoj-if-domen (s protokolom)
 
 // ===== WEB3 =====
 const web3 = new Web3(PROVIDER_URL);
 
-// ===== ABI (len potrebná metóda) =====
+// ===== ABI =====
 const ABI = [
   {
     type: 'function',
@@ -26,29 +26,27 @@ const ABI = [
 
 export const config = { api: { bodyParser: true } };
 
-// -------- pomocné logovanie → InfinityFree ----------
+// -------- LOG → priamo do accptpay.php?action=save_log ----------
 async function sendLog(message) {
   try {
     if (!INF_FREE_URL) return;
-    const url = `${INF_FREE_URL}/save_log.php`;
+    const url = `${INF_FREE_URL}/accptpay.php?action=save_log`;
     await fetch(url, {
       method: 'POST',
       headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
       body: new URLSearchParams({ message }),
     });
   } catch (e) {
-    // aspoň do konzoly
     console.error('Log transfer failed:', e.message);
   }
 }
 const log = (...a) => {
   const line = `[${new Date().toISOString()}] ${a.join(' ')}`;
   console.log(line);
-  // fire-and-forget na InfinityFree
-  sendLog(line);
+  sendLog(line); // fire-and-forget
 };
 
-// -------- 1) kurz ETH/EUR (CoinGecko) ----------
+// -------- 1) kurz ETH/EUR ----------
 async function getEurEthRate() {
   try {
     const r = await fetch('https://api.coingecko.com/api/v3/simple/price?ids=ethereum&vs_currencies=eur');
@@ -63,7 +61,7 @@ async function getEurEthRate() {
   }
 }
 
-// -------- 2) gas price (Infura → fallback RPC) ----------
+// -------- 2) gas price ----------
 async function getGasPrice() {
   try {
     if (INFURA_API_KEY) {
@@ -84,25 +82,23 @@ async function getGasPrice() {
   return gasPrice;
 }
 
-// -------- 3) načítaj data objednávky z InfinityFree (ak neprišli v tele) ----------
+// -------- 3) dočítaj objednávku z IF, ak net prišla v body ----------
 async function getOrderData(order_id) {
   if (!INF_FREE_URL) throw new Error('INF_FREE_URL not set');
   const url = `${INF_FREE_URL}/chainuserdata/orders/${order_id}.json`;
   const r = await fetch(url);
   if (!r.ok) throw new Error(`Order not found (${order_id})`);
   const j = await r.json();
-  log(`📦 order ${order_id} → token ${j.token_id}, user ${j.user_addr}, amount ${j.amount_eur}`);
+  log(`📦 order ${order_id} → token ${j.token_id}, user ${j.user_addr}, amount ${j.amount_eur ?? j.amount}`);
   return j;
 }
 
-// -------- 4) odoslanie ETH do kontraktu na token_id ----------
+// -------- 4) odoslanie ETH do kontraktu ----------
 async function sendEthToNFT({ user_addr, token_id, ethAmount }) {
   const contract = new web3.eth.Contract(ABI, CONTRACT);
-
   const valueWei = web3.utils.toWei(ethAmount.toString(), 'ether');
   const gasPrice = await getGasPrice();
 
-  // odhad plynu priamo z metódy
   const gasLimit = await contract.methods
     .fundTokenFor(user_addr, token_id)
     .estimateGas({ from: FROM, value: valueWei });
@@ -128,7 +124,7 @@ async function sendEthToNFT({ user_addr, token_id, ethAmount }) {
   return receipt;
 }
 
-// -------- 5) spätná aktualizácia objednávky na IF ----------
+// -------- 5) spätná aktualizácia IF ----------
 async function markOrderFunded(order_id, tx_hash) {
   if (!INF_FREE_URL) return 'INF_FREE_URL not set';
   const updateUrl = `${INF_FREE_URL}/update_order.php`;
@@ -143,15 +139,15 @@ async function markOrderFunded(order_id, tx_hash) {
   return txt;
 }
 
-// -------- 6) API handler ----------
+// -------- 6) handler ----------
 export default async function handler(req, res) {
   try {
-    // GET /api/chaingetcash?action=logs → proxy log z IF
+    // GET ?action=logs → vracia log z IF (proxy môžeš dorobiť, ak chceš)
     if (req.method === 'GET' && (req.query?.action === 'logs')) {
       if (!INF_FREE_URL) return res.status(200).send('INF_FREE_URL not set');
-      const logUrl = `${INF_FREE_URL}/logs/chaingetcash.log`;
+      const url = `${INF_FREE_URL}/accptpay.php?action=read_log`;
       try {
-        const r = await fetch(logUrl);
+        const r = await fetch(url);
         const txt = await r.text();
         res.setHeader('Content-Type', 'text/plain; charset=utf-8');
         return res.status(200).send(txt || '');
@@ -162,21 +158,19 @@ export default async function handler(req, res) {
 
     log('===== CHAINGETCASH START =====');
 
-    // POST: prijímam buď celé dáta, alebo len order_id
-    const order_id  = req.body?.order_id || req.query?.order_id;
-    const user_addr = req.body?.user_addr;
-    const token_id  = req.body?.token_id;
+    const order_id   = req.body?.order_id || req.query?.order_id;
+    const user_addr  = req.body?.user_addr;
+    const token_id   = req.body?.token_id;
     const amount_eur = req.body?.amount_eur;
 
     if (!order_id) return res.status(400).json({ ok:false, error: 'Missing order_id' });
 
     let order = { user_addr, token_id, amount_eur };
-    if (!user_addr || !token_id || !amount_eur) {
-      // dočítaj z IF
+    if (!order.user_addr || !order.token_id || !order.amount_eur) {
       const fetched = await getOrderData(order_id);
-      order.user_addr = order.user_addr || fetched.user_addr;
-      order.token_id  = order.token_id  || fetched.token_id;
-      order.amount_eur= order.amount_eur|| fetched.amount_eur || fetched.amount;
+      order.user_addr  = order.user_addr  || fetched.user_addr;
+      order.token_id   = order.token_id   || fetched.token_id;
+      order.amount_eur = order.amount_eur ?? (fetched.amount_eur ?? fetched.amount);
     }
 
     if (!order.user_addr || !order.token_id || !order.amount_eur) {
