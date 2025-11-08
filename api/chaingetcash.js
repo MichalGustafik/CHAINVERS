@@ -8,14 +8,17 @@ const CONTRACT     = process.env.CONTRACT_ADDRESS;
 const INF_FREE_URL = (process.env.INF_FREE_URL || "https://chainvers.free.nf").replace(/\/$/,"");
 
 const web3 = new Web3(PROVIDER_URL);
+
+// --- kontrakt používa mintCopy(originalId) payable ---
 const ABI = [{
-  type:"function", name:"fundTokenFor",
-  inputs:[{type:"address",name:"user"},{type:"uint256",name:"tokenId"}]
+  type:"function",
+  name:"mintCopy",
+  inputs:[{type:"uint256",name:"originalId"}]
 }];
 
 export const config = { api: { bodyParser: true } };
 
-// LOG to InfinityFree
+// --- LOG do InfinityFree ---
 async function sendLog(msg){
   try{
     await fetch(`${INF_FREE_URL}/accptpay.php?action=save_log`,{
@@ -31,7 +34,7 @@ async function sendLog(msg){
 }
 const log = async (...a)=>{ const m=a.join(" "); console.log(m); await sendLog(m); };
 
-// HELPERS
+// --- pomocné funkcie ---
 async function getEurEthRate(){
   try{
     const r=await fetch("https://api.coingecko.com/api/v3/simple/price?ids=ethereum&vs_currencies=eur");
@@ -50,7 +53,7 @@ async function getBalanceEth(addr){
   return Number(web3.utils.fromWei(w,"ether"));
 }
 
-// UPDATE ORDER back to IF
+// --- označenie objednávky na InfinityFree ---
 async function markOrderPaid(order_id, tx_hash, user_addr){
   try{
     await fetch(`${INF_FREE_URL}/accptpay.php?action=update_order`,{
@@ -66,64 +69,80 @@ async function markOrderPaid(order_id, tx_hash, user_addr){
   }catch(e){ await log(`⚠️ update_order failed: ${e.message}`); }
 }
 
-// TX – fundTokenFor
-async function fundToken({ user_address, token_id, ethAmount, gasPrice }){
-  const contract=new web3.eth.Contract(ABI,CONTRACT);
-  const valueWei=web3.utils.toWei(String(ethAmount),"ether");
-  const gasLimit=await contract.methods
-    .fundTokenFor(user_address,token_id)
-    .estimateGas({from:FROM,value:valueWei});
+// --- transakcia: mintCopy(originalId) ---
+async function mintCopyTx({ token_id, ethAmount, gasPrice }){
+  const contract = new web3.eth.Contract(ABI, CONTRACT);
+  const valueWei = web3.utils.toWei(String(ethAmount), "ether");
 
-  const tx={
-    from:FROM,to:CONTRACT,value:valueWei,
-    data:contract.methods.fundTokenFor(user_address,token_id).encodeABI(),
-    gas:web3.utils.toHex(gasLimit),
-    gasPrice:web3.utils.toHex(gasPrice),
-    nonce:await web3.eth.getTransactionCount(FROM,"pending"),
-    chainId:await web3.eth.getChainId()
+  // odhad gas
+  const gasLimit = await contract.methods
+    .mintCopy(token_id)
+    .estimateGas({ from: FROM, value: valueWei });
+
+  const tx = {
+    from: FROM,
+    to: CONTRACT,
+    value: valueWei,
+    data: contract.methods.mintCopy(token_id).encodeABI(),
+    gas: web3.utils.toHex(gasLimit),
+    gasPrice: web3.utils.toHex(gasPrice),
+    nonce: await web3.eth.getTransactionCount(FROM, "pending"),
+    chainId: await web3.eth.getChainId()
   };
 
-  const signed=await web3.eth.accounts.signTransaction(tx,PRIVATE_KEY);
-  const receipt=await web3.eth.sendSignedTransaction(signed.rawTransaction);
+  const signed = await web3.eth.accounts.signTransaction(tx, PRIVATE_KEY);
+  const receipt = await web3.eth.sendSignedTransaction(signed.rawTransaction);
   await log(`✅ TX: ${receipt.transactionHash}`);
   return receipt.transactionHash;
 }
 
-// MAIN HANDLER
-export default async function handler(req,res){
+// --- hlavný handler ---
+export default async function handler(req, res){
   try{
-    if(req.method!=="POST") return res.status(405).json({ok:false,error:"POST only"});
+    if(req.method !== "POST")
+      return res.status(405).json({ok:false, error:"POST only"});
+
     await log("===== CHAINGETCASH START =====");
 
-    const balEth=(await getBalanceEth(FROM)).toFixed(6);
+    // 1️⃣ zisti zostatok a zapíš ho do IF
+    const balEth = (await getBalanceEth(FROM)).toFixed(6);
     await log(`💠 Balance ${FROM}: ${balEth} ETH`);
     await fetch(`${INF_FREE_URL}/accptpay.php?action=balance&val=${balEth}`,{
       method:"GET",
       headers:{ "Referer": INF_FREE_URL + "/", "User-Agent": "ChainversBot/1.0" }
     });
 
-    const orders=req.body?.orders||[];
+    // 2️⃣ ak prišli objednávky, spracuj ich
+    const orders = Array.isArray(req.body?.orders) ? req.body.orders : [];
     if(!orders.length){
-      await log("ℹ️ Žiadne objednávky v tele – iba balance update");
+      await log("ℹ️ Žiadne objednávky v tele – len balance update");
       return res.json({ok:true,balance_eth:balEth,funded_count:0});
     }
 
-    const [rate,gas]=await Promise.all([getEurEthRate(),getGasPrice()]);
-    let funded=0;
+    const [rate, gas] = await Promise.all([getEurEthRate(), getGasPrice()]);
+    let funded = 0;
+
     for(const o of orders){
-      const addr=o.user_address;
-      const tid=Number(o.token_id);
-      if(!addr||!web3.utils.isAddress(addr)||!tid){ await log("⚠️ Neplatná objednávka, skip"); continue; }
-      const eur=Number(o.amount_eur??o.amount??0);
-      const eth=eur>0?(eur/rate):0.0001;
-      const tx=await fundToken({user_address:addr,token_id:tid,ethAmount:eth,gasPrice:gas});
-      funded++; await markOrderPaid(o.paymentIntentId||String(tid),tx,addr);
+      const token_id = Number(o.token_id);
+      if(!token_id){ await log(`⚠️ Neplatné token_id: ${JSON.stringify(o)}`); continue; }
+
+      const eur = Number(o.amount_eur ?? o.amount ?? 0);
+      const eth = eur > 0 ? (eur / rate) : 0.001; // minimálny poplatok
+
+      try{
+        const txHash = await mintCopyTx({ token_id, ethAmount: eth, gasPrice: gas });
+        funded++;
+        await markOrderPaid(o.paymentIntentId || String(token_id), txHash, o.user_address);
+      }catch(err){
+        await log(`⚠️ MintCopy ${token_id} zlyhal: ${err.message}`);
+      }
     }
 
-    await log(`✅ FUND DONE funded=${funded}`);
-    res.json({ok:true,balance_eth:balEth,funded_count:funded});
+    await log(`✅ MINT DONE funded=${funded}`);
+    res.json({ ok:true, balance_eth: balEth, funded_count: funded });
+
   }catch(e){
     await log(`❌ ERROR: ${e.message}`);
-    res.status(500).json({ok:false,error:e.message});
+    res.status(500).json({ ok:false, error:e.message });
   }
 }
