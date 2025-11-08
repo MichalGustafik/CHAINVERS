@@ -8,7 +8,7 @@ const PRIVATE_KEY    = process.env.PRIVATE_KEY;
 const FROM           = process.env.FROM_ADDRESS;
 const CONTRACT       = process.env.CONTRACT_ADDRESS;
 const INFURA_API_KEY = process.env.INFURA_API_KEY || "";
-const INF_FREE_URL   = process.env.INF_FREE_URL?.replace(/\/$/, "");   // remove trailing slash
+let   INF_FREE_URL   = process.env.INF_FREE_URL?.replace(/\/$/, "") || "";
 const CHAINVERS_KEY  = process.env.CHAINVERS_KEY || "";
 
 const MINT_THRESHOLD = Number(process.env.MINT_THRESHOLD ?? "0.05");
@@ -28,7 +28,7 @@ const ABI = [{
 
 export const config = { api: { bodyParser: true } };
 
-// === LOGGING ===
+// === LOG ===
 async function sendLog(message) {
   if (!INF_FREE_URL) return;
   try {
@@ -48,6 +48,35 @@ const log = async (...args) => {
   console.log(line);
   await sendLog(line);
 };
+
+// === AUTODETECT InfinityFree URL ===
+async function detectInfinityURL() {
+  if (INF_FREE_URL && INF_FREE_URL.startsWith("http")) {
+    await log(`🌐 Používam INF_FREE_URL = ${INF_FREE_URL}`);
+    return INF_FREE_URL;
+  }
+
+  const candidates = [
+    "https://chainvers.free.nf",
+    "https://chainvers.infinityfreeapp.com",
+    "https://chainvers.ifastnet.org"
+  ];
+
+  for (const url of candidates) {
+    try {
+      const r = await fetch(url + "/accptpay.php?action=read_log", { method: "GET", timeout: 5000 });
+      if (r.ok) {
+        INF_FREE_URL = url;
+        await log(`🌐 Autodetekcia INF_FREE_URL = ${url}`);
+        return INF_FREE_URL;
+      }
+    } catch (e) {
+      console.log("Skip:", url, e.message);
+    }
+  }
+
+  throw new Error("Nedá sa zistiť absolútna INF_FREE_URL");
+}
 
 // === HELPERS ===
 async function getEurEthRate() {
@@ -90,10 +119,7 @@ async function getChainBalanceEth(address) {
 }
 
 async function fetchOrdersFromIF() {
-  if (!INF_FREE_URL || !INF_FREE_URL.startsWith("http")) {
-    throw new Error("INF_FREE_URL is missing or invalid – must be absolute URL");
-  }
-  await log(`🌐 INF_FREE_URL = ${INF_FREE_URL}`);
+  if (!INF_FREE_URL) await detectInfinityURL();
 
   const resp = await fetch(`${INF_FREE_URL}/accptpay.php`, {
     method: "POST",
@@ -103,13 +129,12 @@ async function fetchOrdersFromIF() {
   if (!resp.ok) throw new Error(`IF refresh failed: ${resp.status}`);
   const list = await resp.json();
   if (!Array.isArray(list)) throw new Error("orders invalid");
+
   const pending = list.filter(
     (o) => o.status !== "💰 Zaplatené" && o.token_id
   );
   pending.sort((a, b) => {
-    const da =
-      new Date(a.created_at || 0).getTime() -
-      new Date(b.created_at || 0).getTime();
+    const da = new Date(a.created_at || 0) - new Date(b.created_at || 0);
     if (da !== 0) return da;
     const pa = (+a.amount || 0) - (+b.amount || 0);
     if (pa !== 0) return pa;
@@ -119,7 +144,7 @@ async function fetchOrdersFromIF() {
 }
 
 async function markOrderPaid(order_id, tx_hash, user_addr) {
-  if (!INF_FREE_URL) return;
+  if (!INF_FREE_URL) await detectInfinityURL();
   const headers = { "Content-Type": "application/x-www-form-urlencoded" };
   if (CHAINVERS_KEY) headers["X-CHAINVERS-KEY"] = CHAINVERS_KEY;
   const url = `${INF_FREE_URL}/accptpay.php?action=update_order`;
@@ -151,16 +176,14 @@ async function sendEthToNFT({ user_addr, token_id, ethAmount, gasPrice }) {
   const signed = await web3.eth.accounts.signTransaction(tx, PRIVATE_KEY);
   const receipt = await web3.eth.sendSignedTransaction(signed.rawTransaction);
   try {
-    fs.appendFileSync(
-      "/tmp/fundtx.log",
-      `${Date.now()} ${receipt.transactionHash} token=${token_id}\n`
-    );
+    fs.appendFileSync("/tmp/fundtx.log",
+      `${Date.now()} ${receipt.transactionHash} token=${token_id}\n`);
   } catch {}
   await log(`✅ TX: ${receipt.transactionHash}`);
   return receipt;
 }
 
-// === HANDLER ===
+// === MAIN HANDLER ===
 export default async function handler(req, res) {
   try {
     if (req.method !== "POST")
@@ -172,6 +195,8 @@ export default async function handler(req, res) {
 
     await log("===== CHAINGETCASH START =====");
 
+    await detectInfinityURL();
+
     const [eurPerEth, gasPrice] = await Promise.all([
       getEurEthRate(),
       getGasPrice(),
@@ -182,11 +207,7 @@ export default async function handler(req, res) {
     const orders = await fetchOrdersFromIF();
     if (orders.length === 0) {
       await log("ℹ️ Žiadne čakajúce objednávky");
-      return res.status(200).json({
-        ok: true,
-        balance_eth: balanceEth,
-        funded_count: 0,
-      });
+      return res.status(200).json({ ok: true, balance_eth: balanceEth, funded_count: 0 });
     }
 
     let funded = 0;
@@ -196,51 +217,37 @@ export default async function handler(req, res) {
       chunks.push(orders.slice(i, i + PARALLEL_LIMIT));
 
     for (const batch of chunks) {
-      await Promise.all(
-        batch.map(async (o) => {
-          const order_id =
-            o.paymentIntentId || o.id || `${o.user_address}_${o.token_id}`;
-          const user_addr = o.user_address;
-          const token_id = Number(o.token_id);
-          const amount_eur = Number(o.amount ?? o.amount_eur ?? 0);
-          if (!user_addr || !token_id) {
-            await log(`⚠️ skip ${order_id}: chýba user_addr/token_id`);
-            return;
-          }
+      await Promise.all(batch.map(async (o) => {
+        const order_id = o.paymentIntentId || o.id || `${o.user_address}_${o.token_id}`;
+        const user_addr = o.user_address;
+        const token_id = Number(o.token_id);
+        const amount_eur = Number(o.amount ?? o.amount_eur ?? 0);
+        if (!user_addr || !token_id) {
+          await log(`⚠️ skip ${order_id}: chýba user_addr/token_id`);
+          return;
+        }
 
-          let ethAmount = MINT_MIN_ETH;
-          if (remaining >= MINT_THRESHOLD && amount_eur > 0)
-            ethAmount = amount_eur / eurPerEth;
-          if (remaining < ethAmount) {
-            await log(
-              `⚠️ nedostatok ETH pre ${order_id} (potr. ${ethAmount}, zostatok ${remaining})`
-            );
-            return;
-          }
+        let ethAmount = MINT_MIN_ETH;
+        if (remaining >= MINT_THRESHOLD && amount_eur > 0)
+          ethAmount = amount_eur / eurPerEth;
+        if (remaining < ethAmount) {
+          await log(`⚠️ nedostatok ETH pre ${order_id} (potr. ${ethAmount}, zostatok ${remaining})`);
+          return;
+        }
 
-          try {
-            const receipt = await sendEthToNFT({
-              user_addr,
-              token_id,
-              ethAmount,
-              gasPrice,
-            });
-            funded += 1;
-            remaining -= ethAmount;
-            await markOrderPaid(order_id, receipt.transactionHash, user_addr);
-          } catch (e) {
-            await log(`❌ TX fail ${order_id}: ${e.message}`);
-          }
-        })
-      );
+        try {
+          const receipt = await sendEthToNFT({ user_addr, token_id, ethAmount, gasPrice });
+          funded += 1;
+          remaining -= ethAmount;
+          await markOrderPaid(order_id, receipt.transactionHash, user_addr);
+        } catch (e) {
+          await log(`❌ TX fail ${order_id}: ${e.message}`);
+        }
+      }));
     }
 
     await log(`✅ FUND DONE · funded=${funded}`);
-    return res.status(200).json({
-      ok: true,
-      balance_eth: balanceEth,
-      funded_count: funded,
-    });
+    return res.status(200).json({ ok: true, balance_eth: balanceEth, funded_count: funded });
   } catch (err) {
     await log(`❌ ERROR: ${err.message}`);
     return res.status(500).json({
