@@ -2,32 +2,33 @@ import Web3 from "web3";
 import fetch from "node-fetch";
 import fs from "fs";
 
-const web3 = new Web3(process.env.PROVIDER_URL);
-const FROM = process.env.FROM_ADDRESS;
-const PRIVATE_KEY = process.env.PRIVATE_KEY;
-const CONTRACT = process.env.CONTRACT_ADDRESS;
+// === ENV ===
+const PROVIDER_URL   = process.env.PROVIDER_URL;
+const PRIVATE_KEY    = process.env.PRIVATE_KEY;
+const FROM           = process.env.FROM_ADDRESS;
+const CONTRACT       = process.env.CONTRACT_ADDRESS;
 const INFURA_API_KEY = process.env.INFURA_API_KEY || "";
-const INF_FREE_URL = process.env.INF_FREE_URL?.replace(/\/$/, "");
-const CHAINVERS_KEY = process.env.CHAINVERS_KEY || "";
+const INF_FREE_URL   = process.env.INF_FREE_URL?.replace(/\/$/, "");   // remove trailing slash
+const CHAINVERS_KEY  = process.env.CHAINVERS_KEY || "";
 
 const MINT_THRESHOLD = Number(process.env.MINT_THRESHOLD ?? "0.05");
-const MINT_MIN_ETH = Number(process.env.MINT_MIN_ETH ?? "0.0001");
-const BALANCE_ADDRESS = process.env.BALANCE_ADDRESS || FROM;
+const MINT_MIN_ETH   = Number(process.env.MINT_MIN_ETH  ?? "0.0001");
+const BALANCE_ADDRESS= process.env.BALANCE_ADDRESS || FROM;
 const PARALLEL_LIMIT = Number(process.env.MINT_PARALLEL ?? "1");
 
-const ABI = [
-  {
-    type: "function",
-    name: "fundTokenFor",
-    inputs: [
-      { type: "address", name: "user" },
-      { type: "uint256", name: "tokenId" },
-    ],
-  },
-];
+const web3 = new Web3(PROVIDER_URL);
+const ABI = [{
+  type: "function",
+  name: "fundTokenFor",
+  inputs: [
+    { type: "address", name: "user" },
+    { type: "uint256", name: "tokenId" }
+  ]
+}];
 
 export const config = { api: { bodyParser: true } };
 
+// === LOGGING ===
 async function sendLog(message) {
   if (!INF_FREE_URL) return;
   try {
@@ -35,25 +36,23 @@ async function sendLog(message) {
       method: "POST",
       headers: { "Content-Type": "application/x-www-form-urlencoded" },
       body: new URLSearchParams({
-        message: `[${new Date().toISOString()}] ${message}`,
-      }),
+        message: `[${new Date().toISOString()}] ${message}`
+      })
     });
   } catch (e) {
-    console.error("log fail", e.message);
+    console.error("log fail:", e.message);
   }
 }
-
 const log = async (...args) => {
   const line = args.join(" ");
   console.log(line);
   await sendLog(line);
 };
 
+// === HELPERS ===
 async function getEurEthRate() {
   try {
-    const r = await fetch(
-      "https://api.coingecko.com/api/v3/simple/price?ids=ethereum&vs_currencies=eur"
-    );
+    const r = await fetch("https://api.coingecko.com/api/v3/simple/price?ids=ethereum&vs_currencies=eur");
     const j = await r.json();
     const rate = j?.ethereum?.eur;
     if (!rate) throw new Error("rate missing");
@@ -91,8 +90,12 @@ async function getChainBalanceEth(address) {
 }
 
 async function fetchOrdersFromIF() {
-  const url = `${INF_FREE_URL}/accptpay.php`;
-  const resp = await fetch(url, {
+  if (!INF_FREE_URL || !INF_FREE_URL.startsWith("http")) {
+    throw new Error("INF_FREE_URL is missing or invalid – must be absolute URL");
+  }
+  await log(`🌐 INF_FREE_URL = ${INF_FREE_URL}`);
+
+  const resp = await fetch(`${INF_FREE_URL}/accptpay.php`, {
     method: "POST",
     headers: { "Content-Type": "application/x-www-form-urlencoded" },
     body: new URLSearchParams({ action: "refresh" }),
@@ -119,7 +122,6 @@ async function markOrderPaid(order_id, tx_hash, user_addr) {
   if (!INF_FREE_URL) return;
   const headers = { "Content-Type": "application/x-www-form-urlencoded" };
   if (CHAINVERS_KEY) headers["X-CHAINVERS-KEY"] = CHAINVERS_KEY;
-
   const url = `${INF_FREE_URL}/accptpay.php?action=update_order`;
   const body = new URLSearchParams({ order_id, tx_hash, user_addr });
   const resp = await fetch(url, { method: "POST", headers, body });
@@ -145,9 +147,7 @@ async function sendEthToNFT({ user_addr, token_id, ethAmount, gasPrice }) {
     chainId: await web3.eth.getChainId(),
   };
 
-  await log(
-    `▶️ TX → fundTokenFor(${user_addr}, ${token_id}) · ${ethAmount} ETH`
-  );
+  await log(`▶️ TX → fundTokenFor(${user_addr}, ${token_id}) · ${ethAmount} ETH`);
   const signed = await web3.eth.accounts.signTransaction(tx, PRIVATE_KEY);
   const receipt = await web3.eth.sendSignedTransaction(signed.rawTransaction);
   try {
@@ -160,6 +160,7 @@ async function sendEthToNFT({ user_addr, token_id, ethAmount, gasPrice }) {
   return receipt;
 }
 
+// === HANDLER ===
 export default async function handler(req, res) {
   try {
     if (req.method !== "POST")
@@ -181,9 +182,11 @@ export default async function handler(req, res) {
     const orders = await fetchOrdersFromIF();
     if (orders.length === 0) {
       await log("ℹ️ Žiadne čakajúce objednávky");
-      return res
-        .status(200)
-        .json({ ok: true, balance_eth: balanceEth, funded_count: 0 });
+      return res.status(200).json({
+        ok: true,
+        balance_eth: balanceEth,
+        funded_count: 0,
+      });
     }
 
     let funded = 0;
@@ -195,7 +198,8 @@ export default async function handler(req, res) {
     for (const batch of chunks) {
       await Promise.all(
         batch.map(async (o) => {
-          const order_id = o.paymentIntentId || o.id || `${o.user_address}_${o.token_id}`;
+          const order_id =
+            o.paymentIntentId || o.id || `${o.user_address}_${o.token_id}`;
           const user_addr = o.user_address;
           const token_id = Number(o.token_id);
           const amount_eur = Number(o.amount ?? o.amount_eur ?? 0);
@@ -232,11 +236,17 @@ export default async function handler(req, res) {
     }
 
     await log(`✅ FUND DONE · funded=${funded}`);
-    return res
-      .status(200)
-      .json({ ok: true, balance_eth: balanceEth, funded_count: funded });
+    return res.status(200).json({
+      ok: true,
+      balance_eth: balanceEth,
+      funded_count: funded,
+    });
   } catch (err) {
     await log(`❌ ERROR: ${err.message}`);
-    return res.status(500).json({ ok: false, error: err.message });
+    return res.status(500).json({
+      ok: false,
+      error: err.message,
+      balance_eth: await getChainBalanceEth(BALANCE_ADDRESS),
+    });
   }
 }
