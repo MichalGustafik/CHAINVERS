@@ -55,13 +55,11 @@ async function detectInfinityURL() {
     await log(`🌐 Používam INF_FREE_URL = ${INF_FREE_URL}`);
     return INF_FREE_URL;
   }
-
   const candidates = [
     "https://chainvers.free.nf",
     "https://chainvers.infinityfreeapp.com",
     "https://chainvers.ifastnet.org"
   ];
-
   for (const url of candidates) {
     try {
       const r = await fetch(url + "/accptpay.php?action=read_log", { method: "GET", timeout: 5000 });
@@ -70,11 +68,8 @@ async function detectInfinityURL() {
         await log(`🌐 Autodetekcia INF_FREE_URL = ${url}`);
         return INF_FREE_URL;
       }
-    } catch (e) {
-      console.log("Skip:", url, e.message);
-    }
+    } catch (e) { console.log("Skip:", url, e.message); }
   }
-
   throw new Error("Nedá sa zistiť absolútna INF_FREE_URL");
 }
 
@@ -105,9 +100,7 @@ async function getGasPrice() {
         return wei;
       }
     }
-  } catch (e) {
-    await log("⚠️ Infura gas fallback:", e.message);
-  }
+  } catch (e) { await log("⚠️ Infura gas fallback:", e.message); }
   const gp = await web3.eth.getGasPrice();
   await log(`⛽ Gas (RPC): ${web3.utils.fromWei(gp, "gwei")} GWEI`);
   return gp;
@@ -118,31 +111,37 @@ async function getChainBalanceEth(address) {
   return Number(web3.utils.fromWei(wei, "ether"));
 }
 
+// === ORDERS z InfinityFree ===
 async function fetchOrdersFromIF() {
   if (!INF_FREE_URL) await detectInfinityURL();
 
   const resp = await fetch(`${INF_FREE_URL}/accptpay.php`, {
     method: "POST",
-    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    headers: {
+      "Content-Type": "application/x-www-form-urlencoded",
+      "User-Agent": "CHAINVERS-Factory/1.0 (+https://chainvers.vercel.app)"
+    },
     body: new URLSearchParams({ action: "refresh" }),
   });
-  if (!resp.ok) throw new Error(`IF refresh failed: ${resp.status}`);
+
+  // fallback ak POST neprejde
+  if (!resp.ok) {
+    await log(`⚠️ POST failed (${resp.status}), skúšam GET`);
+    const g = await fetch(`${INF_FREE_URL}/accptpay.php?action=refresh`);
+    if (!g.ok) throw new Error(`IF GET failed: ${g.status}`);
+    const j = await g.json();
+    return Array.isArray(j) ? j : [];
+  }
+
   const list = await resp.json();
   if (!Array.isArray(list)) throw new Error("orders invalid");
 
-  const pending = list.filter(
-    (o) => o.status !== "💰 Zaplatené" && o.token_id
-  );
-  pending.sort((a, b) => {
-    const da = new Date(a.created_at || 0) - new Date(b.created_at || 0);
-    if (da !== 0) return da;
-    const pa = (+a.amount || 0) - (+b.amount || 0);
-    if (pa !== 0) return pa;
-    return (+a.token_id || 0) - (+b.token_id || 0);
-  });
+  const pending = list.filter(o => o.status !== "💰 Zaplatené" && o.token_id);
+  pending.sort((a,b) => new Date(a.created_at)-new Date(b.created_at));
   return pending;
 }
 
+// === UPDATE objednávky ===
 async function markOrderPaid(order_id, tx_hash, user_addr) {
   if (!INF_FREE_URL) await detectInfinityURL();
   const headers = { "Content-Type": "application/x-www-form-urlencoded" };
@@ -154,6 +153,7 @@ async function markOrderPaid(order_id, tx_hash, user_addr) {
   await log(`📝 update_order: ${order_id} → ${txt}`);
 }
 
+// === TRANSAKCIA fundTokenFor ===
 async function sendEthToNFT({ user_addr, token_id, ethAmount, gasPrice }) {
   const contract = new web3.eth.Contract(ABI, CONTRACT);
   const valueWei = web3.utils.toWei(String(ethAmount), "ether");
