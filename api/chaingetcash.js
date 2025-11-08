@@ -7,18 +7,17 @@ const PRIVATE_KEY    = process.env.PRIVATE_KEY;
 const FROM           = process.env.FROM_ADDRESS;
 const CONTRACT       = process.env.CONTRACT_ADDRESS;
 let   INF_FREE_URL   = process.env.INF_FREE_URL?.replace(/\/$/, "") || "https://chainvers.free.nf";
-const CHAINVERS_KEY  = process.env.CHAINVERS_KEY || "";
 const BALANCE_ADDRESS= process.env.BALANCE_ADDRESS || FROM;
 
 const web3 = new Web3(PROVIDER_URL);
 const ABI = [{
-  type:"function", name:"fundTokenFor",
+  type:"function",name:"fundTokenFor",
   inputs:[{type:"address",name:"user"},{type:"uint256",name:"tokenId"}]
 }];
 
 export const config = { api: { bodyParser:true } };
 
-// ===== LOG to IF =====
+// ---------- LOG ----------
 async function sendLog(msg){
   try{
     await fetch(`${INF_FREE_URL}/accptpay.php?action=save_log`,{
@@ -34,59 +33,75 @@ async function sendLog(msg){
 }
 const log=async(...a)=>{const m=a.join(" ");console.log(m);await sendLog(m);};
 
-// ===== Helpery =====
+// ---------- HELPERY ----------
 async function getEurEthRate(){
-  try{const r=await fetch("https://api.coingecko.com/api/v3/simple/price?ids=ethereum&vs_currencies=eur");
-    const j=await r.json();const rate=j?.ethereum?.eur;await log(`💱 1 ETH = ${rate} EUR`);return rate||2500;
-  }catch{await log("⚠️ CoinGecko fail 2500");return 2500;}
+  try{
+    const r=await fetch("https://api.coingecko.com/api/v3/simple/price?ids=ethereum&vs_currencies=eur");
+    const j=await r.json();
+    await log(`💱 1 ETH = ${j.ethereum.eur} EUR`);
+    return j.ethereum.eur;
+  }catch{await log("⚠️ CoinGecko fail 2500 EUR");return 2500;}
 }
-async function getGasPrice(){const gp=await web3.eth.getGasPrice();await log(`⛽ Gas (RPC): ${web3.utils.fromWei(gp,"gwei")} GWEI`);return gp;}
-async function getChainBalanceEth(a){const w=await web3.eth.getBalance(a);return Number(web3.utils.fromWei(w,"ether"));}
 
-// ===== FIX: robustný fetch objednávok =====
+async function getGasPrice(){
+  const gp=await web3.eth.getGasPrice();
+  await log(`⛽ Gas (RPC): ${web3.utils.fromWei(gp,"gwei")} GWEI`);
+  return gp;
+}
+
+async function getChainBalanceEth(a){
+  const w=await web3.eth.getBalance(a);
+  return Number(web3.utils.fromWei(w,"ether"));
+}
+
+// ---------- FETCH OBJEDNÁVOK ----------
 async function fetchOrdersFromIF(){
   const headers={
     "Content-Type":"application/x-www-form-urlencoded",
-    "User-Agent":"Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
+    "User-Agent":"Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:118.0) Gecko/20100101 Firefox/118.0",
     "Accept":"text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
     "Accept-Language":"en-US,en;q=0.5",
     "Referer": INF_FREE_URL + "/accptpay.php",
-    "Cookie":"PHPSESSID=fakeSession123"
+    "Cookie": "PHPSESSID=" + Math.random().toString(36).substring(2)
   };
 
-  // najskôr sa pokús o POST ako prehliadač
-  try {
-    const resp = await fetch(`${INF_FREE_URL}/accptpay.php`, {
-      method: "POST",
-      headers,
-      body: new URLSearchParams({ action: "refresh" }),
+  // pokus č.1 — POST
+  try{
+    const r=await fetch(`${INF_FREE_URL}/accptpay.php`,{
+      method:"POST",headers,
+      body:new URLSearchParams({action:"refresh"})
     });
-    if (resp.ok) {
-      const data = await resp.json();
-      if (Array.isArray(data)) return data.filter(o => o.token_id && o.status !== "💰 Zaplatené");
+    if(r.ok){
+      const arr=await r.json();
+      if(Array.isArray(arr)){
+        const pending=arr.filter(o=>o.status!=="💰 Zaplatené"&&o.token_id);
+        await log(`📦 Načítaných ${pending.length} čakajúcich objednávok`);
+        return pending;
+      }
     }
-    await log(`⚠️ POST failed (${resp.status}), skúšam GET`);
-  } catch (e) {
-    await log("⚠️ POST fetch error: " + e.message);
+    await log(`⚠️ POST failed (${r.status}), skúšam GET`);
+  }catch(e){
+    await log("⚠️ POST error: "+e.message);
   }
 
-  // fallback na GET (väčšina IF ho pustí)
-  try {
-    const g = await fetch(`${INF_FREE_URL}/accptpay.php?action=refresh`, {
-      method: "GET",
-      headers,
-    });
-    if (g.ok) {
-      const data = await g.json();
-      if (Array.isArray(data)) return data.filter(o => o.token_id && o.status !== "💰 Zaplatené");
+  // pokus č.2 — GET
+  try{
+    const g=await fetch(`${INF_FREE_URL}/accptpay.php?action=refresh`,{method:"GET",headers});
+    if(g.ok){
+      const arr=await g.json();
+      if(Array.isArray(arr)){
+        const pending=arr.filter(o=>o.status!=="💰 Zaplatené"&&o.token_id);
+        await log(`📦 (GET) načítaných ${pending.length} objednávok`);
+        return pending;
+      }
     }
-    throw new Error(`GET failed ${g.status}`);
-  } catch (e) {
-    throw new Error("IF refresh failed: " + e.message);
+    throw new Error("GET status "+g.status);
+  }catch(e){
+    throw new Error("IF refresh failed: "+e.message);
   }
 }
 
-// ===== UPDATE objednávky =====
+// ---------- UPDATE OBJEDNÁVKY ----------
 async function markOrderPaid(order_id,tx_hash,user_addr){
   await fetch(`${INF_FREE_URL}/accptpay.php?action=update_order`,{
     method:"POST",
@@ -99,18 +114,19 @@ async function markOrderPaid(order_id,tx_hash,user_addr){
   await log(`📝 update_order ${order_id}`);
 }
 
-// ===== TX =====
+// ---------- SEND ETH ----------
 async function sendEthToNFT({user_addr,token_id,ethAmount,gasPrice}){
   const c=new web3.eth.Contract(ABI,CONTRACT);
   const wei=web3.utils.toWei(String(ethAmount),"ether");
-  const gasLimit=await c.methods.fundTokenFor(user_addr,token_id).estimateGas({from:FROM,value:wei});
+  const gasLimit=await c.methods.fundTokenFor(user_addr,token_id)
+    .estimateGas({from:FROM,value:wei});
   const tx={
     from:FROM,to:CONTRACT,value:wei,
     data:c.methods.fundTokenFor(user_addr,token_id).encodeABI(),
     gas:web3.utils.toHex(gasLimit),
     gasPrice:web3.utils.toHex(gasPrice),
     nonce:await web3.eth.getTransactionCount(FROM,"pending"),
-    chainId:await web3.eth.getChainId(),
+    chainId:await web3.eth.getChainId()
   };
   const signed=await web3.eth.accounts.signTransaction(tx,PRIVATE_KEY);
   const r=await web3.eth.sendSignedTransaction(signed.rawTransaction);
@@ -119,11 +135,12 @@ async function sendEthToNFT({user_addr,token_id,ethAmount,gasPrice}){
   return r;
 }
 
-// ===== Main handler =====
+// ---------- MAIN ----------
 export default async function handler(req,res){
   try{
     if(req.method!=="POST") return res.status(405).json({ok:false,error:"POST only"});
     await log("===== CHAINGETCASH START =====");
+
     const [rate,gas]=await Promise.all([getEurEthRate(),getGasPrice()]);
     const bal=await getChainBalanceEth(BALANCE_ADDRESS);
     await log(`💠 Balance ${BALANCE_ADDRESS}: ${bal} ETH`);
