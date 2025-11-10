@@ -38,150 +38,193 @@ const ABI = [
 export const config = { api: { bodyParser: true } };
 
 /* === LOGGING === */
-async function sendLog(msg){
-  try{
-    await fetch(`${INF_FREE_URL}/accptpay.php?action=save_log`,{
-      method:"POST",
-      headers:{
-        "Content-Type":"application/x-www-form-urlencoded",
+async function sendLog(msg) {
+  try {
+    await fetch(`${INF_FREE_URL}/accptpay.php?action=save_log`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/x-www-form-urlencoded",
         "Referer": INF_FREE_URL + "/",
-        "User-Agent": "ChainversBot/1.0"
+        "User-Agent": "ChainversBot/1.0",
       },
-      body:new URLSearchParams({message:`[${new Date().toISOString()}] ${msg}`})
+      body: new URLSearchParams({
+        message: `[${new Date().toISOString()}] ${msg}`,
+      }),
     });
-  }catch{}
+  } catch {}
 }
-const log = async (...a)=>{const m=a.join(" ");console.log(m);await sendLog(m);};
+const log = async (...a) => {
+  const m = a.join(" ");
+  console.log(m);
+  await sendLog(m);
+};
 
 /* === HELPERS === */
-async function getEurEthRate(){
-  try{
-    const r=await fetch("https://api.coingecko.com/api/v3/simple/price?ids=ethereum&vs_currencies=eur");
-    const j=await r.json();const rate=j?.ethereum?.eur;
+async function getEurEthRate() {
+  try {
+    const r = await fetch("https://api.coingecko.com/api/v3/simple/price?ids=ethereum&vs_currencies=eur");
+    const j = await r.json();
+    const rate = j?.ethereum?.eur;
     await log(`💱 1 ETH = ${rate} EUR`);
-    return rate||2500;
-  }catch{await log("⚠️ CoinGecko fail → 2500");return 2500;}
-}
-async function getGasPrice(){
-  try{
-    const gp=await web3.eth.getGasPrice();
-    await log(`⛽ Gas: ${web3.utils.fromWei(gp,"gwei")} GWEI`);
-    return gp;
-  }catch(e){
-    await log(`⚠️ GasPrice error: ${e.message}`);
-    return web3.utils.toWei("1","gwei");
+    return rate || 2500;
+  } catch {
+    await log("⚠️ CoinGecko fail → 2500");
+    return 2500;
   }
 }
-async function getBalanceEth(addr){
-  try{
-    const w=await web3.eth.getBalance(addr);
-    return Number(web3.utils.fromWei(w,"ether"));
-  }catch(e){
+
+async function getGasPrice() {
+  try {
+    const gp = await web3.eth.getGasPrice();
+    await log(`⛽ Gas: ${web3.utils.fromWei(gp, "gwei")} GWEI`);
+    return gp;
+  } catch (e) {
+    await log(`⚠️ GasPrice error: ${e.message}`);
+    return web3.utils.toWei("1", "gwei");
+  }
+}
+
+async function getBalanceEth(addr) {
+  try {
+    const w = await web3.eth.getBalance(addr);
+    return Number(web3.utils.fromWei(w, "ether"));
+  } catch (e) {
     await log(`⚠️ getBalance fail: ${e.message}`);
     return 0;
   }
 }
-async function getMintFee(contract){
-  try{
-    const feeWei=await contract.methods.mintFee().call();
-    const feeEth=Number(web3.utils.fromWei(feeWei,"ether"));
+
+async function getMintFee(contract) {
+  try {
+    const feeWei = await contract.methods.mintFee().call();
+    const feeEth = Number(web3.utils.fromWei(feeWei, "ether"));
     await log(`💰 Contract mintFee = ${feeEth} ETH`);
     return feeEth;
-  }catch(e){
+  } catch (e) {
     await log(`⚠️ mintFee() read fail: ${e.message}`);
     return 0.0001; // fallback minimálny poplatok
   }
 }
-async function markOrderPaid(order_id,tx_hash,user_addr){
-  try{
-    await fetch(`${INF_FREE_URL}/accptpay.php?action=update_order`,{
-      method:"POST",
-      headers:{"Content-Type":"application/x-www-form-urlencoded"},
-      body:new URLSearchParams({order_id,tx_hash,user_addr})
+
+async function markOrderPaid(order_id, tx_hash, user_addr) {
+  try {
+    await fetch(`${INF_FREE_URL}/accptpay.php?action=update_order`, {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({ order_id, tx_hash, user_addr }),
     });
     await log(`📝 update_order ${order_id}`);
-  }catch(e){await log(`⚠️ update_order fail: ${e.message}`);}
+  } catch (e) {
+    await log(`⚠️ update_order fail: ${e.message}`);
+  }
 }
 
 /* === TX === */
-async function mintCopyTx({token_id,ethAmount,gasPrice,mintFeeEth}){
-  const contract=new web3.eth.Contract(ABI,CONTRACT);
-  const valueEth=ethAmount>0?ethAmount:mintFeeEth||0.0001;
-  const valueWei=web3.utils.toWei(String(valueEth),"ether");
+async function mintCopyTx({ token_id, ethAmount, gasPrice, mintFeeEth }) {
+  const contract = new web3.eth.Contract(ABI, CONTRACT);
+  const valueEth = ethAmount > 0 ? ethAmount : mintFeeEth || 0.0001;
+  const valueWei = web3.utils.toWei(String(valueEth), "ether");
 
-  const gasLimit=await contract.methods.mintCopy(token_id)
-    .estimateGas({from:FROM,value:valueWei});
+  const gasLimit = await contract.methods
+    .mintCopy(token_id)
+    .estimateGas({ from: FROM, value: valueWei });
 
-  const tx={
-    from:FROM,to:CONTRACT,value:valueWei,
-    data:contract.methods.mintCopy(token_id).encodeABI(),
-    gas:web3.utils.toHex(gasLimit),
-    gasPrice:web3.utils.toHex(gasPrice),
-    nonce:await web3.eth.getTransactionCount(FROM,"pending"),
-    chainId:await web3.eth.getChainId()
+  const tx = {
+    from: FROM,
+    to: CONTRACT,
+    value: valueWei,
+    data: contract.methods.mintCopy(token_id).encodeABI(),
+    gas: web3.utils.toHex(gasLimit),
+    gasPrice: web3.utils.toHex(gasPrice),
+    nonce: await web3.eth.getTransactionCount(FROM, "pending"),
+    chainId: await web3.eth.getChainId(),
   };
 
-  const signed=await web3.eth.accounts.signTransaction(tx,PRIVATE_KEY);
-  const receipt=await web3.eth.sendSignedTransaction(signed.rawTransaction);
+  const signed = await web3.eth.accounts.signTransaction(tx, PRIVATE_KEY);
+  const receipt = await web3.eth.sendSignedTransaction(signed.rawTransaction);
   await log(`✅ TX: ${receipt.transactionHash}`);
   return receipt.transactionHash;
 }
 
-/* === MAIN === */
-export default async function handler(req,res){
-  try{
-    if(req.method!=="POST")return res.status(405).json({ok:false,error:"POST only"});
+/* === MAIN HANDLER === */
+export default async function handler(req, res) {
+  try {
+    if (req.method !== "POST")
+      return res.status(405).json({ ok: false, error: "POST only" });
+
     await log("===== CHAINGETCASH START =====");
 
-    const balEth=(await getBalanceEth(FROM)).toFixed(6);
+    const balEth = (await getBalanceEth(FROM)).toFixed(6);
     await log(`💠 Balance ${FROM}: ${balEth} ETH`);
     await fetch(`${INF_FREE_URL}/accptpay.php?action=balance&val=${balEth}`);
 
-    const orders=req.body?.orders||[];
-    if(!orders.length){
+    const orders = req.body?.orders || [];
+    if (!orders.length) {
       await log("ℹ️ Žiadne objednávky v tele – len balance update");
-      return res.json({ok:true,balance_eth:balEth,funded_count:0});
+      return res.json({ ok: true, balance_eth: balEth, funded_count: 0 });
     }
 
-    const [rate,gas]=await Promise.all([getEurEthRate(),getGasPrice()]);
-    const contract=new web3.eth.Contract(ABI,CONTRACT);
-    const mintFeeEth=await getMintFee(contract);
+    // ✅ okamžitá odpoveď (anti-timeout)
+    res.status(200).json({ ok: true, message: "Mintovanie prebieha na pozadí…" });
 
-    // === výpočet nákladov ===
-    let totalEur=0;orders.forEach(o=>totalEur+=Number(o.amount_eur??o.amount??0));
-    const ethPerEur=1/rate;
-    const gasPriceEth=Number(web3.utils.fromWei(gas,"ether"));
-    const gasCostPerTx=gasPriceEth*250000;
-    const totalGasEth=gasCostPerTx*orders.length;
-    const totalGasEur=totalGasEth/ethPerEur;
-    const mintFeeTotalEth=mintFeeEth*orders.length;
-    const mintFeeTotalEur=mintFeeTotalEth/ethPerEur;
-    await log(`📊 Náklady: Objednávky=${totalEur.toFixed(2)}€ | Gas≈${totalGasEth.toFixed(6)} ETH (${totalGasEur.toFixed(2)} €) | MintFee≈${mintFeeTotalEth.toFixed(6)} ETH (${mintFeeTotalEur.toFixed(2)} €)`);
+    // pokračuj na pozadí (nezávisle od odpovede)
+    setTimeout(async () => {
+      const [rate, gas] = await Promise.all([getEurEthRate(), getGasPrice()]);
+      const contract = new web3.eth.Contract(ABI, CONTRACT);
+      const mintFeeEth = await getMintFee(contract);
 
-    // === spracovanie objednávok ===
-    let funded=0;
-    for(const o of orders){
-      const token_id=Number(o.token_id);
-      if(!token_id){await log(`⚠️ Neplatný token_id: ${JSON.stringify(o)}`);continue;}
-      const eur=Number(o.amount_eur??o.amount??0);
-      const eth=eur>0?(eur/rate):(mintFeeEth>0?mintFeeEth:0.0001); // ak 0€, len min. poplatok
-      try{
-        const txHash=await mintCopyTx({token_id,ethAmount:eth,gasPrice:gas,mintFeeEth});
-        funded++;
-        await markOrderPaid(o.paymentIntentId||String(token_id),txHash,o.user_address);
-      }catch(err){
-        await log(`⚠️ MintCopy ${token_id} failed: ${err.message}`);
+      let totalEur = 0;
+      orders.forEach((o) => (totalEur += Number(o.amount_eur ?? o.amount ?? 0)));
+      const ethPerEur = 1 / rate;
+      const gasPriceEth = Number(web3.utils.fromWei(gas, "ether"));
+      const gasCostPerTx = gasPriceEth * 250000;
+      const totalGasEth = gasCostPerTx * orders.length;
+      const totalGasEur = totalGasEth / ethPerEur;
+      const mintFeeTotalEth = mintFeeEth * orders.length;
+      const mintFeeTotalEur = mintFeeTotalEth / ethPerEur;
+      await log(
+        `📊 Náklady: Objednávky=${totalEur.toFixed(
+          2
+        )}€ | Gas≈${totalGasEth.toFixed(6)} ETH (${totalGasEur.toFixed(
+          2
+        )} €) | MintFee≈${mintFeeTotalEth.toFixed(6)} ETH (${mintFeeTotalEur.toFixed(
+          2
+        )} €)`
+      );
+
+      let funded = 0;
+      for (const o of orders) {
+        const token_id = Number(o.token_id);
+        if (!token_id) {
+          await log(`⚠️ Neplatný token_id: ${JSON.stringify(o)}`);
+          continue;
+        }
+        const eur = Number(o.amount_eur ?? o.amount ?? 0);
+        const eth = eur > 0 ? eur / rate : mintFeeEth > 0 ? mintFeeEth : 0.0001;
+
+        try {
+          const txHash = await mintCopyTx({
+            token_id,
+            ethAmount: eth,
+            gasPrice: gas,
+            mintFeeEth,
+          });
+          funded++;
+          await markOrderPaid(
+            o.paymentIntentId || String(token_id),
+            txHash,
+            o.user_address
+          );
+        } catch (err) {
+          await log(`⚠️ MintCopy ${token_id} failed: ${err.message}`);
+        }
       }
-    }
 
-    await log(`✅ MINT DONE funded=${funded}`);
-    res.json({ok:true,balance_eth:balEth,funded_count:funded});
+      await log(`✅ MINT DONE funded=${funded}`);
+    }, 100);
 
-    // 🔹 ANTI-TIMEOUT (Vercel Free limit)
-    setTimeout(() => process.exit(0), 1000);
-
-  }catch(e){
+  } catch (e) {
     await log(`❌ ERROR: ${e.message}`);
-    res.status(500).json({ok:false,error:e.message});
+    res.status(500).json({ ok: false, error: e.message });
   }
 }
