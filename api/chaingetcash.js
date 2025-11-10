@@ -13,7 +13,7 @@ const FROM = process.env.FROM_ADDRESS;
 const CONTRACT = process.env.CONTRACT_ADDRESS;
 const INF_FREE_URL = (process.env.INF_FREE_URL || "https://chainvers.free.nf").replace(/\/$/, "");
 
-/* === RPC auto-init === */
+/* === RPC AUTO INIT === */
 let web3 = null;
 for (const rpc of RPCS) {
   try {
@@ -23,19 +23,28 @@ for (const rpc of RPCS) {
     console.log(`✅ Using RPC: ${rpc}`);
     break;
   } catch (e) {
-    console.log(`⚠️ RPC failed: ${rpc} (${e.message})`);
+    console.log(`⚠️ RPC failed ${rpc}: ${e.message}`);
   }
 }
-if (!web3) throw new Error("No working RPC");
+if (!web3) throw new Error("No available RPC nodes");
 
 /* === ABI === */
 const ABI = [
-  { type: "function", name: "mintCopy", inputs: [{ type: "uint256", name: "originalId" }] },
-  { type: "function", name: "mintFee", inputs: [], outputs: [{ type: "uint256" }], stateMutability: "view" }
+  {
+    "inputs": [{ "internalType": "uint256", "name": "originalId", "type": "uint256" }],
+    "name": "mintCopy",
+    "outputs": [],
+    "stateMutability": "payable",
+    "type": "function"
+  },
+  {
+    "inputs": [],
+    "name": "mintFee",
+    "outputs": [{ "internalType": "uint256", "name": "", "type": "uint256" }],
+    "stateMutability": "view",
+    "type": "function"
+  }
 ];
-
-/* === API CONFIG === */
-export const config = { api: { bodyParser: true } };
 
 /* === LOG HELPER === */
 async function sendLog(msg) {
@@ -62,7 +71,7 @@ async function getEurEthRate() {
     await log(`💱 1 ETH = ${rate} EUR`);
     return rate || 2500;
   } catch {
-    await log("⚠️ CoinGecko fail → fallback 2500");
+    await log("⚠️ CoinGecko fail → 2500");
     return 2500;
   }
 }
@@ -73,14 +82,19 @@ async function getGasPrice() {
     await log(`⛽ Gas: ${web3.utils.fromWei(gp, "gwei")} GWEI`);
     return gp;
   } catch (e) {
-    await log(`⚠️ Gas error: ${e.message}`);
+    await log(`⚠️ GasPrice error: ${e.message}`);
     return web3.utils.toWei("1", "gwei");
   }
 }
 
 async function getBalanceEth(addr) {
-  const wei = await web3.eth.getBalance(addr);
-  return Number(web3.utils.fromWei(wei, "ether"));
+  try {
+    const w = await web3.eth.getBalance(addr);
+    return Number(web3.utils.fromWei(w, "ether"));
+  } catch (e) {
+    await log(`⚠️ getBalance fail: ${e.message}`);
+    return 0;
+  }
 }
 
 /* === mintFee autodetekcia === */
@@ -98,27 +112,26 @@ async function getMintFee(contract) {
 
 /* === UPDATE ORDER === */
 async function markOrderPaid(order_id, tx_hash, user_addr) {
-  for (let i = 0; i < 2; i++) {
-    try {
-      const res = await fetch(`${INF_FREE_URL}/accptpay.php?action=update_order`, {
-        method: "POST",
-        headers: { "Content-Type": "application/x-www-form-urlencoded" },
-        body: new URLSearchParams({ order_id, tx_hash, user_addr }),
-      });
-      if (res.ok) {
-        await log(`📝 update_order ${order_id}`);
-        return;
-      }
-    } catch {}
-    await new Promise((r) => setTimeout(r, 1000));
+  try {
+    const res = await fetch(`${INF_FREE_URL}/accptpay.php?action=update_order`, {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({ order_id, tx_hash, user_addr }),
+    });
+    if (res.ok) await log(`📝 update_order ${order_id}`);
+    else {
+      await fetch(`${INF_FREE_URL}/accptpay.php?action=update_order&order_id=${order_id}&tx_hash=${tx_hash}&user_addr=${user_addr}`);
+      await log(`🟡 Fallback GET update_order ${order_id}`);
+    }
+  } catch (e) {
+    await log(`⚠️ update_order fail: ${e.message}`);
   }
-  await log(`⚠️ update_order fail after retries`);
 }
 
 /* === Mint transaction === */
 async function mintCopyTx({ token_id, ethAmount, gasPrice, mintFeeEth }) {
   const contract = new web3.eth.Contract(ABI, CONTRACT);
-  const valueEth = ethAmount > 0 ? ethAmount : mintFeeEth;
+  const valueEth = ethAmount > 0 ? ethAmount : Math.max(mintFeeEth, 0.00005);
   const valueWei = web3.utils.toWei(String(valueEth), "ether");
   const gasLimit = await contract.methods.mintCopy(token_id).estimateGas({ from: FROM, value: valueWei });
   const balance = await web3.eth.getBalance(FROM);
@@ -157,7 +170,9 @@ export default async function handler(req, res) {
 
     const balanceEth = await getBalanceEth(FROM);
     await log(`💠 Balance ${FROM}: ${balanceEth.toFixed(6)} ETH`);
-    await fetch(`${INF_FREE_URL}/accptpay.php?action=balance&val=${balanceEth.toFixed(6)}`);
+    await fetch(`${INF_FREE_URL}/accptpay.php?action=balance&val=${balanceEth.toFixed(6)}`, {
+      headers: { 'Referer': INF_FREE_URL + '/' }
+    });
 
     const orders = req.body?.orders || [];
     if (!orders.length) {
@@ -169,15 +184,14 @@ export default async function handler(req, res) {
     const contract = new web3.eth.Contract(ABI, CONTRACT);
     const mintFeeEth = await getMintFee(contract);
 
-    let funded = 0, totalEur = 0, totalGasEth = 0;
-
+    let funded = 0, totalEur = 0;
     for (let i = 0; i < orders.length; i++) {
       const o = orders[i];
       const token_id = Number(o.token_id);
       if (!token_id) continue;
 
       const eur = Number(o.amount_eur ?? o.amount ?? 0);
-      const eth = eur > 0 ? eur / rate : mintFeeEth;
+      const eth = eur > 0 ? eur / rate : Math.max(mintFeeEth, 0.00005);
       totalEur += eur;
 
       await log(`→ Token ${token_id}: ${eur.toFixed(2)}€ (${eth.toFixed(6)} ETH)`);
@@ -189,22 +203,24 @@ export default async function handler(req, res) {
           await markOrderPaid(o.paymentIntentId || String(token_id), txHash, o.user_address);
         }
       } catch (err) {
-        if (err.message.includes("Too Many Requests")) {
-          await log("🔁 Switching RPC → llamaRPC");
-          web3.setProvider("https://base.llamarpc.com");
-          i--; continue;
-        }
         await log(`⚠️ MintCopy ${token_id} failed: ${err.message}`);
       }
-
-      // malý delay pre stabilitu RPC
-      if (i % 3 === 2) await new Promise((r) => setTimeout(r, 350));
+      if (i % 3 === 2) await new Promise(r => setTimeout(r, 350));
     }
 
-    await log(`📊 Náklady: Objednávky=${totalEur.toFixed(2)}€ | Gas≈${(totalGasEth).toFixed(6)} ETH`);
+    await log(`📊 Náklady: Objednávky=${totalEur.toFixed(2)}€`);
     await log(`✅ MINT DONE funded=${funded}`);
 
-    res.json({ ok: true, funded_count: funded, balance_eth: balanceEth });
+    // zapíš sumu objednávok do InfinityFree
+    await fetch(`${INF_FREE_URL}/accptpay.php?action=save_log`, {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({
+        message: `[${new Date().toISOString()}] 💶 Načítaná suma objednávok: ${totalEur.toFixed(2)} €`
+      })
+    });
+
+    res.json({ ok: true, balance_eth: balanceEth, funded_count: funded });
   } catch (e) {
     await log(`❌ ERROR: ${e.message}`);
     res.status(500).json({ ok: false, error: e.message });
