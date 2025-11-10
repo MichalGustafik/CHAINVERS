@@ -120,7 +120,7 @@ async function markOrderPaid(order_id, tx_hash, user_addr) {
   }
 }
 
-/* === SMART MINTER (dynamic gas, mintFee, fallback) === */
+/* === SMART MINTER === */
 const MIN_FALLBACK_ETH = 0.00005;
 
 async function mintCopyTx({ token_id, eurAmount, rate, gasPrice, mintFeeEth }) {
@@ -182,6 +182,12 @@ export default async function handler(req, res) {
     const balEth = (await getBalanceEth(FROM)).toFixed(6);
     await log(`💠 Balance ${FROM}: ${balEth} ETH`);
     await fetch(`${INF_FREE_URL}/accptpay.php?action=balance&val=${balEth}`);
+
+    // ⚠️ upozornenie na nízky zostatok
+    if (balEth < 0.001) {
+      await log(`⚠️ Low ETH balance (${balEth} ETH) → Dobite cez Coinbase pred ďalším mintom`);
+      return res.json({ ok: false, low_balance: true, balance_eth: balEth });
+    }
 
     const orders = req.body?.orders || [];
     if (!orders.length) {
