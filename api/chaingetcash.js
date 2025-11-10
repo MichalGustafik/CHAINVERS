@@ -106,19 +106,6 @@ async function getMintFee(contract) {
   }
 }
 
-async function markOrderPaid(order_id, tx_hash, user_addr) {
-  try {
-    await fetch(`${INF_FREE_URL}/accptpay.php?action=update_order`, {
-      method: "POST",
-      headers: { "Content-Type": "application/x-www-form-urlencoded" },
-      body: new URLSearchParams({ order_id, tx_hash, user_addr }),
-    });
-    await log(`📝 update_order ${order_id}`);
-  } catch (e) {
-    await log(`⚠️ update_order fail: ${e.message}`);
-  }
-}
-
 /* === TX === */
 async function mintCopyTx({ token_id, ethAmount, gasPrice, mintFeeEth }) {
   const contract = new web3.eth.Contract(ABI, CONTRACT);
@@ -167,7 +154,7 @@ export default async function handler(req, res) {
     // ✅ okamžitá odpoveď (anti-timeout)
     res.status(200).json({ ok: true, message: "Mintovanie prebieha na pozadí…" });
 
-    // pokračuj na pozadí (nezávisle od odpovede)
+    // === mint beží na pozadí ===
     setTimeout(async () => {
       const [rate, gas] = await Promise.all([getEurEthRate(), getGasPrice()]);
       const contract = new web3.eth.Contract(ABI, CONTRACT);
@@ -210,18 +197,26 @@ export default async function handler(req, res) {
             mintFeeEth,
           });
           funded++;
-          await markOrderPaid(
-            o.paymentIntentId || String(token_id),
-            txHash,
-            o.user_address
-          );
+
+          // 🔹 paralelné odoslanie update_order (bez čakania)
+          fetch(`${INF_FREE_URL}/accptpay.php?action=update_order`, {
+            method: "POST",
+            headers: { "Content-Type": "application/x-www-form-urlencoded" },
+            body: new URLSearchParams({
+              order_id: o.paymentIntentId || String(token_id),
+              tx_hash: txHash,
+              user_addr: o.user_address,
+            }),
+          }).catch(() => {});
+          await log(`📝 update_order ${o.paymentIntentId || token_id}`);
+
         } catch (err) {
           await log(`⚠️ MintCopy ${token_id} failed: ${err.message}`);
         }
       }
 
       await log(`✅ MINT DONE funded=${funded}`);
-    }, 100);
+    }, 200);
 
   } catch (e) {
     await log(`❌ ERROR: ${e.message}`);
