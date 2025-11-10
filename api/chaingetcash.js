@@ -108,8 +108,10 @@ async function mintCopyTx({token_id,ethAmount,gasPrice,mintFeeEth}){
   const contract=new web3.eth.Contract(ABI,CONTRACT);
   const valueEth=ethAmount>0?ethAmount:mintFeeEth||0.0001;
   const valueWei=web3.utils.toWei(String(valueEth),"ether");
+
   const gasLimit=await contract.methods.mintCopy(token_id)
     .estimateGas({from:FROM,value:valueWei});
+
   const tx={
     from:FROM,to:CONTRACT,value:valueWei,
     data:contract.methods.mintCopy(token_id).encodeABI(),
@@ -118,6 +120,7 @@ async function mintCopyTx({token_id,ethAmount,gasPrice,mintFeeEth}){
     nonce:await web3.eth.getTransactionCount(FROM,"pending"),
     chainId:await web3.eth.getChainId()
   };
+
   const signed=await web3.eth.accounts.signTransaction(tx,PRIVATE_KEY);
   const receipt=await web3.eth.sendSignedTransaction(signed.rawTransaction);
   await log(`✅ TX: ${receipt.transactionHash}`);
@@ -148,7 +151,7 @@ export default async function handler(req,res){
     let totalEur=0;orders.forEach(o=>totalEur+=Number(o.amount_eur??o.amount??0));
     const ethPerEur=1/rate;
     const gasPriceEth=Number(web3.utils.fromWei(gas,"ether"));
-    const gasCostPerTx=gasPriceEth*250000; // približný gasLimit
+    const gasCostPerTx=gasPriceEth*250000;
     const totalGasEth=gasCostPerTx*orders.length;
     const totalGasEur=totalGasEth/ethPerEur;
     const mintFeeTotalEth=mintFeeEth*orders.length;
@@ -164,12 +167,18 @@ export default async function handler(req,res){
       const eth=eur>0?(eur/rate):(mintFeeEth>0?mintFeeEth:0.0001); // ak 0€, len min. poplatok
       try{
         const txHash=await mintCopyTx({token_id,ethAmount:eth,gasPrice:gas,mintFeeEth});
-        funded++;await markOrderPaid(o.paymentIntentId||String(token_id),txHash,o.user_address);
-      }catch(err){await log(`⚠️ MintCopy ${token_id} failed: ${err.message}`);}
+        funded++;
+        await markOrderPaid(o.paymentIntentId||String(token_id),txHash,o.user_address);
+      }catch(err){
+        await log(`⚠️ MintCopy ${token_id} failed: ${err.message}`);
+      }
     }
 
     await log(`✅ MINT DONE funded=${funded}`);
     res.json({ok:true,balance_eth:balEth,funded_count:funded});
+
+    // 🔹 ANTI-TIMEOUT (Vercel Free limit)
+    setTimeout(() => process.exit(0), 1000);
 
   }catch(e){
     await log(`❌ ERROR: ${e.message}`);
