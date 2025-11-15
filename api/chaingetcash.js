@@ -1,9 +1,7 @@
 import Web3 from "web3";
 import fetch from "node-fetch";
 
-/* ============================================================
-   ENV
-============================================================ */
+/* === ENV === */
 const PRIMARY_RPC   = process.env.PROVIDER_URL;
 const SECONDARY_RPC = "https://mainnet.base.org";
 const TERTIARY_RPC  = "https://base.llamarpc.com";
@@ -13,29 +11,22 @@ const FROM          = process.env.FROM_ADDRESS;
 const CONTRACT      = process.env.CONTRACT_ADDRESS;
 const INF_FREE_URL  = (process.env.INF_FREE_URL || "https://chainvers.free.nf").replace(/\/$/, "");
 
-/* ============================================================
-   AUTO RPC
-============================================================ */
+/* === RPC AUTODETECT === */
 async function initWeb3() {
-  const RPCs = [PRIMARY_RPC, SECONDARY_RPC, TERTIARY_RPC];
-  for (const rpc of RPCs) {
+  const rpcList = [PRIMARY_RPC, SECONDARY_RPC, TERTIARY_RPC];
+  for (const rpc of rpcList) {
     try {
       const w3 = new Web3(rpc);
       await w3.eth.getBlockNumber();
-      console.log("✅ Using RPC:", rpc);
+      console.log("Using RPC:", rpc);
       return w3;
-    } catch (e) {
-      console.log("⚠️ RPC failed", rpc, e.message);
-    }
+    } catch {}
   }
-  throw new Error("No RPC available");
+  throw new Error("No RPC working");
 }
-
 const web3 = await initWeb3();
 
-/* ============================================================
-   ABI
-============================================================ */
+/* === ABI === */
 const ABI = [
   {
     type: "function",
@@ -45,14 +36,13 @@ const ABI = [
   {
     type: "function",
     name: "mintFee",
-    outputs: [{ type: "uint256", name: "" }],
-    stateMutability: "view",
-  },
+    inputs: [],
+    outputs: [{ type: "uint256" }],
+    stateMutability: "view"
+  }
 ];
 
-/* ============================================================
-   LOGGING → InfinityFree
-============================================================ */
+/* === LOG to IF === */
 async function sendLog(msg) {
   try {
     await fetch(`${INF_FREE_URL}/accptpay.php?action=save_log`, {
@@ -64,166 +54,98 @@ async function sendLog(msg) {
     });
   } catch {}
 }
+const log = async (...a) => sendLog(a.join(" "));
 
-const log = async (...a) => {
-  const m = a.join(" ");
-  console.log(m);
-  await sendLog(m);
-};
-
-/* ============================================================
-   HELPERS
-============================================================ */
-
-async function getBalance(addr) {
-  try {
-    const wei = await web3.eth.getBalance(addr);
-    return Number(web3.utils.fromWei(wei, "ether"));
-  } catch (e) {
-    await log("⚠️ getBalance error:", e.message);
-    return 0;
-  }
+/* === HELPERS === */
+async function getBalanceEth(addr) {
+  const balWei = await web3.eth.getBalance(addr);
+  return Number(web3.utils.fromWei(balWei, "ether"));
 }
 
 async function getGasPrice() {
+  return await web3.eth.getGasPrice();
+}
+
+async function getEurEth() {
   try {
-    const g = await web3.eth.getGasPrice();
-    await log("⛽ Gas:", web3.utils.fromWei(g, "gwei"), "GWEI");
-    return g;
-  } catch (e) {
-    await log("⚠️ gas fail:", e.message);
-    return web3.utils.toWei("1", "gwei");
+    const r = await fetch("https://api.coingecko.com/api/v3/simple/price?ids=ethereum&vs_currencies=eur");
+    const j = await r.json();
+    return j.ethereum.eur;
+  } catch {
+    return 2500;
   }
 }
 
-async function getMintFee(contract) {
-  try {
-    const feeWei = await contract.methods.mintFee().call();
-    const feeEth = Number(web3.utils.fromWei(feeWei, "ether"));
-    await log("💰 Contract mintFee =", feeEth, "ETH");
-    return feeEth;
-  } catch (e) {
-    await log("⚠️ mintFee() error:", e.message);
-    return 0.001;
-  }
-}
-
-/* ============================================================
-   UPDATE ORDER
-============================================================ */
-async function updateOrderBack(data) {
-  try {
-    await fetch(`${INF_FREE_URL}/accptpay.php?action=update_order`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(data),
-    });
-    await log("📝 update_order sent:", JSON.stringify(data));
-  } catch (e) {
-    await log("⚠️ update_order fail:", e.message);
-  }
-}
-
-/* ============================================================
-   SEND TX → mintCopy()
-============================================================ */
-async function doMint(token_id, ethAmount) {
+async function mintCopyTx(tokenId, ethAmount) {
   const contract = new web3.eth.Contract(ABI, CONTRACT);
-  const valueWei = web3.utils.toWei(String(ethAmount), "ether");
-  const gasPrice = await getGasPrice();
 
+  const valueWei = web3.utils.toWei(String(ethAmount), "ether");
   const gasLimit = await contract.methods
-    .mintCopy(token_id)
+    .mintCopy(tokenId)
     .estimateGas({ from: FROM, value: valueWei });
 
   const tx = {
     from: FROM,
     to: CONTRACT,
     value: valueWei,
-    data: contract.methods.mintCopy(token_id).encodeABI(),
-    gas: web3.utils.toHex(gasLimit),
-    gasPrice: web3.utils.toHex(gasPrice),
-    chainId: await web3.eth.getChainId(),
+    data: contract.methods.mintCopy(tokenId).encodeABI(),
+    gas: gasLimit,
+    gasPrice: await getGasPrice(),
     nonce: await web3.eth.getTransactionCount(FROM, "pending"),
+    chainId: await web3.eth.getChainId(),
   };
 
   const signed = await web3.eth.accounts.signTransaction(tx, PRIVATE_KEY);
   const receipt = await web3.eth.sendSignedTransaction(signed.rawTransaction);
-
-  await log("✅ TX:", receipt.transactionHash);
-
   return receipt.transactionHash;
 }
 
-/* ============================================================
-   HANDLER
-============================================================ */
+/* === MAIN HANDLER === */
 export default async function handler(req, res) {
   try {
-    if (req.method !== "POST") return res.status(405).json({ ok: false, error: "POST only" });
+    if (req.method !== "POST")
+      return res.status(405).json({ ok: false });
 
     await log("===== CHAINGETCASH START =====");
 
-    const orders = req.body?.orders || [];
-    const bal    = await getBalance(FROM);
-    await log("💠 Balance", FROM, ":", bal, "ETH");
-
-    // uloženie zostatku do InfinityFree
-    try {
-      await fetch(`${INF_FREE_URL}/accptpay.php?action=balance&val=${bal}`);
-    } catch {}
-
+    const orders = req.body.orders || [];
     if (!orders.length) {
-      await log("ℹ️ No orders");
-      return res.json({ ok: true, funded: 0 });
+      return res.json({ ok: true, funded_count: 0 });
     }
 
-    const contract   = new web3.eth.Contract(ABI, CONTRACT);
-    const mintFeeEth = await getMintFee(contract);
-
-    let funded = 0;
+    const rate = await getEurEth();
+    const funded = [];
 
     for (const o of orders) {
-      const token_id   = Number(o.token_id);
-      const payment_id = o.payment_id || "";
-      const user_addr  = o.user_address;
+      const tokenId = Number(o.token_id);
+      const eur = Number(o.amount_eur);
+      const ethAmount = eur > 0 ? eur / rate : 0.001;
 
-      if (!token_id) {
-        await log("⚠️ Missing token_id", JSON.stringify(o));
-        continue;
-      }
-
-      const eur = Number(o.amount_eur ?? o.amount ?? 0);
-
-      // cena mintu
-      let eth = eur > 0 ? eur / 3000 : mintFeeEth;
-      if (eth < mintFeeEth) eth = mintFeeEth;
-
-      await log(`→ Token ${token_id}: ${eur.toFixed(2)}€ (${eth} ETH)`);
-
+      let txHash = null;
       try {
-        const tx = await doMint(token_id, eth);
-        funded++;
+        txHash = await mintCopyTx(tokenId, ethAmount);
 
-        // pošleme JSON späť do InfinityFree
-        await updateOrderBack({
-          order_id    : String(token_id),   // TOTO JE HLAVNÉ ID
-          payment_id  : payment_id,
-          token_id    : token_id,
-          user_addr   : user_addr,
-          tx_hash     : tx
+        /* UPDATE ORDER — POSIELAME UNIVERZÁLNE ID */
+        await fetch(`${INF_FREE_URL}/accptpay.php?action=update_order`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            order_id: o.paymentIntentId || String(tokenId),
+            tx_hash: txHash,
+            user_addr: o.user_address,
+          }),
         });
 
+        funded.push(tokenId);
+        await log(`FINISHED ${tokenId} → ${txHash}`);
       } catch (err) {
-        await log(`⚠️ MintCopy ${token_id} failed: ${err.message}`);
+        await log(`MintCopy ${tokenId} FAIL: ${err.message}`);
       }
     }
 
-    await log("📊 Done | funded =", funded);
-    res.json({ ok: true, funded });
-
+    return res.json({ ok: true, funded_count: funded.length });
   } catch (e) {
-    await log("❌ ERROR:", e.message);
-    res.status(500).json({ ok: false, error: e.message });
+    await log("ERROR:", e.message);
+    return res.status(500).json({ ok: false, error: e.message });
   }
 }
