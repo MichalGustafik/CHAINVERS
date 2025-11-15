@@ -11,26 +11,24 @@ const FROM          = process.env.FROM_ADDRESS;
 const CONTRACT      = process.env.CONTRACT_ADDRESS;
 const INF_FREE_URL  = (process.env.INF_FREE_URL || "https://chainvers.free.nf").replace(/\/$/,"");
 
-/* === WEB3 AUTO-RPC === */
-let web3;
+/* === RPC AUTO-SELECTION === */
 async function initWeb3() {
-  if (web3) return web3;
   const rpcCandidates = [PRIMARY_RPC, SECONDARY_RPC, TERTIARY_RPC];
   for (const rpc of rpcCandidates) {
     try {
       const w3 = new Web3(rpc);
-      await w3.eth.getBlockNumber();          // test, či RPC žije
+      await w3.eth.getBlockNumber();
       console.log(`✅ Using RPC: ${rpc}`);
-      web3 = w3;
-      return web3;
+      return w3;
     } catch (e) {
       console.log(`⚠️ RPC failed ${rpc}: ${e.message}`);
     }
   }
   throw new Error("No available RPC nodes");
 }
+const web3 = await initWeb3();
 
-/* === ABI – len to, čo potrebujeme === */
+/* === ABI === */
 const ABI = [
   {
     type: "function",
@@ -46,12 +44,12 @@ const ABI = [
   },
 ];
 
+/* === API === */
 export const config = { api: { bodyParser: true } };
 
-/* === LOG do InfinityFree === */
+/* === LOGGING → InfinityFree === */
 async function sendLog(msg) {
   try {
-    if (!INF_FREE_URL) return;
     await fetch(`${INF_FREE_URL}/accptpay.php?action=save_log`, {
       method: "POST",
       headers: {
@@ -63,9 +61,7 @@ async function sendLog(msg) {
         message: `[${new Date().toISOString()}] ${msg}`,
       }),
     });
-  } catch (e) {
-    console.error("Log transfer failed:", e.message);
-  }
+  } catch {}
 }
 const log = async (...a) => {
   const m = a.join(" ");
@@ -73,7 +69,7 @@ const log = async (...a) => {
   await sendLog(m);
 };
 
-/* === HELPERY === */
+/* === HELPERS === */
 async function getEurEthRate() {
   try {
     const r = await fetch(
@@ -90,64 +86,65 @@ async function getEurEthRate() {
 }
 
 async function getGasPrice() {
-  const w3 = await initWeb3();
   try {
-    const gp = await w3.eth.getGasPrice();
-    await log(`⛽ Gas: ${w3.utils.fromWei(gp, "gwei")} GWEI`);
+    const gp = await web3.eth.getGasPrice();
+    await log(`⛽ Gas: ${web3.utils.fromWei(gp, "gwei")} GWEI`);
     return gp;
   } catch (e) {
     await log(`⚠️ GasPrice error: ${e.message}`);
-    return w3.utils.toWei("1", "gwei");
+    return web3.utils.toWei("1", "gwei");
   }
 }
 
 async function getBalanceEth(addr) {
-  const w3 = await initWeb3();
   try {
-    const w = await w3.eth.getBalance(addr);
-    return Number(w3.utils.fromWei(w, "ether"));
+    const w = await web3.eth.getBalance(addr);
+    const eth = Number(web3.utils.fromWei(w, "ether"));
+    await log(`💠 Balance ${addr}: ${eth.toFixed(6)} ETH`);
+    // po zistení zostatku pošli do IF
+    await fetch(`${INF_FREE_URL}/accptpay.php?action=balance&val=${encodeURIComponent(eth.toFixed(6))}`);
+    return eth;
   } catch (e) {
     await log(`⚠️ getBalance fail: ${e.message}`);
     return 0;
   }
 }
 
-/* mintFee z kontraktu – ak fails, fallback 0.001 ETH */
+/* === mintFee autodetekcia z kontraktu === */
 async function getMintFee(contract) {
-  const w3 = await initWeb3();
   try {
     const feeWei = await contract.methods.mintFee().call();
-    const feeEth = Number(w3.utils.fromWei(feeWei, "ether"));
+    const feeEth = Number(web3.utils.fromWei(feeWei, "ether"));
     await log(`💰 Contract mintFee = ${feeEth} ETH`);
     return feeEth;
   } catch (e) {
     await log(`⚠️ mintFee() error: ${e.message}`);
-    return 0.001;
+    return 0.001; // fallback
   }
 }
 
-/* Update objednávky v InfinityFree */
+/* === UPDATE ORDER → InfinityFree === */
 async function markOrderPaid(order_id, tx_hash, user_addr) {
-  if (!INF_FREE_URL) return;
   try {
-    await fetch(`${INF_FREE_URL}/accptpay.php?action=update_order`, {
+    const body = new URLSearchParams({ order_id, tx_hash, user_addr });
+    const resp = await fetch(`${INF_FREE_URL}/accptpay.php?action=update_order`, {
       method: "POST",
       headers: { "Content-Type": "application/x-www-form-urlencoded" },
-      body: new URLSearchParams({ order_id, tx_hash, user_addr }),
+      body,
     });
-    await log(`📝 update_order ${order_id}`);
+    const txt = await resp.text();
+    await log(`📝 update_order ${order_id} → ${txt}`);
   } catch (e) {
     await log(`⚠️ update_order fail: ${e.message}`);
   }
 }
 
-/* Transakcia mintCopy */
+/* === mintCopy transakcia === */
 async function mintCopyTx({ token_id, ethAmount, gasPrice, mintFeeEth }) {
-  const w3 = await initWeb3();
-  const contract = new w3.eth.Contract(ABI, CONTRACT);
+  const contract = new web3.eth.Contract(ABI, CONTRACT);
 
-  const valueEth = ethAmount > 0 ? ethAmount : (mintFeeEth > 0 ? mintFeeEth : 0.001);
-  const valueWei = w3.utils.toWei(String(valueEth), "ether");
+  const valueEth = ethAmount > 0 ? ethAmount : (mintFeeEth || 0.001);
+  const valueWei = web3.utils.toWei(String(valueEth), "ether");
 
   const gasLimit = await contract.methods
     .mintCopy(token_id)
@@ -158,81 +155,47 @@ async function mintCopyTx({ token_id, ethAmount, gasPrice, mintFeeEth }) {
     to: CONTRACT,
     value: valueWei,
     data: contract.methods.mintCopy(token_id).encodeABI(),
-    gas: w3.utils.toHex(gasLimit),
-    gasPrice: w3.utils.toHex(gasPrice),
-    nonce: await w3.eth.getTransactionCount(FROM, "pending"),
-    chainId: await w3.eth.getChainId(),
+    gas: web3.utils.toHex(gasLimit),
+    gasPrice: web3.utils.toHex(gasPrice),
+    nonce: await web3.eth.getTransactionCount(FROM, "pending"),
+    chainId: await web3.eth.getChainId(),
   };
 
-  const signed = await w3.eth.accounts.signTransaction(tx, PRIVATE_KEY);
-  const receipt = await w3.eth.sendSignedTransaction(signed.rawTransaction);
+  const signed = await web3.eth.accounts.signTransaction(tx, PRIVATE_KEY);
+  const receipt = await web3.eth.sendSignedTransaction(signed.rawTransaction);
   await log(`✅ TX: ${receipt.transactionHash}`);
   return receipt.transactionHash;
 }
 
-/* === MAIN HANDLER === */
+/* === HANDLER === */
 export default async function handler(req, res) {
-  // CORS aby fetch z chainvers.free.nf fungoval
-  res.setHeader("Access-Control-Allow-Origin", "*");
-  res.setHeader("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type");
-
-  if (req.method === "OPTIONS") {
-    return res.status(200).end();
-  }
-
   try {
-    /* ========= 1) BALANCE ONLY – pri otvorení stránky / refresh ETH ========= */
+    // špeciálny GET na refresh balancu – volá accptpay pri otvorení
     if (req.method === "GET" && req.query?.action === "balance") {
-      await log("===== CHAINGETCASH BALANCE =====");
-      const balEth = (await getBalanceEth(FROM)).toFixed(6);
-      await log(`💠 Balance ${FROM}: ${balEth} ETH`);
-
-      if (INF_FREE_URL) {
-        await fetch(
-          `${INF_FREE_URL}/accptpay.php?action=balance&val=${encodeURIComponent(
-            balEth
-          )}`
-        );
-      }
-
-      return res.status(200).json({ ok: true, balance: balEth });
+      const bal = await getBalanceEth(FROM);
+      return res.status(200).json({ ok: true, balance: bal.toFixed(6) });
     }
 
-    /* ========= 2) MINT / DOBÍJANIE OBJEDNÁVOK ========= */
     if (req.method !== "POST") {
-      return res.status(405).json({ ok: false, error: "POST only" });
+      return res.status(405).json({ ok:false, error: "POST only" });
     }
 
     await log("===== CHAINGETCASH START =====");
 
-    const balEthNum = await getBalanceEth(FROM);
-    const balEthStr = balEthNum.toFixed(6);
-    await log(`💠 Balance ${FROM}: ${balEthStr} ETH`);
+    const balEth = await getBalanceEth(FROM);
+    const orders = (req.body && req.body.orders) || [];
 
-    if (INF_FREE_URL) {
-      await fetch(
-        `${INF_FREE_URL}/accptpay.php?action=balance&val=${encodeURIComponent(
-          balEthStr
-        )}`
-      );
-    }
-
-    const orders = req.body?.orders || [];
-    if (!Array.isArray(orders) || !orders.length) {
-      await log("ℹ️ Žiadne objednávky v tele – len balance update");
-      return res
-        .status(200)
-        .json({ ok: true, balance_eth: balEthStr, funded_count: 0 });
+    if (!orders.length) {
+      await log("ℹ️ Žiadne objednávky – len balance update");
+      return res.json({ ok: true, balance_eth: balEth, funded_count: 0 });
     }
 
     const [rate, gas] = await Promise.all([getEurEthRate(), getGasPrice()]);
-    const w3 = await initWeb3();
-    const contract = new w3.eth.Contract(ABI, CONTRACT);
+    const contract = new web3.eth.Contract(ABI, CONTRACT);
     const mintFeeEth = await getMintFee(contract);
 
     let funded = 0;
-    let totalOrdersEur = 0;
+    let totalEur = 0;
 
     for (const o of orders) {
       const token_id = Number(o.token_id);
@@ -242,8 +205,9 @@ export default async function handler(req, res) {
       }
 
       const eur = Number(o.amount_eur ?? o.amount ?? 0);
-      totalOrdersEur += eur;
+      totalEur += eur;
 
+      // ak je objednávka 0, použijeme minimálny (mintFee alebo 0.001)
       const eth =
         eur > 0
           ? eur / rate
@@ -271,14 +235,12 @@ export default async function handler(req, res) {
       }
     }
 
-    await log(`📊 Náklady: Objednávky=${totalOrdersEur.toFixed(2)}€`);
+    await log(`📊 Náklady: Objednávky=${totalEur.toFixed(2)}€`);
     await log(`✅ MINT DONE funded=${funded}`);
 
-    return res
-      .status(200)
-      .json({ ok: true, balance_eth: balEthStr, funded_count: funded });
+    res.json({ ok: true, balance_eth: balEth, funded_count: funded });
   } catch (e) {
     await log(`❌ ERROR: ${e.message}`);
-    return res.status(500).json({ ok: false, error: e.message });
+    res.status(500).json({ ok:false, error: e.message });
   }
 }
