@@ -1,205 +1,256 @@
-import Web3 from 'web3';
-import fetch from 'node-fetch';
+ import Web3 from "web3";
+import fetch from "node-fetch";
 
-/* ============================================================
-   ENV VARS
-   ============================================================ */
-
-const PROVIDER_URL   = process.env.PROVIDER_URL;     // Base/ETH RPC
-const PRIVATE_KEY    = process.env.PRIVATE_KEY;      // Admin PK
-const FROM           = process.env.FROM_ADDRESS;     // Admin wallet
-const CONTRACT       = process.env.CONTRACT_ADDRESS; // Mint contract
-const INF_FREE_URL   = process.env.INF_FREE_URL;     // https://chainvers.free.nf
+// ============ ENV ============
+const PROVIDER_URL = process.env.PROVIDER_URL;
+const PRIVATE_KEY  = process.env.PRIVATE_KEY;
+const FROM         = process.env.FROM_ADDRESS;
+const CONTRACT     = process.env.CONTRACT_ADDRESS;
+const INF_FREE_URL = process.env.INF_FREE_URL;
 
 const web3 = new Web3(PROVIDER_URL);
 
-/* ============================================================
-   ABI – musí obsahovať len funkciu fundTokenFor()
-   ============================================================ */
+// ============ ABI fundTokenFor ============
 const ABI = [
   {
-    "type": "function",
-    "name": "fundTokenFor",
-    "inputs": [
-      { "type": "address", "name": "user" },
-      { "type": "uint256", "name": "tokenId" }
-    ]
-  }
+    type: "function",
+    name: "fundTokenFor",
+    inputs: [
+      { type: "address", name: "user" },
+      { type: "uint256", name: "tokenId" }
+    ],
+  },
 ];
 
-/* ============================================================
-   RAW LOG → accptpay.php?action=save_log
-   ============================================================ */
+// ============ LOG FUNCTION ============
 async function sendLog(message) {
+  if (!INF_FREE_URL) return;
   try {
-    if (!INF_FREE_URL) return;
-    const url = `${INF_FREE_URL}/accptpay.php?action=save_log`;
-    await fetch(url, {
+    await fetch(`${INF_FREE_URL}/accptpay.php?action=save_log`, {
       method: "POST",
       headers: { "Content-Type": "application/x-www-form-urlencoded" },
-      body: new URLSearchParams({ message })
+      body: new URLSearchParams({ message }),
     });
   } catch (e) {
-    console.error("Log send failed:", e.message);
+    console.error("Log send fail:", e.message);
   }
 }
 
-const log = (...args) => {
-  const line = `[${new Date().toISOString()}] ` + args.join(" ");
+const log = (...msg) => {
+  const line = `[${new Date().toISOString()}] ${msg.join(" ")}`;
   console.log(line);
   sendLog(line);
 };
 
-/* ============================================================
-   1) ETH/EUR RATE (CoinGecko fallback)
-   ============================================================ */
+// ============ GET RATE EUR/ETH ============
 async function getEthRate() {
   try {
     const r = await fetch(
       "https://api.coingecko.com/api/v3/simple/price?ids=ethereum&vs_currencies=eur"
     );
     const j = await r.json();
-    const rate = j?.ethereum?.eur;
-    if (!rate) throw new Error("missing rate");
-
-    log(`💱 1 ETH = ${rate} EUR`);
-    return rate;
-  } catch {
-    log("⚠️ Rate fallback to 2500");
+    if (!j.ethereum.eur) throw new Error("Missing rate");
+    log(`💱 1 ETH = ${j.ethereum.eur} €`);
+    return j.ethereum.eur;
+  } catch (e) {
+    log("⚠️ Rate fallback = 2500 €/ETH");
     return 2500;
   }
 }
 
-/* ============================================================
-   2) GAS PRICE
-   ============================================================ */
-async function getGasPrice() {
-  try {
-    const p = await web3.eth.getGasPrice();
-    log(`⛽ Gas: ${web3.utils.fromWei(p, "gwei")} GWEI`);
-    return p;
-  } catch {
-    return web3.utils.toWei("25", "gwei");
-  }
+// ============ GAS PRICE ============
+async function getGas() {
+  const g = await web3.eth.getGasPrice();
+  log(`⛽ Gas (RPC): ${web3.utils.fromWei(g, "gwei")} GWEI`);
+  return g;
 }
 
-/* ============================================================
-   3) FETCH ORDER FROM INF. FREE
-   ============================================================ */
-async function getOrder(order_id) {
+// ============ READ ORDER FROM IF ============
+async function loadOrder(order_id) {
+  if (!INF_FREE_URL) throw new Error("INF_FREE_URL missing");
   const url = `${INF_FREE_URL}/chainuserdata/orders/${order_id}.json`;
+
   const r = await fetch(url);
-  if (!r.ok) throw new Error("order not found");
+  if (!r.ok) throw new Error(`Order not found: ${order_id}`);
 
   const j = await r.json();
-
-  log(`📦 Order ${order_id}: user=${j.user_address}, token=${j.token_id}, amount=${j.amount}`);
-
+  log(`📦 Order ${order_id} → user=${j.user_addr}, token=${j.token_id}, amt=${j.amount}`);
   return j;
 }
 
-/* ============================================================
-   4) SEND ETH TO NFT
-   ============================================================ */
-async function sendEth({ user_addr, token_id, ethAmount }) {
-  const contract = new web3.eth.Contract(ABI, CONTRACT);
-
-  const valueWei = web3.utils.toWei(ethAmount.toString(), "ether");
-  const gasPrice = await getGasPrice();
-
-  const gasLimit = await contract.methods
-    .fundTokenFor(user_addr, token_id)
-    .estimateGas({ from: FROM, value: valueWei });
+// ============ TOPUP (A) send ETH to admin address ============
+async function sendTopup(amount_eth) {
+  const valueWei = web3.utils.toWei(amount_eth.toString(), "ether");
+  const gasPrice = await getGas();
+  const nonce = await web3.eth.getTransactionCount(FROM);
+  const chainId = await web3.eth.getChainId();
 
   const tx = {
     from: FROM,
-    to: CONTRACT,
-    data: contract.methods.fundTokenFor(user_addr, token_id).encodeABI(),
+    to: FROM,
     value: valueWei,
-    gas: gasLimit,
-    gasPrice
+    gasPrice,
+    gas: 21000,
+    nonce,
+    chainId,
   };
 
   const signed = await web3.eth.accounts.signTransaction(tx, PRIVATE_KEY);
   const receipt = await web3.eth.sendSignedTransaction(signed.rawTransaction);
 
-  log(`✅ TX SENT: ${receipt.transactionHash}`);
-  return receipt;
+  log(`⚡ TOPUP OK: ${receipt.transactionHash}`);
+  return receipt.transactionHash;
 }
 
-/* ============================================================
-   5) UPDATE ORDER ON INFINITYFREE (FINAL)
-   ============================================================ */
-async function updateOrder(order_id, tx_hash, eth_sent) {
+// ============ MINT (B) send ETH to contract fundTokenFor ============
+async function sendMint(user_addr, token_id, amount_eth) {
+  const contract = new web3.eth.Contract(ABI, CONTRACT);
+  const valueWei = web3.utils.toWei(amount_eth.toString(), "ether");
+  const gasPrice = await getGas();
+
+  const gasLimit = await contract.methods
+    .fundTokenFor(user_addr, token_id)
+    .estimateGas({ from: FROM, value: valueWei });
+
+  const nonce = await web3.eth.getTransactionCount(FROM);
+  const chainId = await web3.eth.getChainId();
+
+  const tx = {
+    from: FROM,
+    to: CONTRACT,
+    value: valueWei,
+    data: contract.methods.fundTokenFor(user_addr, token_id).encodeABI(),
+    gas: gasLimit,
+    gasPrice,
+    nonce,
+    chainId,
+  };
+
+  const signed = await web3.eth.accounts.signTransaction(tx, PRIVATE_KEY);
+  const receipt = await web3.eth.sendSignedTransaction(signed.rawTransaction);
+
+  log(`🔥 MINT OK: ${receipt.transactionHash}`);
+  return receipt.transactionHash;
+}
+
+// ============ UPDATE IF ============
+async function updateIF(order_id, tx_hash) {
   if (!INF_FREE_URL) return;
-
-  const url = `${INF_FREE_URL}/accptpay.php?action=update_from_vercel`;
-
-  const body = new URLSearchParams({
-    order_id,
-    tx_hash,
-    eth_sent
-  });
-
-  const resp = await fetch(url, {
+  const r = await fetch(`${INF_FREE_URL}/update_order.php`, {
     method: "POST",
     headers: { "Content-Type": "application/x-www-form-urlencoded" },
-    body
+    body: new URLSearchParams({ order_id, tx_hash }),
   });
-
-  const txt = await resp.text();
-  log(`📝 update_from_vercel = ${txt}`);
+  log(`↩️ IF updated: ${await r.text()}`);
 }
 
-/* ============================================================
-   MAIN HANDLER
-   ============================================================ */
+// ============ BALANCE ============
+async function getBalance() {
+  const wei = await web3.eth.getBalance(FROM);
+  const eth = web3.utils.fromWei(wei, "ether");
+  return parseFloat(eth).toFixed(6);
+}
+
+// ============ MAIN HANDLER ============
+export const config = { api: { bodyParser: true } };
+
 export default async function handler(req, res) {
   try {
-    log("===== CHAINGETCASH START =====");
+    const type = req.body?.type || req.query?.type;
 
-    const order_id = req.body?.order_id || req.query?.order_id;
-    const amount_eur = req.body?.amount_eur;
-
-    if (!order_id) {
-      return res.status(400).json({ ok: false, error: "missing order_id" });
+    // ========== BALANCE ==========
+    if (type === "balance") {
+      const b = await getBalance();
+      return res.status(200).json({ balance_eth: b });
     }
 
-    // read order data
-    const order = await getOrder(order_id);
+    // ========== TOPUP ==========
+    if (type === "topup") {
+      const eur = parseFloat(req.body.amount_eur);
+      const rate = await getEthRate();
+      const eth = eur / rate;
 
-    const user_addr = order.user_address;
-    const token_id  = order.token_id;
-    const eur       = amount_eur ?? order.amount;
+      log(`⚡ TOPUP request: ${eur}€ = ${eth} ETH`);
 
-    if (!user_addr || !token_id) {
-      throw new Error("incomplete order data");
+      const tx = await sendTopup(eth);
+
+      return res.status(200).json({
+        ok: true,
+        tx_hash: tx,
+        sent_eth: eth
+      });
     }
 
-    const rate = await getEthRate();
-    const eth = eur / rate;
+    // ========== MINT ==========
+    if (type === "mint") {
+      const order_id = req.body.order_id;
+      let user       = req.body.user_addr;
+      let token_id   = req.body.token_id;
+      let eur        = req.body.amount_eur;
 
-    log(`💰 ${eur}€ → ${eth} ETH`);
-    
-    const receipt = await sendEth({
-      user_addr,
-      token_id,
-      ethAmount: eth
-    });
+      if (!user || !token_id || !eur) {
+        const data = await loadOrder(order_id);
+        user = data.user_addr;
+        token_id = data.token_id;
+        eur = data.amount;
+      }
 
-    await updateOrder(order_id, receipt.transactionHash, eth);
+      const rate = await getEthRate();
+      const eth  = eur / rate;
 
-    return res.status(200).json({
-      ok: true,
-      order_id,
-      token_id,
-      user_addr,
-      sent_eth: eth,
-      tx_hash: receipt.transactionHash
-    });
+      log(`🔥 MINT req: ${eur}€ = ${eth} ETH → token=${token_id}`);
+
+      const tx = await sendMint(user, token_id, eth);
+      await updateIF(order_id, tx);
+
+      return res.status(200).json({
+        ok: true,
+        type: "mint",
+        tx_hash: tx,
+        sent_eth: eth,
+        user_addr: user,
+        token_id
+      });
+    }
+
+    // ========== MULTI MINT ==========
+    if (type === "multi") {
+      const orders = req.body.orders ?? [];
+      const rate = await getEthRate();
+
+      const results = [];
+
+      for (const ord of orders) {
+        const { order_id, user_addr, token_id, amount_eur } = ord;
+
+        const eth = amount_eur / rate;
+        log(`🔥 MULTI → ${order_id}: ${amount_eur}€ = ${eth} ETH`);
+
+        const tx = await sendMint(user_addr, token_id, eth);
+        await updateIF(order_id, tx);
+
+        results.push({
+          order_id,
+          tx_hash: tx,
+          sent_eth: eth
+        });
+      }
+
+      return res.status(200).json({ ok:true, results });
+    }
+
+    // ========== LOGS PROXY ==========
+    if (type === "logs") {
+      const r = await fetch(`${INF_FREE_URL}/accptpay.php?action=read_log`);
+      const txt = await r.text();
+      res.setHeader("Content-Type","text/plain");
+      return res.status(200).send(txt);
+    }
+
+    return res.status(400).json({ ok:false, error:"Unknown type" });
 
   } catch (err) {
     log("❌ ERROR:", err.message);
-    return res.status(500).json({ ok: false, error: err.message });
+    return res.status(500).json({ ok:false, error: err.message });
   }
 }
