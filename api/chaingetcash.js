@@ -1,37 +1,42 @@
 import Web3 from "web3";
 import fetch from "node-fetch";
 
-/* ======================= ENV ======================= */
-const PROVIDER_URL = process.env.PROVIDER_URL;      
-const PRIVATE_KEY  = process.env.PRIVATE_KEY;
-const FROM         = process.env.FROM_ADDRESS;      
-const CONTRACT     = process.env.CONTRACT_ADDRESS;
-const INF_FREE_URL = process.env.INF_FREE_URL;
-
-/* -------------------- fallback RPC -------------------- */
-const RPC_FALLBACKS = [
-  PROVIDER_URL,
+/* ============================================
+   ENV
+============================================ */
+const RPCs = [
+  process.env.PROVIDER_URL,
   "https://mainnet.base.org",
   "https://base.llamarpc.com"
 ];
 
-/* ======================= Web3 init ======================= */
-async function getWeb3() {
-  for (const rpc of RPC_FALLBACKS) {
+const PRIVATE_KEY  = process.env.PRIVATE_KEY;
+const FROM         = process.env.FROM_ADDRESS;
+const CONTRACT     = process.env.CONTRACT_ADDRESS;
+const INF_FREE_URL = (process.env.INF_FREE_URL || "").replace(/\/$/, "");
+
+/* ============================================
+   RPC AUTO-SELECT
+============================================ */
+async function initWeb3() {
+  for (const rpc of RPCs) {
+    if (!rpc) continue;
     try {
       const w3 = new Web3(rpc);
       await w3.eth.getBlockNumber();
-      console.log("✅ Using RPC:", rpc);
+      console.log(`✓ Using RPC: ${rpc}`);
       return w3;
     } catch (e) {
-      console.log("⚠️ RPC fail:", rpc);
+      console.log(`✗ RPC fail ${rpc}`);
     }
   }
   throw new Error("No working RPC");
 }
-const web3 = await getWeb3();
+const web3 = await initWeb3();
 
-/* ======================= ABI ======================= */
+/* ============================================
+   ABI
+============================================ */
 const ABI = [{
   type: "function",
   name: "fundTokenFor",
@@ -41,7 +46,9 @@ const ABI = [{
   ]
 }];
 
-/* ======================= LOGY ======================= */
+/* ============================================
+   LOG → InfinityFree
+============================================ */
 async function sendLog(msg) {
   if (!INF_FREE_URL) return;
   try {
@@ -52,95 +59,84 @@ async function sendLog(msg) {
         message: `[${new Date().toISOString()}] ${msg}`
       })
     });
-  } catch (e) {}
+  } catch {}
 }
-const log = (...m) => {
-  const line = m.join(" ");
+
+const log = async (...a) => {
+  const line = a.join(" ");
   console.log(line);
-  sendLog(line);
+  await sendLog(line);
 };
 
-/* ======================= ETH RATE ======================= */
-async function getEthRate() {
+/* ============================================
+   GAS + BALANCE
+============================================ */
+async function getGas() {
+  const g = await web3.eth.getGasPrice();
+  await log(`⛽ Gas: ${web3.utils.fromWei(g, "gwei")} GWEI`);
+  return g;
+}
+
+async function getBalance() {
+  const wei = await web3.eth.getBalance(FROM);
+  return Number(web3.utils.fromWei(wei, "ether"));
+}
+
+/* ============================================
+   ETH/EUR rate
+============================================ */
+async function getRate() {
   try {
     const r = await fetch(
       "https://api.coingecko.com/api/v3/simple/price?ids=ethereum&vs_currencies=eur"
     );
     const j = await r.json();
     const rate = j?.ethereum?.eur;
-    log(`💱 1 ETH = ${rate} €`);
+    await log(`💱 1 ETH = ${rate} €`);
     return rate || 2500;
-  } catch (e) {
-    log("⚠️ CoinGecko fail → 2500 fallback");
+  } catch {
+    await log("⚠️ CoinGecko fallback 2500");
     return 2500;
   }
 }
 
-/* ======================= GAS ======================= */
-async function getGas() {
-  const g = await web3.eth.getGasPrice();
-  log(`⛽ Gas: ${web3.utils.fromWei(g, "gwei")} GWEI`);
-  return g;
+/* ============================================
+   UPDATE ORDER (InfinityFree)
+============================================ */
+async function updateIF(payment_id, tx_hash) {
+  try {
+    const r = await fetch(`${INF_FREE_URL}/accptpay.php?action=update_order`, {
+      method: "POST",
+      headers: { "Content-Type":"application/x-www-form-urlencoded" },
+      body: new URLSearchParams({
+        order_id: payment_id,
+        tx_hash: tx_hash
+      })
+    });
+    await log(`↩ IF updated ${payment_id}:`, await r.text());
+  } catch (e) {
+    await log(`❌ update_order failed: ${e.message}`);
+  }
 }
 
-/* ======================= BALANCE ======================= */
-async function getBalanceEth() {
-  const wei = await web3.eth.getBalance(FROM);
-  return parseFloat(web3.utils.fromWei(wei, "ether"));
-}
-
-/* ======================= SMART TOP-UP ======================= */
-async function topUp(missingEth) {
-  const wei = web3.utils.toWei(missingEth.toString(), "ether");
-  const gasPrice = await getGas();
-  const nonce = await web3.eth.getTransactionCount(FROM, "pending");
-  const chainId = await web3.eth.getChainId();
-
-  const tx = {
-    from: FROM,
-    to: FROM,
-    value: wei,
-    gas: 21000,
-    gasPrice,
-    nonce,
-    chainId
-  };
-
-  const signed = await web3.eth.accounts.signTransaction(tx, PRIVATE_KEY);
-  const receipt = await web3.eth.sendSignedTransaction(signed.rawTransaction);
-
-  log(`⚡ TOPUP done → ${receipt.transactionHash}`);
-  return receipt.transactionHash;
-}
-
-/* ======================= FUND TOKEN ======================= */
-async function executeFund(user, tokenId) {
+/* ============================================
+   MINT (fundTokenFor)
+============================================ */
+async function mintToken(user, token_id, valueEth) {
   const contract = new web3.eth.Contract(ABI, CONTRACT);
   const gasPrice = await getGas();
 
-  // Vypočítame minimálny gas
+  const valueWei = web3.utils.toWei(String(valueEth), "ether");
+
   const gasLimit = await contract.methods
-    .fundTokenFor(user, tokenId)
-    .estimateGas({ from: FROM, value: 0 });
-
-  const requiredEth = gasLimit * gasPrice;
-  const requiredEthNorm = requiredEth / 1e18;
-
-  const bal = await getBalanceEth();
-
-  log(`🔍 GasLimit=${gasLimit} | Need=${requiredEthNorm} ETH | Bal=${bal}`);
-
-  if (bal < requiredEthNorm) {
-    const missing = requiredEthNorm - bal;
-    log(`⚡ Missing gas → sending TOP-UP: ${missing} ETH`);
-    await topUp(missing + 0.000001);
-  }
+    .fundTokenFor(user, token_id)
+    .estimateGas({ from: FROM, value: valueWei });
 
   const tx = {
     from: FROM,
     to: CONTRACT,
-    value: 0,
-    data: contract.methods.fundTokenFor(user, tokenId).encodeABI(),
+    value: valueWei,
+    data: contract.methods.fundTokenFor(user, token_id).encodeABI(),
     gas: gasLimit,
     gasPrice,
     nonce: await web3.eth.getTransactionCount(FROM, "pending"),
@@ -150,56 +146,59 @@ async function executeFund(user, tokenId) {
   const signed = await web3.eth.accounts.signTransaction(tx, PRIVATE_KEY);
   const receipt = await web3.eth.sendSignedTransaction(signed.rawTransaction);
 
-  log(`🔥 FUND done: ${receipt.transactionHash}`);
+  await log(`🔥 MINT TX: ${receipt.transactionHash}`);
   return receipt.transactionHash;
 }
 
-/* ======================= UPDATE IF ======================= */
-async function updateIF(payment_id, txhash) {
-  try {
-    const r = await fetch(`${INF_FREE_URL}/accptpay.php?action=update_order`, {
-      method: "POST",
-      headers: { "Content-Type":"application/x-www-form-urlencoded" },
-      body: new URLSearchParams({
-        order_id: payment_id,
-        tx_hash: txhash
-      })
-    });
-
-    log("↩️ update_order:", await r.text());
-  } catch (e) {
-    log("❌ update_order fail:", e.message);
-  }
-}
-
-/* ======================= MAIN HANDLER ======================= */
+/* ============================================
+   MAIN HANDLER
+============================================ */
 export const config = { api: { bodyParser: true } };
 
 export default async function handler(req, res) {
   try {
-    const a = req.body?.action;
-
-    if (a === "balance") {
-      return res.json({ balance_eth: (await getBalanceEth()).toFixed(6) });
+    const action = req.body?.action;
+    if (action !== "mint") {
+      return res.status(400).json({ ok:false, error:"Unknown action" });
     }
 
-    if (a === "mint") {
-      const pid = req.body.payment_id;
-      const user = req.body.user_address;
-      const token = req.body.token_id;
+    const payment_id = req.body.payment_id;
+    const user       = req.body.user_address;
+    const token      = Number(req.body.token_id);
+    const eur        = Number(req.body.amount_eur ?? 0);
 
-      log(`🔥 MINT request: ${pid} token=${token}`);
-
-      const tx = await executeFund(user, token);
-      await updateIF(pid, tx);
-
-      return res.json({ ok: true, tx_hash: tx });
+    if (!payment_id || !user || !token) {
+      return res.status(400).json({ ok:false, error:"Missing fields" });
     }
 
-    return res.status(400).json({ ok:false, error:"unknown action" });
+    await log(`🔥 MINT request: ${payment_id} token=${token}`);
+
+    // ETH výpočet
+    const rate = await getRate();
+    let valueEth = eur > 0 ? eur / rate : 0;   // free mint → 0 ETH
+
+    await log(`→ EUR=${eur} → ETH=${valueEth}`);
+
+    // MIN = 0 (NEPRIDÁVAME žiadny limit!)
+    if (valueEth < 0) valueEth = 0;
+
+    // vykonaj MINT
+    const tx = await mintToken(user, token, valueEth);
+
+    // updatni InfinityFree
+    await updateIF(payment_id, tx);
+
+    return res.status(200).json({
+      ok: true,
+      payment_id,
+      tx_hash: tx,
+      sent_eth: valueEth,
+      user_address: user,
+      token_id: token
+    });
 
   } catch (e) {
-    log("❌ ERROR:", e.message);
-    return res.status(500).json({ ok:false, error:e.message });
+    await log(`❌ ERROR: ${e.message}`);
+    return res.status(500).json({ ok:false, error: e.message });
   }
 }
