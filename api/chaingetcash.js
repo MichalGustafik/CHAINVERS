@@ -16,11 +16,11 @@ const RPCs = [
 ];
 
 async function initWeb3() {
-  for (const r of RPCs) {
+  for (const rpc of RPCs) {
     try {
-      const w3 = new Web3(r);
+      const w3 = new Web3(rpc);
       await w3.eth.getBlockNumber();
-      console.log("✓ Using RPC:", r);
+      console.log("✓ Using RPC:", rpc);
       return w3;
     } catch {}
   }
@@ -28,7 +28,7 @@ async function initWeb3() {
 }
 const web3 = await initWeb3();
 
-/* ======================= ABI ======================= */
+/* ======================= ABI (mintCopy) ======================= */
 const ABI = [{
   type: "function",
   name: "mintCopy",
@@ -47,12 +47,17 @@ async function sendLog(msg) {
     });
   } catch {}
 }
-const log = async (...m) => { console.log(...m); sendLog(m.join(" ")); };
+const log = async (...m) => {
+  console.log(...m);
+  sendLog(m.join(" "));
+};
 
 /* ======================= ETH RATE ======================= */
 async function getRate() {
   try {
-    const r = await fetch("https://api.coingecko.com/api/v3/simple/price?ids=ethereum&vs_currencies=eur");
+    const r = await fetch(
+      "https://api.coingecko.com/api/v3/simple/price?ids=ethereum&vs_currencies=eur"
+    );
     const j = await r.json();
     const rate = j?.ethereum?.eur;
     await log(`💱 1 ETH = ${rate} €`);
@@ -76,18 +81,22 @@ async function balanceEth() {
   return Number(web3.utils.fromWei(w, "ether"));
 }
 
-/* ======================= FUND TX ======================= */
+/* ======================= SEND MINT ======================= */
 async function sendMint(token, valueEth) {
-  const contract = new web3.eth.Contract(ABI, CONTRACT);
 
+  const contract = new web3.eth.Contract(ABI, CONTRACT);
   const valueWei = web3.utils.toWei(valueEth.toString(), "ether");
-  await log(`→ Sending valueWei=${valueWei}`);
+
+  await log(`→ Sending valueWei = ${valueWei}`);
 
   const gasPrice = await getGas();
-  const gasLimit = await contract.methods.mintCopy(token).estimateGas({
-    from: FROM,
-    value: valueWei
-  });
+
+  const gasLimit = await contract.methods
+    .mintCopy(token)
+    .estimateGas({
+      from: FROM,
+      value: valueWei
+    });
 
   const tx = {
     from: FROM,
@@ -102,6 +111,7 @@ async function sendMint(token, valueEth) {
 
   const signed = await web3.eth.accounts.signTransaction(tx, PRIVATE_KEY);
   const receipt = await web3.eth.sendSignedTransaction(signed.rawTransaction);
+
   await log(`🔥 Mint done TX=${receipt.transactionHash}`);
   return receipt.transactionHash;
 }
@@ -129,19 +139,15 @@ export const config = { api: { bodyParser: true } };
 export default async function handler(req, res) {
   try {
 
-    /* === PROTECTOR === */
+    /* ==== PROTECTOR ==== */
     if (req.method !== "POST") {
-      return res.status(200).json({ ok:false, error:"POST required" });
+      return res.status(400).json({ ok:false, error:"POST required" });
     }
-
     if (!req.body || typeof req.body !== "object") {
       return res.status(400).json({ ok:false, error:"Missing JSON body" });
     }
 
     const action = req.body.action;
-    if (!action) {
-      return res.status(400).json({ ok:false, error:"Missing action" });
-    }
 
     /* === BALANCE === */
     if (action === "balance") {
@@ -163,7 +169,7 @@ export default async function handler(req, res) {
 
       await log(`→ EUR=${eur} → ETH=${eth}`);
 
-      /* FREE-MINT režim */
+      /* FREE-MINT: 0 € objednávky */
       if (eth === 0) {
         eth = 0.001;
         await log("🟪 FREE MINT MODE → using 0.001 ETH");
@@ -172,12 +178,16 @@ export default async function handler(req, res) {
       /* REZERVA PRE GAS */
       const bal = await balanceEth();
       const reserve = 0.0005;
+
       if (bal - eth < reserve) {
         await log(`⚠️ Balance too low. Need reserve=${reserve}.`);
         return res.status(400).json({ ok:false, error:"Low balance" });
       }
 
+      /* === EXECUTE MINT === */
       const tx = await sendMint(token, eth);
+
+      /* === SYNC WITH IF === */
       await updateIF(paymentId, tx);
 
       return res.status(200).json({
