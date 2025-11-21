@@ -38,23 +38,23 @@ const ABI = [{
   ]
 }];
 
-/* ======================= LOGY ======================= */
+/* ======================= LOG ======================= */
 async function sendLog(msg) {
   if (!INF_FREE_URL) return;
   try {
     await fetch(`${INF_FREE_URL}/accptpay.php?action=save_log`, {
       method: "POST",
-      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      headers: { "Content-Type":"application/x-www-form-urlencoded" },
       body: new URLSearchParams({
         message: `[${new Date().toISOString()}] ${msg}`
       })
     });
   } catch {}
 }
-const log = async (...t) => {
-  const m = t.join(" ");
-  console.log(m);
-  await sendLog(m);
+const log = async (...m) => {
+  const t = m.join(" ");
+  console.log(t);
+  await sendLog(t);
 };
 
 /* ======================= ETH RATE ======================= */
@@ -64,7 +64,6 @@ async function getRate() {
       "https://api.coingecko.com/api/v3/simple/price?ids=ethereum&vs_currencies=eur"
     );
     const j = await r.json();
-
     const rate = j?.ethereum?.eur;
     await log(`💱 1 ETH = ${rate} €`);
     return rate || 2500;
@@ -82,29 +81,31 @@ async function getGas() {
 }
 
 /* ======================= UPDATE IF ======================= */
-async function updateIF(order_id, tx_hash) {
+async function updateIF(payment_id, tx_hash) {
   try {
     const r = await fetch(`${INF_FREE_URL}/accptpay.php?action=update_order`, {
       method: "POST",
       headers: { "Content-Type":"application/x-www-form-urlencoded" },
-      body: new URLSearchParams({
-        order_id,
-        tx_hash
-      })
+      body: new URLSearchParams({ order_id: payment_id, tx_hash })
     });
-
-    await log(`↩ IF updated: ${order_id} ::`, await r.text());
+    await log(`↩ IF updated:`, await r.text());
   } catch (e) {
     await log(`❌ update_order failed: ${e.message}`);
   }
 }
 
 /* ======================= MINT ======================= */
-async function mint(user, token_id, valueEth) {
+async function mint(user, token_id, valueETH, isFreeMint) {
   const contract = new web3.eth.Contract(ABI, CONTRACT);
 
   const gasPrice = await getGas();
-  const valueWei = web3.utils.toWei(String(valueEth), "ether");
+
+  // FREE MINT → value = 1 wei
+  const valueWei = isFreeMint
+    ? "1"
+    : web3.utils.toWei(String(valueETH), "ether");
+
+  await log(`→ Sending valueWei=${valueWei}`);
 
   const gasLimit = await contract.methods
     .fundTokenFor(user, token_id)
@@ -128,7 +129,7 @@ async function mint(user, token_id, valueEth) {
   return receipt.transactionHash;
 }
 
-/* ======================= HANDLER ======================= */
+/* ======================= MAIN HANDLER ======================= */
 export const config = { api: { bodyParser: true } };
 
 export default async function handler(req, res) {
@@ -144,23 +145,15 @@ export default async function handler(req, res) {
 
     await log(`🔥 MINT request: ${payment_id} token=${token}`);
 
-    // Rate je len pre platené objednávky
     const rate = await getRate();
 
     let valueEth = eur > 0 ? eur / rate : 0;
+    const isFreeMint = eur <= 0;
 
     await log(`→ EUR=${eur} → ETH=${valueEth}`);
+    if (isFreeMint) await log(`🟪 FREE MINT MODE → using 1 wei`);
 
-    /* ======================================
-       💥 FREE MINT FIX (FINAL)
-       0 € = 1 wei (0.000000000000000001 ETH)
-    ====================================== */
-    if (eur <= 0) {
-      valueEth = 0.000000000000000001;
-      await log(`🟪 FREE MINT MODE → value = 1 wei`);
-    }
-
-    const tx = await mint(user, token, valueEth);
+    const tx = await mint(user, token, valueEth, isFreeMint);
 
     await updateIF(payment_id, tx);
 
@@ -170,11 +163,12 @@ export default async function handler(req, res) {
       token_id: token,
       user_address: user,
       sent_eth: valueEth,
+      free_mint: isFreeMint,
       tx_hash: tx
     });
 
   } catch (e) {
     await log(`❌ ERROR: ${e.message}`);
-    return res.status(500).json({ ok:false, error: e.message });
+    return res.status(500).json({ ok:false, error:e.message });
   }
 }
