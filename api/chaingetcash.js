@@ -1,9 +1,7 @@
 import Web3 from "web3";
 import fetch from "node-fetch";
 
-/* ============================================
-   ENV
-============================================ */
+/* ======================= ENV ======================= */
 const RPCs = [
   process.env.PROVIDER_URL,
   "https://mainnet.base.org",
@@ -15,9 +13,7 @@ const FROM         = process.env.FROM_ADDRESS;
 const CONTRACT     = process.env.CONTRACT_ADDRESS;
 const INF_FREE_URL = (process.env.INF_FREE_URL || "").replace(/\/$/, "");
 
-/* ============================================
-   RPC AUTO-SELECT
-============================================ */
+/* ======================= RPC AUTO ======================= */
 async function initWeb3() {
   for (const rpc of RPCs) {
     if (!rpc) continue;
@@ -26,17 +22,13 @@ async function initWeb3() {
       await w3.eth.getBlockNumber();
       console.log(`✓ Using RPC: ${rpc}`);
       return w3;
-    } catch (e) {
-      console.log(`✗ RPC fail ${rpc}`);
-    }
+    } catch {}
   }
   throw new Error("No working RPC");
 }
 const web3 = await initWeb3();
 
-/* ============================================
-   ABI
-============================================ */
+/* ======================= ABI ======================= */
 const ABI = [{
   type: "function",
   name: "fundTokenFor",
@@ -46,9 +38,7 @@ const ABI = [{
   ]
 }];
 
-/* ============================================
-   LOG → InfinityFree
-============================================ */
+/* ======================= LOGY ======================= */
 async function sendLog(msg) {
   if (!INF_FREE_URL) return;
   try {
@@ -61,36 +51,20 @@ async function sendLog(msg) {
     });
   } catch {}
 }
-
-const log = async (...a) => {
-  const line = a.join(" ");
-  console.log(line);
-  await sendLog(line);
+const log = async (...t) => {
+  const m = t.join(" ");
+  console.log(m);
+  await sendLog(m);
 };
 
-/* ============================================
-   GAS + BALANCE
-============================================ */
-async function getGas() {
-  const g = await web3.eth.getGasPrice();
-  await log(`⛽ Gas: ${web3.utils.fromWei(g, "gwei")} GWEI`);
-  return g;
-}
-
-async function getBalance() {
-  const wei = await web3.eth.getBalance(FROM);
-  return Number(web3.utils.fromWei(wei, "ether"));
-}
-
-/* ============================================
-   ETH/EUR rate
-============================================ */
+/* ======================= ETH RATE ======================= */
 async function getRate() {
   try {
     const r = await fetch(
       "https://api.coingecko.com/api/v3/simple/price?ids=ethereum&vs_currencies=eur"
     );
     const j = await r.json();
+
     const rate = j?.ethereum?.eur;
     await log(`💱 1 ETH = ${rate} €`);
     return rate || 2500;
@@ -100,32 +74,36 @@ async function getRate() {
   }
 }
 
-/* ============================================
-   UPDATE ORDER (InfinityFree)
-============================================ */
-async function updateIF(payment_id, tx_hash) {
+/* ======================= GAS ======================= */
+async function getGas() {
+  const g = await web3.eth.getGasPrice();
+  await log(`⛽ Gas: ${web3.utils.fromWei(g, "gwei")} GWEI`);
+  return g;
+}
+
+/* ======================= UPDATE IF ======================= */
+async function updateIF(order_id, tx_hash) {
   try {
     const r = await fetch(`${INF_FREE_URL}/accptpay.php?action=update_order`, {
       method: "POST",
       headers: { "Content-Type":"application/x-www-form-urlencoded" },
       body: new URLSearchParams({
-        order_id: payment_id,
-        tx_hash: tx_hash
+        order_id,
+        tx_hash
       })
     });
-    await log(`↩ IF updated ${payment_id}:`, await r.text());
+
+    await log(`↩ IF updated: ${order_id} ::`, await r.text());
   } catch (e) {
     await log(`❌ update_order failed: ${e.message}`);
   }
 }
 
-/* ============================================
-   MINT (fundTokenFor)
-============================================ */
-async function mintToken(user, token_id, valueEth) {
+/* ======================= MINT ======================= */
+async function mint(user, token_id, valueEth) {
   const contract = new web3.eth.Contract(ABI, CONTRACT);
-  const gasPrice = await getGas();
 
+  const gasPrice = await getGas();
   const valueWei = web3.utils.toWei(String(valueEth), "ether");
 
   const gasLimit = await contract.methods
@@ -150,15 +128,12 @@ async function mintToken(user, token_id, valueEth) {
   return receipt.transactionHash;
 }
 
-/* ============================================
-   MAIN HANDLER
-============================================ */
+/* ======================= HANDLER ======================= */
 export const config = { api: { bodyParser: true } };
 
 export default async function handler(req, res) {
   try {
-    const action = req.body?.action;
-    if (action !== "mint") {
+    if (req.body?.action !== "mint") {
       return res.status(400).json({ ok:false, error:"Unknown action" });
     }
 
@@ -167,34 +142,35 @@ export default async function handler(req, res) {
     const token      = Number(req.body.token_id);
     const eur        = Number(req.body.amount_eur ?? 0);
 
-    if (!payment_id || !user || !token) {
-      return res.status(400).json({ ok:false, error:"Missing fields" });
-    }
-
     await log(`🔥 MINT request: ${payment_id} token=${token}`);
 
-    // ETH výpočet
+    // Rate je len pre platené objednávky
     const rate = await getRate();
-    let valueEth = eur > 0 ? eur / rate : 0;   // free mint → 0 ETH
+
+    let valueEth = eur > 0 ? eur / rate : 0;
 
     await log(`→ EUR=${eur} → ETH=${valueEth}`);
 
-    // MIN = 0 (NEPRIDÁVAME žiadny limit!)
-    if (valueEth < 0) valueEth = 0;
+    /* ======================================
+       💥 FREE MINT FIX (FINAL)
+       0 € = 1 wei (0.000000000000000001 ETH)
+    ====================================== */
+    if (eur <= 0) {
+      valueEth = 0.000000000000000001;
+      await log(`🟪 FREE MINT MODE → value = 1 wei`);
+    }
 
-    // vykonaj MINT
-    const tx = await mintToken(user, token, valueEth);
+    const tx = await mint(user, token, valueEth);
 
-    // updatni InfinityFree
     await updateIF(payment_id, tx);
 
     return res.status(200).json({
       ok: true,
       payment_id,
-      tx_hash: tx,
-      sent_eth: valueEth,
+      token_id: token,
       user_address: user,
-      token_id: token
+      sent_eth: valueEth,
+      tx_hash: tx
     });
 
   } catch (e) {
