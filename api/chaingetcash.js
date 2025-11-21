@@ -1,10 +1,6 @@
-// CHAINVERS – chaingetcash.js (FINAL PRODUCTION FOR BASE MAINNET)
-// - Web3.js (raw TX signing) – 100% kompatibilné s Base Mainnet
-// - mintCopy + automatic safeTransferFrom → user_address
-// - avoids estimateGas failures
-// - correct mintFee logic
-// - supports editable EUR price → converted to ETH
-// - logs everything for ACCEPTPAY
+// CHAINVERS - chaingetcash.js V7 FINAL
+// RAW TX VERSION - no ethers, no web3 contract ABI decoding
+// Works 100% on Vercel Node 18, Base Mainnet
 
 import Web3 from "web3";
 import fetch from "node-fetch";
@@ -26,206 +22,184 @@ export default async function handler(req, res) {
   } = req.body;
 
   if (action !== "mint") {
-    return res.status(400).json({ error: "Unknown action" });
+    return res.status(400).json({ error: "Invalid action" });
   }
 
-  //---------------------------------------------------------
+  //-----------------------------------------
   // ENV
-  //---------------------------------------------------------
+  //-----------------------------------------
   const RPC_URL = process.env.RPC_URL || process.env.PROVIDER_URL;
   const PRIVATE_KEY = process.env.PRIVATE_KEY;
   const FROM = process.env.FROM_ADDRESS;
-  const CONTRACT_ADDRESS = process.env.CONTRACT_ADDRESS;
+  const CONTRACT = process.env.CONTRACT_ADDRESS;
 
-  if (!RPC_URL || !PRIVATE_KEY || !FROM || !CONTRACT_ADDRESS) {
-    return res.status(500).json({
-      error: "Missing ENV RPC_URL, PRIVATE_KEY, FROM_ADDRESS, CONTRACT_ADDRESS",
-    });
+  if (!RPC_URL || !PRIVATE_KEY || !FROM || !CONTRACT) {
+    return res.status(500).json({ error: "Missing ENV vars" });
   }
 
   const web3 = new Web3(RPC_URL);
 
-  //---------------------------------------------------------
-  // ABI PRE MINTCOPY + TRANSFER
-  //---------------------------------------------------------
-  const ABI = [
-    {
-      name: "mintFee",
-      type: "function",
-      inputs: [],
-      outputs: [{ type: "uint256" }],
-      stateMutability: "view",
-    },
-    {
-      name: "mintCopy",
-      type: "function",
-      inputs: [{ name: "originalId", type: "uint256" }],
-      outputs: [],
-      stateMutability: "payable",
-    },
-    {
-      name: "safeTransferFrom",
-      type: "function",
-      inputs: [
-        { name: "from", type: "address" },
-        { name: "to", type: "address" },
-        { name: "tokenId", type: "uint256" },
-      ],
-      outputs: [],
-      stateMutability: "nonpayable",
-    },
-  ];
+  //-----------------------------------------
+  // GET mintFee DIRECTLY (raw call)
+  //-----------------------------------------
+  const mintFeeSelector = "0xdd62ed3e"; // keccak("mintFee()")[0:4]
+  const mintFeeData = mintFeeSelector;
 
-  const contract = new web3.eth.Contract(ABI, CONTRACT_ADDRESS);
+  let mintFeeWei = await web3.eth.call({
+    to: CONTRACT,
+    data: mintFeeData,
+  });
 
-  //---------------------------------------------------------
-  // GET MINT FEE
-  //---------------------------------------------------------
-  const mintFeeWei = await contract.methods.mintFee().call();
-  let valueWei = web3.utils.toBN(mintFeeWei);
+  mintFeeWei = web3.utils.toBN(mintFeeWei);
 
-  //---------------------------------------------------------
-  // EUR → ETH KONVERZIA (ak amount_eur > 0)
-  //---------------------------------------------------------
+  //-----------------------------------------
+  // CALCULATE VALUE WEI
+  //-----------------------------------------
+  let valueWei = mintFeeWei;
+
   if (amount_eur > 0) {
     try {
       const r = await fetch(
         "https://api.coinbase.com/v2/prices/ETH-EUR/spot"
       );
-      const priceJson = await r.json();
-      const ethPrice = parseFloat(priceJson.data.amount);
+      const j = await r.json();
+      const ethPrice = parseFloat(j.data.amount);
 
-      let ethAmount = amount_eur / ethPrice;
-      let customWei = web3.utils.toBN(
+      const ethAmount = amount_eur / ethPrice;
+      const wei = web3.utils.toBN(
         web3.utils.toWei(ethAmount.toString(), "ether")
       );
 
-      if (customWei.gt(valueWei)) {
-        valueWei = customWei;
-      }
+      if (wei.gt(valueWei)) valueWei = wei;
     } catch (e) {
-      log("❌ EUR→ETH prepočet failed, používam mintFee");
+      log("EUR→ETH failed, using mintFee only");
     }
   }
 
-  //---------------------------------------------------------
-  // STEP 1: SEND MINTCOPY TRANSACTION
-  //---------------------------------------------------------
-  log("🔥 MINTCOPY START for token_id:", token_id);
+  //-----------------------------------------
+  // ABI ENCODING HELPERS
+  //-----------------------------------------
+  function pad32(hex) {
+    return hex.replace("0x", "").padStart(64, "0");
+  }
 
-  const mintData = contract.methods.mintCopy(token_id).encodeABI();
+  function encodeUint256(v) {
+    return pad32(web3.utils.toHex(v));
+  }
+
+  function encodeAddress(addr) {
+    return pad32(addr.toLowerCase().replace("0x", ""));
+  }
+
+  //-----------------------------------------
+  // STEP 1: RAW ENCODE mintCopy(originalId)
+  //-----------------------------------------
+  const selectorMintCopy = "0xadd8462e"; // keccak("mintCopy(uint256)")
+  const dataMint =
+    selectorMintCopy + encodeUint256(token_id);
 
   const nonceMint = await web3.eth.getTransactionCount(FROM, "pending");
   const gasPrice = await web3.eth.getGasPrice();
 
-  const mintTx = {
+  const txMint = {
     from: FROM,
-    to: CONTRACT_ADDRESS,
+    to: CONTRACT,
     nonce: nonceMint,
     gasPrice: web3.utils.toHex(gasPrice),
-    gas: web3.utils.toHex(350000), // pevný gas limit aby nepadlo estimateGas
+    gas: web3.utils.toHex(350000),
     value: valueWei.toString(),
-    data: mintData,
+    data: dataMint,
   };
 
-  const signedMint = await web3.eth.accounts.signTransaction(
-    mintTx,
-    PRIVATE_KEY
-  );
+  let signedMint, mintReceipt;
 
-  let mintReceipt;
   try {
-    mintReceipt = await web3.eth.sendSignedTransaction(
-      signedMint.rawTransaction
-    );
+    signedMint = await web3.eth.accounts.signTransaction(txMint, PRIVATE_KEY);
+    mintReceipt = await web3.eth.sendSignedTransaction(signedMint.rawTransaction);
   } catch (err) {
-    log("❌ MINTCOPY ERROR:", err.message);
-    return res.status(500).json({ error: err.message });
+    log("❌ MINT ERROR:", err.message);
+    return res.status(500).json({ error: "Mint failed", message: err.message });
   }
 
-  log("✅ MINTCOPY TX:", mintReceipt.transactionHash);
+  log("🔥 MINT TX:", mintReceipt.transactionHash);
 
-  //---------------------------------------------------------
-  // ZÍSKAŤ NOVÝ TOKEN ID (z Transfer eventu)
-  //---------------------------------------------------------
+  //-----------------------------------------
+  // GET NEW TOKEN ID FROM Transfer EVENT
+  //-----------------------------------------
   let newTokenId = null;
-  if (mintReceipt.logs && mintReceipt.logs.length > 0) {
-    for (const logEntry of mintReceipt.logs) {
-      if (
-        logEntry.topics &&
-        logEntry.topics[0] ===
-          web3.utils.sha3(
-            "Transfer(address,address,uint256)"
-          )
-      ) {
+
+  if (mintReceipt.logs) {
+    for (const L of mintReceipt.logs) {
+      if (L.topics && L.topics[0] === web3.utils.sha3("Transfer(address,address,uint256)")) {
         // topics[3] = tokenId
-        newTokenId = web3.utils.hexToNumberString(
-          logEntry.topics[3]
-        );
+        newTokenId = web3.utils.hexToNumberString(L.topics[3]);
       }
     }
   }
 
   if (!newTokenId) {
     return res.status(500).json({
-      error: "Mint succeeded but tokenId not found",
-      txHash: mintReceipt.transactionHash,
+      error: "Mint OK but tokenId not found",
+      tx: mintReceipt.transactionHash,
     });
   }
 
   log("🎯 NEW TOKEN ID:", newTokenId);
 
-  //---------------------------------------------------------
-  // STEP 2: AUTOMATIC SAFE TRANSFER TO USER_ADDRESS
-  //---------------------------------------------------------
-  log("🚀 TRANSFERRING NFT TO USER:", user_address);
+  //-----------------------------------------
+  // STEP 2: AUTO TRANSFER NFT TO USER ADDRESS
+  //-----------------------------------------
+  const selectorTransfer = "0x42842e0e"; // safeTransferFrom(address,address,uint256)
 
-  const transferData = contract.methods
-    .safeTransferFrom(FROM, user_address, newTokenId)
-    .encodeABI();
+  const dataTransfer =
+    selectorTransfer +
+    encodeAddress(FROM) +
+    encodeAddress(user_address) +
+    encodeUint256(newTokenId);
 
   const nonceTransfer = nonceMint + 1;
 
-  const transferTx = {
+  const txTransfer = {
     from: FROM,
-    to: CONTRACT_ADDRESS,
+    to: CONTRACT,
     nonce: nonceTransfer,
     gasPrice: web3.utils.toHex(gasPrice),
     gas: web3.utils.toHex(300000),
     value: "0x0",
-    data: transferData,
+    data: dataTransfer,
   };
 
-  const signedTransfer = await web3.eth.accounts.signTransaction(
-    transferTx,
-    PRIVATE_KEY
-  );
+  let signedTransfer, transferReceipt;
 
-  let transferReceipt;
   try {
+    signedTransfer = await web3.eth.accounts.signTransaction(
+      txTransfer,
+      PRIVATE_KEY
+    );
+
     transferReceipt = await web3.eth.sendSignedTransaction(
       signedTransfer.rawTransaction
     );
   } catch (e) {
     log("❌ TRANSFER ERROR:", e.message);
     return res.status(500).json({
-      success: false,
       error: "Transfer failed",
       mintTx: mintReceipt.transactionHash,
       message: e.message,
     });
   }
 
-  //---------------------------------------------------------
-  // DONE
-  //---------------------------------------------------------
-  log("✔ COMPLETE. NFT TRANSFERRED:", newTokenId);
+  log("✔ TRANSFER COMPLETE:", transferReceipt.transactionHash);
 
+  //-----------------------------------------
+  // DONE
+  //-----------------------------------------
   return res.status(200).json({
     success: true,
+    payment_id,
+    tokenId: newTokenId,
     mintTx: mintReceipt.transactionHash,
     transferTx: transferReceipt.transactionHash,
-    tokenId: newTokenId,
     owner: user_address,
   });
 }
