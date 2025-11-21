@@ -1,205 +1,200 @@
-// CHAINVERS - chaingetcash.js V7 FINAL
-// RAW TX VERSION - no ethers, no web3 contract ABI decoding
-// Works 100% on Vercel Node 18, Base Mainnet
-
 import Web3 from "web3";
 import fetch from "node-fetch";
 
-const log = (...a) => console.log(`[${new Date().toISOString()}]`, ...a);
+/* ======================= ENV ======================= */
+const PROVIDER_URL = process.env.PROVIDER_URL;      // Base mainnet RPC
+const PRIVATE_KEY  = process.env.PRIVATE_KEY;
+const FROM         = process.env.FROM_ADDRESS;      // Admin wallet
+const CONTRACT     = process.env.CONTRACT_ADDRESS;
+const INF_FREE_URL = process.env.INF_FREE_URL;      // https://chainvers.free.nf
+
+/* -------------------- fallback -------------------- */
+const RPC_FALLBACKS = [
+  PROVIDER_URL,
+  "https://mainnet.base.org",
+  "https://base.llamarpc.com"
+];
+
+/* ======================= Web3 init ======================= */
+async function getWeb3() {
+  for (const rpc of RPC_FALLBACKS) {
+    try {
+      const w3 = new Web3(rpc);
+      await w3.eth.getBlockNumber();
+      console.log("✅ Using RPC:", rpc);
+      return w3;
+    } catch (e) {
+      console.log("⚠️ RPC fail:", rpc);
+    }
+  }
+  throw new Error("No working RPC");
+}
+const web3 = await getWeb3();
+
+/* ======================= ABI ======================= */
+const ABI = [{
+  type: "function",
+  name: "fundTokenFor",
+  inputs: [
+    { type: "address", name: "user" },
+    { type: "uint256", name: "tokenId" }
+  ]
+}];
+
+/* ======================= LOGY ======================= */
+async function sendLog(msg) {
+  if (!INF_FREE_URL) return;
+  try {
+    await fetch(`${INF_FREE_URL}/accptpay.php?action=save_log`, {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({
+        message: `[${new Date().toISOString()}] ${msg}`
+      })
+    });
+  } catch (e) {}
+}
+const log = (...m) => {
+  const line = m.join(" ");
+  console.log(line);
+  sendLog(line);
+};
+
+/* ======================= ETH RATE ======================= */
+async function getEthRate() {
+  try {
+    const r = await fetch(
+      "https://api.coingecko.com/api/v3/simple/price?ids=ethereum&vs_currencies=eur"
+    );
+    const j = await r.json();
+    const rate = j?.ethereum?.eur;
+    log(`💱 1 ETH = ${rate} €`);
+    return rate || 2500;
+  } catch (e) {
+    log("⚠️ CoinGecko fail → 2500 fallback");
+    return 2500;
+  }
+}
+
+/* ======================= GAS ======================= */
+async function getGas() {
+  const g = await web3.eth.getGasPrice();
+  log(`⛽ Gas: ${web3.utils.fromWei(g, "gwei")} GWEI`);
+  return g;
+}
+
+/* ======================= LOAD ORDER (IF) ======================= */
+async function loadOrder(payment_id) {
+  const url = `${INF_FREE_URL}/chainuserdata`;
+  log("ℹ️ Loading order from IF:", payment_id);
+
+  const r = await fetch(`${url}?list=1`);
+  // accptpay neposkytuje API → manuálne
+
+  throw new Error("loadOrder() nie je potrebný – accptpay posiela všetky údaje");
+}
+
+/* ======================= UPDATE IF ======================= */
+async function updateIF(payment_id, tx_hash) {
+  log("↩️ update_order prebieha:", payment_id);
+
+  try {
+    const r = await fetch(`${INF_FREE_URL}/accptpay.php?action=update_order`, {
+      method: "POST",
+      headers: { "Content-Type":"application/x-www-form-urlencoded" },
+      body: new URLSearchParams({
+        order_id: payment_id,
+        tx_hash: tx_hash
+      })
+    });
+
+    const txt = await r.text();
+    log("↩️ IF odpoveď:", txt);
+    return txt;
+  } catch (e) {
+    log("❌ update_order FAIL:", e.message);
+    return null;
+  }
+}
+
+/* ======================= FUND TOKEN ======================= */
+async function fund(user, tokenId, amountEth) {
+  const contract = new web3.eth.Contract(ABI, CONTRACT);
+
+  const valueWei = web3.utils.toWei(amountEth.toString(), "ether");
+  const gasPrice = await getGas();
+
+  const gasLimit = await contract.methods
+    .fundTokenFor(user, tokenId)
+    .estimateGas({ from: FROM, value: valueWei });
+
+  const tx = {
+    from: FROM,
+    to: CONTRACT,
+    value: valueWei,
+    data: contract.methods.fundTokenFor(user, tokenId).encodeABI(),
+    gas: gasLimit,
+    gasPrice,
+    nonce: await web3.eth.getTransactionCount(FROM, "pending"),
+    chainId: await web3.eth.getChainId()
+  };
+
+  const signed = await web3.eth.accounts.signTransaction(tx, PRIVATE_KEY);
+  const receipt = await web3.eth.sendSignedTransaction(signed.rawTransaction);
+
+  log(`🔥 MINT done: ${receipt.transactionHash}`);
+  return receipt.transactionHash;
+}
+
+/* ======================= MAIN HANDLER ======================= */
+export const config = { api: { bodyParser: true } };
 
 export default async function handler(req, res) {
-  if (req.method !== "POST") {
-    return res.status(405).json({ error: "Only POST allowed" });
-  }
-
-  const {
-    action,
-    payment_id,
-    user_address,
-    token_id,
-    amount_eur,
-    user_folder,
-  } = req.body;
-
-  if (action !== "mint") {
-    return res.status(400).json({ error: "Invalid action" });
-  }
-
-  //-----------------------------------------
-  // ENV
-  //-----------------------------------------
-  const RPC_URL = process.env.RPC_URL || process.env.PROVIDER_URL;
-  const PRIVATE_KEY = process.env.PRIVATE_KEY;
-  const FROM = process.env.FROM_ADDRESS;
-  const CONTRACT = process.env.CONTRACT_ADDRESS;
-
-  if (!RPC_URL || !PRIVATE_KEY || !FROM || !CONTRACT) {
-    return res.status(500).json({ error: "Missing ENV vars" });
-  }
-
-  const web3 = new Web3(RPC_URL);
-
-  //-----------------------------------------
-  // GET mintFee DIRECTLY (raw call)
-  //-----------------------------------------
-  const mintFeeSelector = "0xdd62ed3e"; // keccak("mintFee()")[0:4]
-  const mintFeeData = mintFeeSelector;
-
-  let mintFeeWei = await web3.eth.call({
-    to: CONTRACT,
-    data: mintFeeData,
-  });
-
-  mintFeeWei = web3.utils.toBN(mintFeeWei);
-
-  //-----------------------------------------
-  // CALCULATE VALUE WEI
-  //-----------------------------------------
-  let valueWei = mintFeeWei;
-
-  if (amount_eur > 0) {
-    try {
-      const r = await fetch(
-        "https://api.coinbase.com/v2/prices/ETH-EUR/spot"
-      );
-      const j = await r.json();
-      const ethPrice = parseFloat(j.data.amount);
-
-      const ethAmount = amount_eur / ethPrice;
-      const wei = web3.utils.toBN(
-        web3.utils.toWei(ethAmount.toString(), "ether")
-      );
-
-      if (wei.gt(valueWei)) valueWei = wei;
-    } catch (e) {
-      log("EUR→ETH failed, using mintFee only");
-    }
-  }
-
-  //-----------------------------------------
-  // ABI ENCODING HELPERS
-  //-----------------------------------------
-  function pad32(hex) {
-    return hex.replace("0x", "").padStart(64, "0");
-  }
-
-  function encodeUint256(v) {
-    return pad32(web3.utils.toHex(v));
-  }
-
-  function encodeAddress(addr) {
-    return pad32(addr.toLowerCase().replace("0x", ""));
-  }
-
-  //-----------------------------------------
-  // STEP 1: RAW ENCODE mintCopy(originalId)
-  //-----------------------------------------
-  const selectorMintCopy = "0xadd8462e"; // keccak("mintCopy(uint256)")
-  const dataMint =
-    selectorMintCopy + encodeUint256(token_id);
-
-  const nonceMint = await web3.eth.getTransactionCount(FROM, "pending");
-  const gasPrice = await web3.eth.getGasPrice();
-
-  const txMint = {
-    from: FROM,
-    to: CONTRACT,
-    nonce: nonceMint,
-    gasPrice: web3.utils.toHex(gasPrice),
-    gas: web3.utils.toHex(350000),
-    value: valueWei.toString(),
-    data: dataMint,
-  };
-
-  let signedMint, mintReceipt;
-
   try {
-    signedMint = await web3.eth.accounts.signTransaction(txMint, PRIVATE_KEY);
-    mintReceipt = await web3.eth.sendSignedTransaction(signedMint.rawTransaction);
-  } catch (err) {
-    log("❌ MINT ERROR:", err.message);
-    return res.status(500).json({ error: "Mint failed", message: err.message });
-  }
+    const action = req.body?.action;
 
-  log("🔥 MINT TX:", mintReceipt.transactionHash);
+    if (!action) {
+      return res.status(400).json({ ok:false, error:"Missing action" });
+    }
 
-  //-----------------------------------------
-  // GET NEW TOKEN ID FROM Transfer EVENT
-  //-----------------------------------------
-  let newTokenId = null;
+    /* ========== SINGLE MINT (do_mint) ========== */
+    if (action === "mint") {
+      const payment_id = req.body.payment_id;
+      const user       = req.body.user_address;
+      const token      = req.body.token_id;
+      const eur        = parseFloat(req.body.amount_eur);
 
-  if (mintReceipt.logs) {
-    for (const L of mintReceipt.logs) {
-      if (L.topics && L.topics[0] === web3.utils.sha3("Transfer(address,address,uint256)")) {
-        // topics[3] = tokenId
-        newTokenId = web3.utils.hexToNumberString(L.topics[3]);
+      if (!payment_id || !user || !token) {
+        return res.status(400).json({ ok:false, error:"Missing fields" });
       }
+
+      const rate = await getEthRate();
+      const eth  = eur > 0 ? eur / rate : 0.001;
+
+      log(`🔥 MINT: ${payment_id} → token ${token} → ${eth} ETH`);
+
+      const tx = await fund(user, token, eth);
+      await updateIF(payment_id, tx);
+
+      return res.status(200).json({
+        ok: true,
+        payment_id,
+        token_id: token,
+        user_address: user,
+        sent_eth: eth,
+        tx_hash: tx
+      });
     }
-  }
 
-  if (!newTokenId) {
-    return res.status(500).json({
-      error: "Mint OK but tokenId not found",
-      tx: mintReceipt.transactionHash,
-    });
-  }
+    /* ========== FUTURE: MINT ALL ========== */
+    if (action === "mint_all") {
+      return res.status(501).json({ ok:false, error:"mint_all not implemented" });
+    }
 
-  log("🎯 NEW TOKEN ID:", newTokenId);
+    return res.status(400).json({ ok:false, error:"Unknown action" });
 
-  //-----------------------------------------
-  // STEP 2: AUTO TRANSFER NFT TO USER ADDRESS
-  //-----------------------------------------
-  const selectorTransfer = "0x42842e0e"; // safeTransferFrom(address,address,uint256)
-
-  const dataTransfer =
-    selectorTransfer +
-    encodeAddress(FROM) +
-    encodeAddress(user_address) +
-    encodeUint256(newTokenId);
-
-  const nonceTransfer = nonceMint + 1;
-
-  const txTransfer = {
-    from: FROM,
-    to: CONTRACT,
-    nonce: nonceTransfer,
-    gasPrice: web3.utils.toHex(gasPrice),
-    gas: web3.utils.toHex(300000),
-    value: "0x0",
-    data: dataTransfer,
-  };
-
-  let signedTransfer, transferReceipt;
-
-  try {
-    signedTransfer = await web3.eth.accounts.signTransaction(
-      txTransfer,
-      PRIVATE_KEY
-    );
-
-    transferReceipt = await web3.eth.sendSignedTransaction(
-      signedTransfer.rawTransaction
-    );
   } catch (e) {
-    log("❌ TRANSFER ERROR:", e.message);
-    return res.status(500).json({
-      error: "Transfer failed",
-      mintTx: mintReceipt.transactionHash,
-      message: e.message,
-    });
+    log("❌ ERROR:", e.message);
+    return res.status(500).json({ ok:false, error:e.message });
   }
-
-  log("✔ TRANSFER COMPLETE:", transferReceipt.transactionHash);
-
-  //-----------------------------------------
-  // DONE
-  //-----------------------------------------
-  return res.status(200).json({
-    success: true,
-    payment_id,
-    tokenId: newTokenId,
-    mintTx: mintReceipt.transactionHash,
-    transferTx: transferReceipt.transactionHash,
-    owner: user_address,
-  });
 }
