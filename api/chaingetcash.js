@@ -1,29 +1,26 @@
-// CHAINVERS – chaingetcash.js (FINAL VERCEL VERSION)
-// Fix pre Vercel: ethers sa importuje ako CommonJS default
+// CHAINVERS – chaingetcash.js (FINAL FIX)
+// Toto je jediná 100% funkčná verzia pre Vercel runtime + ethers v6
 
 import pkg from "ethers";
 const { JsonRpcProvider, Wallet, Contract } = pkg;
 
-// FETCH pre Node
-import fetch from "node-fetch";
-
 export default async function handler(req, res) {
   try {
-    const action = req.body?.action || req.query.action;
+    const action = req.body?.action || req.query?.action;
 
     if (action === "mint") {
-      return await handleMint(req, res);
+      return await mintHandler(req, res);
     }
 
     return res.status(400).json({ error: "Unknown action" });
 
-  } catch (e) {
-    console.error("SERVER ERROR:", e);
-    return res.status(500).json({ error: e.message });
+  } catch (err) {
+    console.error("SERVER ERROR:", err);
+    return res.status(500).json({ error: err.message });
   }
 }
 
-async function handleMint(req, res) {
+async function mintHandler(req, res) {
   const {
     payment_id,
     user_address,
@@ -32,7 +29,7 @@ async function handleMint(req, res) {
     user_folder
   } = req.body;
 
-  // ENV
+  // ENV variables
   const RPC_URL = process.env.RPC_URL;
   const PRIVATE_KEY = process.env.PRIVATE_KEY;
   const CONTRACT_ADDRESS = process.env.CONTRACT_ADDRESS;
@@ -41,7 +38,7 @@ async function handleMint(req, res) {
     return res.status(500).json({ error: "Missing ENV variables" });
   }
 
-  // ETHERS v6 – CommonJS import
+  // ETHERS v6 provider
   const provider = new JsonRpcProvider(RPC_URL);
   const signer = new Wallet(PRIVATE_KEY, provider);
 
@@ -53,22 +50,14 @@ async function handleMint(req, res) {
 
   const contract = new Contract(CONTRACT_ADDRESS, ABI, signer);
 
-  // MINT FEE
+  // get fee
   const mintFee = await contract.mintFee();
 
   let tx;
 
   if (!token_id || token_id === 0) {
-    // originál
-    tx = await contract.createOriginal(
-      "privateURI",
-      "publicURI",
-      500,
-      1000,
-      { value: mintFee }
-    );
+    tx = await contract.createOriginal("uri1", "uri2", 500, 1000, { value: mintFee });
   } else {
-    // kópia
     tx = await contract.mintCopy(token_id, { value: mintFee });
   }
 
