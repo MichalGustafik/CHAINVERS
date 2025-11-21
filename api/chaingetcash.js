@@ -1,6 +1,3 @@
-// CHAINVERS – chaingetcash.js (FINAL ETHERS v5 VERSION FOR VERCEL)
-// Toto *musí* fungovať, pretože Vercel používa ethers v5 CommonJS build
-
 import pkg from "ethers";
 const { providers, Wallet, Contract } = pkg;
 
@@ -29,16 +26,14 @@ async function mintHandler(req, res) {
     user_folder
   } = req.body;
 
-  // ENV — supports both RPC_URL and PROVIDER_URL
   const RPC_URL = process.env.RPC_URL || process.env.PROVIDER_URL;
   const PRIVATE_KEY = process.env.PRIVATE_KEY;
   const CONTRACT_ADDRESS = process.env.CONTRACT_ADDRESS;
 
-  if (!RPC_URL) return res.status(500).json({ error: "Missing RPC_URL/PROVIDER_URL" });
-  if (!PRIVATE_KEY) return res.status(500).json({ error: "Missing PRIVATE_KEY" });
-  if (!CONTRACT_ADDRESS) return res.status(500).json({ error: "Missing CONTRACT_ADDRESS" });
+  if (!RPC_URL || !PRIVATE_KEY || !CONTRACT_ADDRESS) {
+    return res.status(500).json({ error: "Missing ENV" });
+  }
 
-  // ETHERS v5 — THIS WORKS ON VERCEL!!!
   const provider = new providers.JsonRpcProvider(RPC_URL);
   const signer = new Wallet(PRIVATE_KEY, provider);
 
@@ -50,21 +45,27 @@ async function mintHandler(req, res) {
 
   const contract = new Contract(CONTRACT_ADDRESS, ABI, signer);
 
-  // Get mint fee
   const mintFee = await contract.mintFee();
+
+  let value = mintFee;
+
+  if (amount_eur > 0) {
+    // convert EUR to ETH?
+    value = mintFee; // zatiaľ minimálna logika (doplni sa)
+  }
 
   let tx;
 
-  if (!token_id || token_id === 0) {
+  if (!token_id || token_id == 0) {
     tx = await contract.createOriginal(
-      "privateURI",
-      "publicURI",
+      "uri1",
+      "uri2",
       500,
       1000,
-      { value: mintFee }
+      { value }
     );
   } else {
-    tx = await contract.mintCopy(token_id, { value: mintFee });
+    tx = await contract.mintCopy(token_id, { value });
   }
 
   const receipt = await tx.wait();
