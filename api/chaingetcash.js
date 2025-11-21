@@ -1,4 +1,10 @@
-import { JsonRpcProvider, Wallet, Contract } from "ethers";
+// CHAINVERS – chaingetcash.js (FINAL VERCEL VERSION)
+// Fix pre Vercel: ethers sa importuje ako CommonJS default
+
+import pkg from "ethers";
+const { JsonRpcProvider, Wallet, Contract } = pkg;
+
+// FETCH pre Node
 import fetch from "node-fetch";
 
 export default async function handler(req, res) {
@@ -26,20 +32,19 @@ async function handleMint(req, res) {
     user_folder
   } = req.body;
 
-  // ---- ENV ----
+  // ENV
   const RPC_URL = process.env.RPC_URL;
   const PRIVATE_KEY = process.env.PRIVATE_KEY;
   const CONTRACT_ADDRESS = process.env.CONTRACT_ADDRESS;
 
   if (!RPC_URL || !PRIVATE_KEY || !CONTRACT_ADDRESS) {
-    return res.status(500).json({ error: "Missing RPC / KEY / CONTRACT env variables" });
+    return res.status(500).json({ error: "Missing ENV variables" });
   }
 
-  // ---- Provider + Wallet (ETHERS v6) ----
+  // ETHERS v6 – CommonJS import
   const provider = new JsonRpcProvider(RPC_URL);
   const signer = new Wallet(PRIVATE_KEY, provider);
 
-  // ---- Contract ----
   const ABI = [
     "function createOriginal(string,string,uint96,uint256) payable",
     "function mintCopy(uint256) payable",
@@ -48,13 +53,13 @@ async function handleMint(req, res) {
 
   const contract = new Contract(CONTRACT_ADDRESS, ABI, signer);
 
-  // ---- get mint fee ----
+  // MINT FEE
   const mintFee = await contract.mintFee();
 
   let tx;
 
   if (!token_id || token_id === 0) {
-    // ---- originál ----
+    // originál
     tx = await contract.createOriginal(
       "privateURI",
       "publicURI",
@@ -63,16 +68,16 @@ async function handleMint(req, res) {
       { value: mintFee }
     );
   } else {
-    // ---- kópia ----
+    // kópia
     tx = await contract.mintCopy(token_id, { value: mintFee });
   }
 
   const receipt = await tx.wait();
 
-  // ---- RETURN RESPONSE ----
   return res.status(200).json({
     success: true,
     txHash: receipt.hash,
-    contract: CONTRACT_ADDRESS
+    payment_id,
+    user_folder
   });
 }
