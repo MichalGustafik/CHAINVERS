@@ -1,5 +1,5 @@
-// CHAINVERS – chaingetcash.js (FINAL FIX)
-// Toto je jediná 100% funkčná verzia pre Vercel runtime + ethers v6
+// CHAINVERS – chaingetcash.js (FINAL FIXED VERSION)
+// CommonJS-compatible import for Vercel + ethers v6
 
 import pkg from "ethers";
 const { JsonRpcProvider, Wallet, Contract } = pkg;
@@ -29,16 +29,16 @@ async function mintHandler(req, res) {
     user_folder
   } = req.body;
 
-  // ENV variables
-  const RPC_URL = process.env.RPC_URL;
+  // ENV (support both RPC_URL and PROVIDER_URL)
+  const RPC_URL = process.env.RPC_URL || process.env.PROVIDER_URL;
   const PRIVATE_KEY = process.env.PRIVATE_KEY;
   const CONTRACT_ADDRESS = process.env.CONTRACT_ADDRESS;
 
-  if (!RPC_URL || !PRIVATE_KEY || !CONTRACT_ADDRESS) {
-    return res.status(500).json({ error: "Missing ENV variables" });
-  }
+  if (!RPC_URL) return res.status(500).json({ error: "Missing RPC_URL / PROVIDER_URL" });
+  if (!PRIVATE_KEY) return res.status(500).json({ error: "Missing PRIVATE_KEY" });
+  if (!CONTRACT_ADDRESS) return res.status(500).json({ error: "Missing CONTRACT_ADDRESS" });
 
-  // ETHERS v6 provider
+  // ETHERS v6
   const provider = new JsonRpcProvider(RPC_URL);
   const signer = new Wallet(PRIVATE_KEY, provider);
 
@@ -50,7 +50,7 @@ async function mintHandler(req, res) {
 
   const contract = new Contract(CONTRACT_ADDRESS, ABI, signer);
 
-  // get fee
+  // Get mint fee
   const mintFee = await contract.mintFee();
 
   let tx;
