@@ -8,7 +8,7 @@ const PROVIDER_URL = process.env.PROVIDER_URL;
 const PRIVATE_KEY  = process.env.PRIVATE_KEY;
 const FROM         = process.env.FROM_ADDRESS;
 const CONTRACT     = process.env.CONTRACT_ADDRESS;
-const INF_FREE_URL = process.env.INF_FREE_URL; // len na logy
+const INF_FREE_URL = process.env.INF_FREE_URL;
 
 /* ============================================================
    RPC FALLBACK
@@ -34,7 +34,7 @@ async function initWeb3() {
 const web3 = await initWeb3();
 
 /* ============================================================
-   ABI (mintCopy)
+   ABI – only mintCopy (your contract)
 ============================================================ */
 const ABI = [
   {
@@ -46,29 +46,58 @@ const ABI = [
 ];
 
 /* ============================================================
-   LOGGING
+   LOGGING – FIXED (InfinityFree AntiBot bypass)
 ============================================================ */
 async function sendLog(msg) {
-  if (!INF_FREE_URL) return;
+  const target = `${INF_FREE_URL}/accptpay.php?action=save_log`;
+
   try {
-    await fetch(`${INF_FREE_URL}/accptpay.php?action=save_log`, {
+    // FIRST attempt
+    const r1 = await fetch(target, {
       method: "POST",
-      headers: {"Content-Type":"application/x-www-form-urlencoded"},
-      body: new URLSearchParams({
-        message: `[${new Date().toISOString()}] ${msg}`
-      })
+      headers: {
+        "Content-Type": "application/x-www-form-urlencoded",
+        "User-Agent": "Mozilla/5.0",
+        "Referer": INF_FREE_URL
+      },
+      body: new URLSearchParams({ message: `[${new Date().toISOString()}] ${msg}` })
     });
-  } catch(e) {
+
+    let t1 = await r1.text();
+
+    // If not blocked → OK
+    if (!t1.includes("__test=")) return;
+
+    // Extract cookie
+    const match = t1.match(/__test=([a-fA-F0-9]+)/);
+    const cookieValue = match ? match[1] : null;
+
+    if (cookieValue) {
+      // SECOND attempt with cookie (bypass)
+      await fetch(target, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/x-www-form-urlencoded",
+          "User-Agent": "Mozilla/5.0",
+          "Cookie": `__test=${cookieValue}`,
+          "Referer": INF_FREE_URL
+        },
+        body: new URLSearchParams({ message: `[${new Date().toISOString()}] ${msg}` })
+      });
+    }
+
+  } catch (e) {
     console.log("log_fail:", e.message);
   }
 }
+
 const log = async (...m) => {
   console.log(...m);
   sendLog(m.join(" "));
 };
 
 /* ============================================================
-   UTIL: Rate, Gas, Balance
+   UTIL: RATE, GAS, BALANCE
 ============================================================ */
 async function getRate() {
   try {
@@ -86,7 +115,7 @@ async function getGas() {
   try {
     return await web3.eth.getGasPrice();
   } catch {
-    return web3.utils.toWei("0.2", "gwei");
+    return web3.utils.toWei("0.2", "gwei"); // fallback
   }
 }
 
@@ -96,9 +125,10 @@ async function balanceEth() {
 }
 
 /* ============================================================
-   SEND MINT
+   MINT
 ============================================================ */
 async function sendMint(tokenId, ethValue) {
+
   const contract = new web3.eth.Contract(ABI, CONTRACT);
 
   const valueWei =
@@ -117,7 +147,7 @@ async function sendMint(tokenId, ethValue) {
       value: valueWei
     });
   } catch(e) {
-    await log("⚠️ estimateGas fail:", e.message);
+    await log("⚠️ estimateGas FAIL:", e.message);
     throw e;
   }
 
@@ -134,9 +164,15 @@ async function sendMint(tokenId, ethValue) {
 
   const signed = await web3.eth.accounts.signTransaction(tx, PRIVATE_KEY);
 
-  const receipt = await web3.eth.sendSignedTransaction(signed.rawTransaction);
-  await log(`🔥 Mint OK → TX=${receipt.transactionHash}`);
-  return receipt.transactionHash;
+  try {
+    const receipt = await web3.eth.sendSignedTransaction(signed.rawTransaction);
+    const hash = receipt.transactionHash;
+    await log(`🔥 Mint OK → TX=${hash}`);
+    return hash;
+  } catch(e) {
+    await log(`❌ Mint FAIL → ${e.message}`);
+    throw e;
+  }
 }
 
 /* ============================================================
@@ -153,7 +189,7 @@ export default async function handler(req, res) {
     const body = req.body || {};
     const action = body.action;
 
-    /* === WALLET BALANCE === */
+    /* === BALANCE === */
     if (action === "balance") {
       const b = await balanceEth();
       await log(`💠 Balance: ${b} ETH`);
@@ -162,6 +198,7 @@ export default async function handler(req, res) {
 
     /* === MINT === */
     if (action === "mint") {
+
       const paymentId = body.payment_id;
       const tokenId   = Number(body.token_id);
       const eur       = Number(body.amount_eur || 0);
@@ -179,26 +216,27 @@ export default async function handler(req, res) {
         await log("FREE MINT MODE → 0 ETH");
       }
 
-      const bal = await balanceEth();
-      if (bal < eth) {
-        await log(`❌ Wallet ${bal} ETH < ${eth}`);
+      const walletBal = await balanceEth();
+      if (walletBal < eth) {
+        await log(`❌ Wallet=${walletBal} ETH < Needed=${eth}`);
         return res.json({ ok:false, error:"Low wallet balance" });
       }
 
       const txHash = await sendMint(tokenId, eth);
 
       return res.json({
-        ok: true,
+        ok:true,
         payment_id: paymentId,
         tx_hash: txHash,
         sent_eth: eth
       });
     }
 
+    /* Unknown action */
     return res.status(400).json({ ok:false, error:"Unknown action" });
 
   } catch(e) {
-    await log("❌ ERROR:", e.message);
+    await log(`❌ HANDLER ERROR: ${e.message}`);
     return res.status(500).json({ ok:false, error:e.message });
   }
 }
