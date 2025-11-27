@@ -9,6 +9,7 @@ const PRIVATE_KEY  = process.env.PRIVATE_KEY;
 const FROM         = process.env.FROM_ADDRESS;
 const CONTRACT     = process.env.CONTRACT_ADDRESS;
 const INF_FREE_URL = process.env.INF_FREE_URL;
+const VERCEL_URL   = process.env.VERCEL_URL || "https://chainvers.vercel.app";
 
 /* ============================================================
    RPC FALLBACK
@@ -34,7 +35,7 @@ async function initWeb3() {
 const web3 = await initWeb3();
 
 /* ============================================================
-   ABI (LEN TO, ČO TVOJ KONTRAKT NAOZAJ MÁ)
+   ABI (len mintCopy)
 ============================================================ */
 const ABI = [
   {
@@ -68,7 +69,7 @@ const log = async (...m) => {
 };
 
 /* ============================================================
-   RATE (COINGECKO)
+   UTILITIES
 ============================================================ */
 async function getRate() {
   try {
@@ -82,9 +83,6 @@ async function getRate() {
   }
 }
 
-/* ============================================================
-   GAS
-============================================================ */
 async function getGas() {
   try {
     return await web3.eth.getGasPrice();
@@ -93,44 +91,81 @@ async function getGas() {
   }
 }
 
-/* ============================================================
-   WALLET BALANCE (FROM)
-============================================================ */
 async function balanceEth() {
   const w = await web3.eth.getBalance(FROM);
   return Number(web3.utils.fromWei(w, "ether"));
 }
 
 /* ============================================================
-   MINT COPY
+   PROXY UPDATE — vložené priamo do tohto súboru
+============================================================ */
+async function proxyUpdateOrder(order_id, tx_hash) {
+  try {
+    const target = `${INF_FREE_URL}/accptpay.php?action=update_order`;
+
+    // prvý pokus
+    const resp = await fetch(target, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/x-www-form-urlencoded",
+        "User-Agent": "Mozilla/5.0",
+        "Referer": INF_FREE_URL
+      },
+      body: new URLSearchParams({ order_id, tx_hash })
+    });
+
+    const text = await resp.text();
+
+    // ak InfinityFree vráti JavaScript s cookie
+    if (text.includes("__test=")) {
+      const match = text.match(/__test=([a-zA-Z0-9]+)/);
+      const cookieValue = match ? match[1] : null;
+
+      if (cookieValue) {
+        const resp2 = await fetch(target, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/x-www-form-urlencoded",
+            "User-Agent": "Mozilla/5.0",
+            "Cookie": `__test=${cookieValue}`,
+            "Referer": INF_FREE_URL
+          },
+          body: new URLSearchParams({ order_id, tx_hash })
+        });
+        const text2 = await resp2.text();
+        await log("↩️ update_order (cookie OK):", text2);
+        return text2;
+      }
+    }
+
+    await log("↩️ update_order (direct):", text);
+    return text;
+  } catch (e) {
+    await log("❌ update_order proxy fail:", e.message);
+  }
+}
+
+/* ============================================================
+   MINT
 ============================================================ */
 async function sendMint(tokenId, ethValue) {
 
   const contract = new web3.eth.Contract(ABI, CONTRACT);
-
-  //
-  // KONVERZIA ETH → WEI
-  //
   const valueWei =
-    Number(ethValue) === 0
-      ? "0"
-      : web3.utils.toWei(ethValue.toString(), "ether");
+    Number(ethValue) === 0 ? "0" : web3.utils.toWei(ethValue.toString(), "ether");
 
-  await log(`MINT request → token=${tokenId}, ETH=${ethValue}, WEI=${valueWei}`);
+  await log(`MINT → token=${tokenId}, ETH=${ethValue}, WEI=${valueWei}`);
 
   const gasPrice = await getGas();
-
-  //
-  // odhad gas → dôležité
-  //
   let gasLimit;
+
   try {
     gasLimit = await contract.methods.mintCopy(tokenId).estimateGas({
       from: FROM,
       value: valueWei
     });
   } catch(e) {
-    await log("⚠️ estimateGas failed:", e.message);
+    await log("⚠️ estimateGas fail:", e.message);
     throw e;
   }
 
@@ -146,41 +181,18 @@ async function sendMint(tokenId, ethValue) {
   };
 
   const signed = await web3.eth.accounts.signTransaction(tx, PRIVATE_KEY);
-
-  try {
-    const receipt = await web3.eth.sendSignedTransaction(signed.rawTransaction);
-    await log(`🔥 Mint OK → TX=${receipt.transactionHash}`);
-    return receipt.transactionHash;
-  } catch(e) {
-    await log(`❌ Mint FAIL → ${e.message}`);
-    throw e;
-  }
+  const receipt = await web3.eth.sendSignedTransaction(signed.rawTransaction);
+  await log(`🔥 Mint OK → TX=${receipt.transactionHash}`);
+  return receipt.transactionHash;
 }
 
 /* ============================================================
-   SYNC S INFINITYFREE (UPDATE ORDER)
-============================================================ */
-async function updateIF(orderId, tx) {
-  try {
-    const r = await fetch(`${INF_FREE_URL}/accptpay.php?action=update_order`, {
-      method: "POST",
-      headers: {"Content-Type":"application/x-www-form-urlencoded"},
-      body: new URLSearchParams({ order_id: orderId, tx_hash: tx })
-    });
-    await log("↩️ updateIF RESP:", await r.text());
-  } catch(e) {
-    await log("updateIF ERROR:", e.message);
-  }
-}
-
-/* ============================================================
-   API HANDLER
+   MAIN HANDLER
 ============================================================ */
 export const config = { api: { bodyParser: true } };
 
 export default async function handler(req, res) {
   try {
-
     if (req.method !== "POST") {
       return res.status(400).json({ ok:false, error:"POST required" });
     }
@@ -188,66 +200,53 @@ export default async function handler(req, res) {
     const body = req.body || {};
     const action = body.action;
 
-    /* -----------------------------------
-       KONTRAKT BALANCE (FROM PEŇAŽENKA)
-    ----------------------------------- */
+    /* === Balance === */
     if (action === "balance") {
       const b = await balanceEth();
-      await log(`💠 Contract wallet balance: ${b} ETH`);
+      await log(`💠 Balance: ${b} ETH`);
       return res.json({ ok:true, balance_eth:b });
     }
 
-    /* -----------------------------------
-       MINT COPY
-    ----------------------------------- */
+    /* === Mint === */
     if (action === "mint") {
-
       const paymentId = body.payment_id;
       const tokenId   = Number(body.token_id);
       const eur       = Number(body.amount_eur || 0);
 
-      await log(`===== NEW MINT =====`);
+      await log("===== NEW MINT =====");
       await log(`Order=${paymentId} | Token=${tokenId} | EUR=${eur}`);
 
       const rate = await getRate();
       let eth = eur > 0 ? eur / rate : 0;
 
-      await log(`Rate EUR/ETH=${rate}, calculated ETH=${eth}`);
-
-      // ZERO mode – skutočná nula
+      await log(`Rate=${rate} → ETH=${eth}`);
       if (eur === 0) {
         eth = 0;
-        await log("FREE MINT MODE → sending 0 ETH");
+        await log("FREE MINT MODE → 0 ETH");
       }
 
-      // Check wallet balance
-      const walletBal = await balanceEth();
-      const needed = eth;
-
-      if (walletBal < needed) {
-        await log(`❌ NOT ENOUGH FUNDS. Wallet ${walletBal} ETH < need ${needed}`);
-        return res.json({ ok:false, error:"Insufficient wallet balance" });
+      const bal = await balanceEth();
+      if (bal < eth) {
+        await log(`❌ Wallet ${bal} ETH < ${eth}`);
+        return res.json({ ok:false, error:"Low wallet balance" });
       }
 
-      const txHash = await sendMint(tokenId, eth);
+      const tx = await sendMint(tokenId, eth);
 
-      await updateIF(paymentId, txHash);
+      await proxyUpdateOrder(paymentId, tx);
 
       return res.json({
-        ok: true,
+        ok:true,
         payment_id: paymentId,
-        tx_hash: txHash,
+        tx_hash: tx,
         sent_eth: eth
       });
     }
 
-    /* -----------------------------------
-       default fallback
-    ----------------------------------- */
     return res.status(400).json({ ok:false, error:"Unknown action" });
 
   } catch(e) {
-    await log("❌ HANDLER ERROR:", e.message);
+    await log("❌ ERROR:", e.message);
     return res.status(500).json({ ok:false, error:e.message });
   }
 }
