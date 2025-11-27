@@ -28,13 +28,44 @@ async function initWeb3() {
 }
 const web3 = await initWeb3();
 
-/* ======================= ABI (mintCopy) ======================= */
-const ABI = [{
-  type: "function",
-  name: "mintCopy",
-  inputs: [{ type: "uint256", name: "originalId" }],
-  stateMutability: "payable"
-}];
+/* ======================= ABI FULL ======================= */
+const ABI = [
+  {
+    type: "function",
+    name: "mintCopy",
+    inputs: [{ type: "uint256", name: "originalId" }],
+    stateMutability: "payable"
+  },
+  {
+    type: "function",
+    name: "getBalance",
+    inputs: [{ type: "uint256", name: "tokenId" }],
+    outputs: [{ type: "uint256" }],
+    stateMutability: "view"
+  },
+  {
+    type: "function",
+    name: "fundTokenFor",
+    inputs: [
+      { type: "address", name: "user" },
+      { type: "uint256", name: "tokenId" }
+    ],
+    stateMutability: "payable"
+  },
+  {
+    type: "function",
+    name: "withdrawBalance",
+    inputs: [{ type: "uint256", name: "tokenId" }],
+    stateMutability: "nonpayable"
+  },
+  {
+    type: "function",
+    name: "ownerOf",
+    inputs: [{ type: "uint256", name: "tokenId" }],
+    outputs: [{ type: "address" }],
+    stateMutability: "view"
+  }
+];
 
 /* ======================= LOGGING ======================= */
 async function sendLog(msg) {
@@ -75,20 +106,95 @@ async function getGas() {
   return g;
 }
 
-/* ======================= BALANCE ======================= */
+/* ======================= BALANCE (WALLET) ======================= */
 async function balanceEth() {
   const w = await web3.eth.getBalance(FROM);
   return Number(web3.utils.fromWei(w, "ether"));
 }
 
-/* ======================= SEND MINT ======================= */
+/* ================================================================
+   🔵 GET NFT BALANCE (ETH uložené v kontrakte)
+================================================================ */
+async function getNftBalance(tokenId) {
+  const contract = new web3.eth.Contract(ABI, CONTRACT);
+  const bal = await contract.methods.getBalance(tokenId).call();
+  await log(`🔍 Balance NFT ${tokenId}: ${bal} WEI`);
+  return bal;
+}
+
+/* ================================================================
+   🔵 FUND TOKEN (ETH dobíjanie)
+================================================================ */
+async function fund(tokenId, user, valueWei) {
+
+  const contract = new web3.eth.Contract(ABI, CONTRACT);
+
+  const tx = contract.methods.fundTokenFor(user, tokenId);
+  const gasPrice = await getGas();
+
+  const gasLimit = await tx.estimateGas({
+    from: FROM,
+    value: valueWei
+  });
+
+  const signed = await web3.eth.accounts.signTransaction({
+    from: FROM,
+    to: CONTRACT,
+    gas: gasLimit,
+    gasPrice,
+    data: tx.encodeABI(),
+    value: valueWei,
+    chainId: await web3.eth.getChainId(),
+    nonce: await web3.eth.getTransactionCount(FROM, "pending")
+  }, PRIVATE_KEY);
+
+  const receipt = await web3.eth.sendSignedTransaction(signed.rawTransaction);
+  await log(`💰 FUND TOKEN ${tokenId} TX: ${receipt.transactionHash}`);
+
+  return receipt.transactionHash;
+}
+
+/* ================================================================
+   🔵 WITHDRAW ETH (výber z NFT)
+================================================================ */
+async function withdraw(tokenId, user) {
+
+  const contract = new web3.eth.Contract(ABI, CONTRACT);
+
+  const owner = await contract.methods.ownerOf(tokenId).call();
+  if (owner.toLowerCase() !== user.toLowerCase()) {
+    throw new Error("❌ User is not NFT owner");
+  }
+
+  const tx = contract.methods.withdrawBalance(tokenId);
+  const gasPrice = await getGas();
+  const gasLimit = await tx.estimateGas({ from: FROM });
+
+  const signed = await web3.eth.accounts.signTransaction({
+    from: FROM,
+    to: CONTRACT,
+    gas: gasLimit,
+    gasPrice,
+    data: tx.encodeABI(),
+    chainId: await web3.eth.getChainId(),
+    nonce: await web3.eth.getTransactionCount(FROM, "pending")
+  }, PRIVATE_KEY);
+
+  const receipt = await web3.eth.sendSignedTransaction(signed.rawTransaction);
+  await log(`🏧 WITHDRAW TOKEN ${tokenId} → ${owner} | TX=${receipt.transactionHash}`);
+
+  return receipt.transactionHash;
+}
+
+/* ================================================================
+   🔵 SEND MINT (pôvodný mintCopy)
+================================================================ */
 async function sendMint(token, valueEth) {
 
   const contract = new web3.eth.Contract(ABI, CONTRACT);
   const valueWei = web3.utils.toWei(valueEth.toString(), "ether");
 
   await log(`→ Sending valueWei = ${valueWei}`);
-
   const gasPrice = await getGas();
 
   const gasLimit = await contract.methods
@@ -116,7 +222,9 @@ async function sendMint(token, valueEth) {
   return receipt.transactionHash;
 }
 
-/* ======================= UPDATE IF ======================= */
+/* ================================================================
+   🔵 UPDATE IF
+================================================================ */
 async function updateIF(id, tx) {
   try {
     const r = await fetch(`${INF_FREE_URL}/accptpay.php?action=update_order`, {
@@ -133,30 +241,54 @@ async function updateIF(id, tx) {
   }
 }
 
-/* ======================= MAIN HANDLER ======================= */
+/* ================================================================
+   🔵 ROUTER
+================================================================ */
 export const config = { api: { bodyParser: true } };
 
 export default async function handler(req, res) {
   try {
 
-    /* ==== PROTECTOR ==== */
     if (req.method !== "POST") {
       return res.status(400).json({ ok:false, error:"POST required" });
-    }
-    if (!req.body || typeof req.body !== "object") {
-      return res.status(400).json({ ok:false, error:"Missing JSON body" });
     }
 
     const action = req.body.action;
 
-    /* === BALANCE === */
+    /* === WALLET BALANCE === */
     if (action === "balance") {
       const b = await balanceEth();
       await log(`💠 Balance: ${b} ETH`);
       return res.status(200).json({ ok:true, balance_eth:b });
     }
 
-    /* === SINGLE MINT === */
+    /* === GET NFT BALANCE === */
+    if (action === "getBalance") {
+      const tokenId = req.body.token_id || req.query.tokenId;
+      const bal = await getNftBalance(tokenId);
+      return res.status(200).json({ ok:true, tokenId, balanceWei: bal });
+    }
+
+    /* === FUND ETH TO NFT === */
+    if (action === "fund") {
+      const token = Number(req.body.token_id);
+      const user  = req.body.user;
+      const wei   = req.body.valueWei;
+
+      const tx = await fund(token, user, wei);
+      return res.json({ ok:true, token, tx });
+    }
+
+    /* === WITHDRAW ETH FROM NFT === */
+    if (action === "withdraw") {
+      const token = Number(req.body.token_id);
+      const user  = req.body.user;
+
+      const tx = await withdraw(token, user);
+      return res.json({ ok:true, token, tx });
+    }
+
+    /* === MINT COPY === */
     if (action === "mint") {
       const paymentId = req.body.payment_id;
       const token     = Number(req.body.token_id);
@@ -167,33 +299,19 @@ export default async function handler(req, res) {
       const rate = await getRate();
       let eth = eur > 0 ? eur / rate : 0;
 
-      await log(`→ EUR=${eur} → ETH=${eth}`);
-
-      /* FREE-MINT: 0 € objednávky */
       if (eth === 0) {
         eth = 0.001;
         await log("🟪 FREE MINT MODE → using 0.001 ETH");
       }
 
-      /* REZERVA PRE GAS */
-      const bal = await balanceEth();
-      const reserve = 0.0005;
+      const txHash = await sendMint(token, eth);
 
-      if (bal - eth < reserve) {
-        await log(`⚠️ Balance too low. Need reserve=${reserve}.`);
-        return res.status(400).json({ ok:false, error:"Low balance" });
-      }
+      await updateIF(paymentId, txHash);
 
-      /* === EXECUTE MINT === */
-      const tx = await sendMint(token, eth);
-
-      /* === SYNC WITH IF === */
-      await updateIF(paymentId, tx);
-
-      return res.status(200).json({
+      return res.json({
         ok: true,
         payment_id: paymentId,
-        tx_hash: tx,
+        tx_hash: txHash,
         sent_eth: eth
       });
     }
