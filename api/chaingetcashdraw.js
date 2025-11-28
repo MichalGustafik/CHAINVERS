@@ -5,7 +5,7 @@ const PROVIDER_URL = process.env.PROVIDER_URL;
 const PRIVATE_KEY  = process.env.PRIVATE_KEY;
 const FROM         = process.env.FROM_ADDRESS;
 const CONTRACT     = process.env.CONTRACT_ADDRESS;
-const INF_FREE_URL = process.env.INF_FREE_URL; // https://TVOJWEB.com (bez / na konci)
+const INF_FREE_URL = process.env.INF_FREE_URL;
 
 /* ======================= RPC FALLBACK ======================= */
 const RPCs = [
@@ -19,7 +19,6 @@ async function initWeb3() {
     try {
       const w3 = new Web3(rpc);
       await w3.eth.getBlockNumber();
-      console.log("Using RPC:", rpc);
       return w3;
     } catch (e) {}
   }
@@ -32,29 +31,53 @@ const ABI = [
     "inputs":[{"internalType":"uint256","name":"tokenId","type":"uint256"}],
     "name":"withdrawToken",
     "outputs":[],
-    "stateMutability":"nonpayable",
+    "stateMutability":"payable",
     "type":"function"
   }
 ];
 
-/* ======================= DOWNLOAD ORDERS.JSON ======================= */
+/* ======================= LOAD ORDERS ======================= */
 async function loadOrders(user) {
-  const url = `${INF_FREE_URL}/chainuserdata/${user}/orders.json?bypass=${Date.now()}`;
+  const url = `${INF_FREE_URL}/get_orders.php?user=${user}&bypass=${Date.now()}`;
   const res = await fetch(url);
-  if (!res.ok) throw new Error("Cannot load orders.json");
-  return await res.json();
+  const txt = await res.text();
+
+  try {
+    return JSON.parse(txt);
+  } catch (e) {
+    throw new Error("Invalid orders.json response: " + txt);
+  }
 }
 
-/* ======================= SAVE UPDATED ORDERS ======================= */
+/* ======================= SAVE ORDERS ======================= */
 async function saveOrders(user, orders) {
   const url = `${INF_FREE_URL}/save_orders.php`;
   const res = await fetch(url, {
     method: "POST",
     body: JSON.stringify({ user, orders })
   });
-  const txt = await res.text();
-  console.log("SAVE:", txt);
+  return await res.text();
 }
+
+/* ======================= GET / UPDATE GAIN ======================= */
+const findGain = (orders, tid) => {
+  for (const o of orders) {
+    const id = o.token_id ?? o.tokenId;
+    if (parseInt(id) === parseInt(tid)) {
+      return parseFloat(o.contract_gain ?? 0);
+    }
+  }
+  return 0;
+};
+
+const updateGain = (orders, tid, newValue) => {
+  for (const o of orders) {
+    const id = o.token_id ?? o.tokenId;
+    if (parseInt(id) === parseInt(tid)) {
+      o.contract_gain = newValue;
+    }
+  }
+};
 
 /* ======================= HANDLER ======================= */
 export default async function handler(req, res) {
@@ -62,119 +85,141 @@ export default async function handler(req, res) {
     const w3 = await initWeb3();
     const contract = new w3.eth.Contract(ABI, CONTRACT);
 
-    const action  = req.query.action;
-    const user    = req.query.user;
-    const tokenId = req.query.tokenId ? parseInt(req.query.tokenId) : null;
+    const action   = req.query.action;
+    const user     = req.query.user;
+    const tokenId  = req.query.tokenId ? parseInt(req.query.tokenId) : null;
+    const amountIn = req.query.amount ? parseFloat(req.query.amount) : null;
 
     if (!user) return res.status(200).send("Missing user");
 
-    // 🔥 load orders.json
+    // Load orders.json
     let orders = await loadOrders(user);
 
-    // orders.json môže byť array aj object → normalizujeme
     if (!Array.isArray(orders)) {
       if (orders.orders) orders = orders.orders;
       else orders = [orders];
     }
 
-    // nájde contract_gain podľa tokenId
-    const getGain = (tid) => {
-      for (const o of orders) {
-        const id = o.token_id ?? o.tokenId ?? null;
-        if (parseInt(id) === parseInt(tid)) {
-          let raw = o.contract_gain ?? o.contractGain ?? o.gain ?? 0;
-          return parseFloat(raw);
-        }
-      }
-      return 0;
-    };
+    /* ===================================================
+       DYNAMIC WITHDRAW AMOUNT: withdrawAmount
+       =================================================== */
+    if (action === "withdrawAmount") {
 
-    // nulovanie contract_gain
-    const zeroGain = (tid) => {
-      for (const o of orders) {
-        const id = o.token_id ?? o.tokenId ?? null;
-        if (parseInt(id) === parseInt(tid)) {
-          o.contract_gain = 0;
-        }
-      }
-    };
+      const gain = findGain(orders, tokenId);
+      if (gain <= 0) return res.status(200).send("No balance in this token");
 
-    /* ==========================================================
-       1) WITHDRAW SINGLE TOKEN
-       ========================================================== */
+      const amount = Number(amountIn);
+
+      const MIN = 0.0001; // minimálny withdraw v ETH
+      if (amount < MIN) {
+        return res.status(200).send("Amount too small (min 0.0001 ETH)");
+      }
+
+      if (amount > gain) {
+        return res.status(200).send("Amount exceeds token gain");
+      }
+
+      // Gas kontrola
+      const gasBalance = await w3.eth.getBalance(FROM);
+      if (BigInt(gasBalance) < 5000000000000n) {
+        return res.status(200).send("Not enough gas on FROM wallet");
+      }
+
+      // ETH amount → wei
+      const valueWei = w3.utils.toWei(amount.toString(), "ether");
+
+      // Transaction
+      const tx = contract.methods.withdrawToken(tokenId);
+      const gas = await tx.estimateGas({ from: FROM, value: valueWei });
+
+      const signedTx = await w3.eth.accounts.signTransaction(
+        {
+          to: CONTRACT,
+          data: tx.encodeABI(),
+          gas: gas,
+          from: FROM,
+          value: valueWei
+        },
+        PRIVATE_KEY
+      );
+
+      const receipt = await w3.eth.sendSignedTransaction(signedTx.rawTransaction);
+
+      // Update orders.json
+      const newGain = (gain - amount).toFixed(6);
+      updateGain(orders, tokenId, newGain);
+
+      await saveOrders(user, orders);
+
+      return res.status(200).send(
+        `SUCCESS: Withdrawn ${amount} ETH from NFT #${tokenId}\nTX: ${receipt.transactionHash}`
+      );
+    }
+
+    /* ===================================================
+       LEGACY: withdraw (full)
+       =================================================== */
     if (action === "withdraw") {
-
-      const gain = getGain(tokenId);
+      const gain = findGain(orders, tokenId);
       if (gain <= 0) return res.status(200).send("No balance");
 
-      const gasBalance = await w3.eth.getBalance(FROM);
-      if (BigInt(gasBalance) < 10000000000000n)
-        return res.status(200).send("Not enough gas");
-
+      const valueWei = w3.utils.toWei(gain.toString(), "ether");
       const tx = contract.methods.withdrawToken(tokenId);
-      const gas = await tx.estimateGas({ from: FROM });
+      const gas = await tx.estimateGas({ from: FROM, value: valueWei });
 
       const signed = await w3.eth.accounts.signTransaction({
         to: CONTRACT,
         data: tx.encodeABI(),
         gas,
-        from: FROM
+        from: FROM,
+        value: valueWei
       }, PRIVATE_KEY);
 
       const result = await w3.eth.sendSignedTransaction(signed.rawTransaction);
 
-      // update orders.json
-      zeroGain(tokenId);
+      updateGain(orders, tokenId, 0);
       await saveOrders(user, orders);
 
-      return res.status(200).send("Withdraw OK: " + result.transactionHash);
+      return res.status(200).send("SUCCESS: " + result.transactionHash);
     }
 
-    /* ==========================================================
-       2) WITHDRAW ALL TOKENS
-       ========================================================== */
+    /* ===================================================
+       LEGACY: withdrawAll
+       =================================================== */
     if (action === "withdrawAll") {
-
-      let hashes = [];
+      let txs = [];
 
       for (const o of orders) {
-        const tid = o.token_id ?? o.tokenId ?? null;
-        if (!tid) continue;
-
-        let gain = parseFloat(
-          o.contract_gain ?? o.contractGain ?? o.gain ?? 0
-        );
-
+        const tid = o.token_id ?? o.tokenId;
+        let gain = parseFloat(o.contract_gain ?? 0);
         if (gain <= 0) continue;
 
+        const valueWei = w3.utils.toWei(gain.toString(), "ether");
         const tx = contract.methods.withdrawToken(tid);
-        const gas = await tx.estimateGas({ from: FROM });
+        const gas = await tx.estimateGas({ from: FROM, value: valueWei });
 
         const signed = await w3.eth.accounts.signTransaction({
           to: CONTRACT,
           data: tx.encodeABI(),
           gas,
-          from: FROM
+          from: FROM,
+          value: valueWei
         }, PRIVATE_KEY);
 
-        const result =
-          await w3.eth.sendSignedTransaction(signed.rawTransaction);
+        const result = await w3.eth.sendSignedTransaction(signed.rawTransaction);
+        txs.push(result.transactionHash);
 
-        hashes.push(result.transactionHash);
-
-        // zero gain
         o.contract_gain = 0;
       }
 
       await saveOrders(user, orders);
-
-      return res.status(200).send("Withdraw ALL OK: " + hashes.join(", "));
+      return res.status(200).send("ALL SUCCESS: " + txs.join(", "));
     }
 
     return res.status(200).send("Unknown action");
 
   } catch (e) {
-    console.error(e);
+    console.error("ERR:", e);
     return res.status(200).send("Error: " + e.message);
   }
 }
