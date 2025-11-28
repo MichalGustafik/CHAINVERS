@@ -46,13 +46,12 @@ const ABI = [
 ];
 
 /* ============================================================
-   LOGGING – FIXED (InfinityFree AntiBot bypass)
+   LOGGING – InfinityFree AntiBot bypass
 ============================================================ */
 async function sendLog(msg) {
   const target = `${INF_FREE_URL}/accptpay.php?action=save_log`;
 
   try {
-    // FIRST attempt
     const r1 = await fetch(target, {
       method: "POST",
       headers: {
@@ -64,16 +63,12 @@ async function sendLog(msg) {
     });
 
     let t1 = await r1.text();
-
-    // If not blocked → OK
     if (!t1.includes("__test=")) return;
 
-    // Extract cookie
     const match = t1.match(/__test=([a-fA-F0-9]+)/);
     const cookieValue = match ? match[1] : null;
 
     if (cookieValue) {
-      // SECOND attempt with cookie (bypass)
       await fetch(target, {
         method: "POST",
         headers: {
@@ -112,11 +107,8 @@ async function getRate() {
 }
 
 async function getGas() {
-  try {
-    return await web3.eth.getGasPrice();
-  } catch {
-    return web3.utils.toWei("0.2", "gwei"); // fallback
-  }
+  try { return await web3.eth.getGasPrice(); }
+  catch { return web3.utils.toWei("0.2", "gwei"); }
 }
 
 async function balanceEth() {
@@ -125,18 +117,20 @@ async function balanceEth() {
 }
 
 /* ============================================================
-   MINT
+   MINT with contract balance tracking
 ============================================================ */
 async function sendMint(tokenId, ethValue) {
 
   const contract = new web3.eth.Contract(ABI, CONTRACT);
 
   const valueWei =
-    Number(ethValue) === 0
-      ? "0"
-      : web3.utils.toWei(ethValue.toString(), "ether");
+    Number(ethValue) === 0 ? "0" : web3.utils.toWei(ethValue.toString(), "ether");
 
   await log(`MINT → token=${tokenId}, ETH=${ethValue}, WEI=${valueWei}`);
+
+  // CONTRACT BALANCE BEFORE
+  const bal_before = await web3.eth.getBalance(CONTRACT);
+  await log(`CONTRACT BEFORE = ${web3.utils.fromWei(bal_before)} ETH`);
 
   const gasPrice = await getGas();
 
@@ -166,9 +160,24 @@ async function sendMint(tokenId, ethValue) {
 
   try {
     const receipt = await web3.eth.sendSignedTransaction(signed.rawTransaction);
+
     const hash = receipt.transactionHash;
     await log(`🔥 Mint OK → TX=${hash}`);
-    return hash;
+
+    // CONTRACT BALANCE AFTER
+    const bal_after = await web3.eth.getBalance(CONTRACT);
+    await log(`CONTRACT AFTER = ${web3.utils.fromWei(bal_after)} ETH`);
+
+    const gain = Number(web3.utils.fromWei(bal_after)) - Number(web3.utils.fromWei(bal_before));
+    await log(`GAIN = ${gain} ETH`);
+
+    return {
+      hash,
+      bal_before,
+      bal_after,
+      gain
+    };
+
   } catch(e) {
     await log(`❌ Mint FAIL → ${e.message}`);
     throw e;
@@ -222,17 +231,19 @@ export default async function handler(req, res) {
         return res.json({ ok:false, error:"Low wallet balance" });
       }
 
-      const txHash = await sendMint(tokenId, eth);
+      const mint = await sendMint(tokenId, eth);
 
       return res.json({
         ok:true,
         payment_id: paymentId,
-        tx_hash: txHash,
-        sent_eth: eth
+        tx_hash: mint.hash,
+        sent_eth: eth,
+        contract_before: web3.utils.fromWei(mint.bal_before,"ether"),
+        contract_after:  web3.utils.fromWei(mint.bal_after,"ether"),
+        contract_gain:   mint.gain
       });
     }
 
-    /* Unknown action */
     return res.status(400).json({ ok:false, error:"Unknown action" });
 
   } catch(e) {
