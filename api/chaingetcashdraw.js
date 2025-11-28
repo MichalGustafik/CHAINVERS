@@ -35,7 +35,7 @@ const ABI = [
   }
 ];
 
-/* ======================= HANDLER ======================= */
+/* ======================= MAIN HANDLER ======================= */
 export default async function handler(req, res) {
 
   try {
@@ -43,37 +43,40 @@ export default async function handler(req, res) {
     const contract = new w3.eth.Contract(ABI, CONTRACT);
 
     const action   = req.query.action;
-    const tokenId  = parseInt(req.query.tokenId || 0);
-    const amount   = parseFloat(req.query.amount || 0);
-    const gain     = parseFloat(req.query.gain || 0);   // prichádza z chaindraw.php
+    const tokenId  = parseInt(req.query.tokenId ?? 0);
+    const amount   = parseFloat(req.query.amount ?? 0);
+    const gain     = parseFloat(req.query.gain ?? 0);
     const user     = req.query.user;
 
     if (!action || !user || !tokenId)
-      return res.status(200).json({ status:"ERROR", error:"missing parameters" });
+      return res.status(200).json({ status:"ERROR", error:"missing_parameters" });
 
-    /* ============================================
-       PARTIAL WITHDRAW
-       ============================================ */
+    /* ==========================================================
+       PARTIAL WITHDRAW (NEČÍTA ORDERS.JSON!)
+       ========================================================== */
     if (action === "withdrawAmount") {
 
       const MIN = 0.0001;
-
       if (amount < MIN)
-        return res.status(200).json({ status:"ERROR", error:"too_small" });
+        return res.status(200).json({ status:"ERROR", error:"amount_too_small" });
 
       if (amount > gain)
-        return res.status(200).json({ status:"ERROR", error:"too_much" });
+        return res.status(200).json({ status:"ERROR", error:"amount_exceeds_gain" });
 
+      // Prevod na wei
       const valueWei = w3.utils.toWei(amount.toString(), "ether");
 
-      // Gas balance check
+      // Gas check
       const gasBalance = await w3.eth.getBalance(FROM);
       if (BigInt(gasBalance) < 5000000000000n)
-        return res.status(200).json({ status:"ERROR", error:"not_enough_gas" });
+        return res.status(200).json({ status:"ERROR", error:"gas_low" });
 
-      // Prepare TX
       const tx = contract.methods.withdrawToken(tokenId);
-      const gas = await tx.estimateGas({ from: FROM, value: valueWei });
+
+      const gas = await tx.estimateGas({
+        from: FROM,
+        value: valueWei
+      });
 
       const signed = await w3.eth.accounts.signTransaction(
         {
@@ -90,42 +93,12 @@ export default async function handler(req, res) {
 
       const remaining = parseFloat((gain - amount).toFixed(6));
 
-      // VRACIAME JSON
       return res.status(200).json({
         status: "SUCCESS",
-        tokenId: tokenId,
+        tokenId,
         withdrawn: amount,
-        remaining: remaining,
+        remaining,
         tx: receipt.transactionHash
-      });
-    }
-
-    /* ============================================
-       FULL WITHDRAW (BACKWARD COMPATIBLE)
-       ============================================ */
-    if (action === "withdraw") {
-
-      const valueWei = w3.utils.toWei(gain.toString(), "ether");
-
-      const tx = contract.methods.withdrawToken(tokenId);
-      const gas = await tx.estimateGas({ from: FROM, value: valueWei });
-
-      const signed = await w3.eth.accounts.signTransaction({
-        to: CONTRACT,
-        data: tx.encodeABI(),
-        gas,
-        from: FROM,
-        value: valueWei
-      }, PRIVATE_KEY);
-
-      const result = await w3.eth.sendSignedTransaction(signed.rawTransaction);
-
-      return res.status(200).json({
-        status: "SUCCESS",
-        tokenId: tokenId,
-        withdrawn: gain,
-        remaining: 0,
-        tx: result.transactionHash
       });
     }
 
