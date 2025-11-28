@@ -30,7 +30,7 @@ const ABI = [
     "inputs":[{"internalType":"uint256","name":"tokenId","type":"uint256"}],
     "name":"withdrawToken",
     "outputs":[],
-    "stateMutability":"payable",
+    "stateMutability":"nonpayable",
     "type":"function"
   }
 ];
@@ -52,7 +52,7 @@ export default async function handler(req, res) {
       return res.status(200).json({ status:"ERROR", error:"missing_parameters" });
 
     /* ==========================================================
-       PARTIAL WITHDRAW (NEČÍTA ORDERS.JSON!)
+       PARTIAL WITHDRAW – contract-based payout (value = 0)
        ========================================================== */
     if (action === "withdrawAmount") {
 
@@ -63,20 +63,10 @@ export default async function handler(req, res) {
       if (amount > gain)
         return res.status(200).json({ status:"ERROR", error:"amount_exceeds_gain" });
 
-      // Prevod na wei
-      const valueWei = w3.utils.toWei(amount.toString(), "ether");
-
-      // Gas check
-      const gasBalance = await w3.eth.getBalance(FROM);
-      if (BigInt(gasBalance) < 5000000000000n)
-        return res.status(200).json({ status:"ERROR", error:"gas_low" });
-
+      // CONTRACT WITHDRAW – NO VALUE SENT (ETH comes from contract)
       const tx = contract.methods.withdrawToken(tokenId);
 
-      const gas = await tx.estimateGas({
-        from: FROM,
-        value: valueWei
-      });
+      const gas = await tx.estimateGas({ from: FROM });
 
       const signed = await w3.eth.accounts.signTransaction(
         {
@@ -84,7 +74,7 @@ export default async function handler(req, res) {
           data: tx.encodeABI(),
           gas: gas,
           from: FROM,
-          value: valueWei
+          value: "0"
         },
         PRIVATE_KEY
       );
