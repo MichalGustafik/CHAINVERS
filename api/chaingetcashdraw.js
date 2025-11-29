@@ -1,22 +1,19 @@
-console.log("=== BOOT: WITHDRAW BACKEND (contract-level) ===");
+console.log("=== BOOT: ALWAYS-SYNC WITHDRAW BACKEND ===");
 
 import Web3 from "web3";
+import axios from "axios";
 
 // ============================================================
-// SAFE BODY PARSER FOR VERCEL
+// SAFE JSON PARSER FOR VERCEL
 // ============================================================
 async function parseBody(req) {
-  return new Promise((resolve) => {
+  return new Promise(resolve => {
     try {
-      let data = "";
-      req.on("data", chunk => data += chunk);
+      let raw = "";
+      req.on("data", c => raw += c);
       req.on("end", () => {
-        try {
-          const json = JSON.parse(data || "{}");
-          resolve(json);
-        } catch {
-          resolve({});
-        }
+        try { resolve(JSON.parse(raw)); }
+        catch { resolve({}); }
       });
     } catch {
       resolve({});
@@ -36,31 +33,44 @@ const FALLBACKS = [
 ];
 
 async function initWeb3() {
-  const rpcs = [PRIMARY, ...FALLBACKS];
-  for (let rpc of rpcs) {
-    if (!rpc) continue;
+  const list = [PRIMARY, ...FALLBACKS];
+  for (let rpc of list) {
     try {
       const w3 = new Web3(rpc);
       await w3.eth.getBlockNumber();
       console.log("[RPC] OK:", rpc);
       return w3;
-    } catch (e) {
-      console.log("[RPC] FAIL:", rpc, e.message);
+    } catch(e) {
+      console.log("[RPC FAIL]", rpc, e.message);
     }
   }
   throw new Error("No working RPC");
 }
 
 // ============================================================
-// ABI – only withdraw()
+// ABI: originBalance + backendCreditOrigin + withdrawOrigin
 // ============================================================
 const ABI = [
   {
-    "inputs": [],
-    "name": "withdraw",
-    "outputs": [],
-    "stateMutability": "nonpayable",
-    "type": "function"
+    "inputs":[{"internalType":"uint256","name":"","type":"uint256"}],
+    "name":"originBalance",
+    "outputs":[{"internalType":"uint256","name":"","type":"uint256"}],
+    "stateMutability":"view","type":"function"
+  },
+  {
+    "inputs":[
+      {"internalType":"uint256","name":"id","type":"uint256"},
+      {"internalType":"uint256","name":"amt","type":"uint256"}
+    ],
+    "name":"backendCreditOrigin",
+    "outputs":[],
+    "stateMutability":"nonpayable","type":"function"
+  },
+  {
+    "inputs":[{"internalType":"uint256","name":"id","type":"uint256"}],
+    "name":"withdrawOrigin",
+    "outputs":[],
+    "stateMutability":"nonpayable","type":"function"
   }
 ];
 
@@ -68,75 +78,97 @@ const ABI = [
 // MAIN HANDLER
 // ============================================================
 export default async function handler(req, res) {
-
-  console.log("=== API CALL: CONTRACT WITHDRAW ===");
+  console.log("=== API CALL (SYNC OR WITHDRAW) ===");
 
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Headers", "*");
 
-  // 💥 FIX: safe JSON parser
   const body = await parseBody(req);
+  const action = body.action || req.query.action;
 
-  console.log("Parsed body:", body);
+  console.log("ACTION:", action);
 
   try {
-    const amount = body.amount;
-    const userWallet = body.userWallet;
-
-    if (!amount || !userWallet) {
-      console.log("INVALID REQUEST:", body);
-      return res.json({ ok:false, error:"Missing amount or wallet" });
-    }
-
-    console.log("Requested withdraw:", amount);
-    console.log("User wallet:", userWallet);
-
     const web3 = await initWeb3();
     const contract = new web3.eth.Contract(ABI, process.env.CONTRACT_ADDRESS);
 
     const owner = web3.eth.accounts.privateKeyToAccount(process.env.PRIVATE_KEY);
     web3.eth.accounts.wallet.add(owner);
 
-    const contractBalWei = await web3.eth.getBalance(process.env.CONTRACT_ADDRESS);
-    const contractBal = Number(contractBalWei) / 1e18;
+    // ========================================================
+    // ACTION: SYNC
+    // ========================================================
+    if (action === "sync") {
+      const user = body.user;
+      if (!user) return res.json({ ok:false, error:"No user" });
 
-    console.log("Contract balance:", contractBal);
+      const ordersURL = `${process.env.INF_FREE_URL}/get_orders_raw.php?user=${user}`;
+      console.log("Loading orders:", ordersURL);
 
-    if (Number(amount) > contractBal) {
-      console.log("ERROR: amount > balance");
-      return res.json({ ok:false, error:"not enough funds in contract" });
+      const orders = await axios.get(ordersURL).then(r => r.data);
+      console.log("Orders loaded:", orders.length);
+
+      const synced = [];
+
+      for (const o of orders) {
+        const tid = o.token_id;
+        const gain = Number(o.contract_gain || 0);
+
+        if (!gain || gain <= 0) continue;
+
+        const localWei = BigInt(Math.floor(gain * 1e18));
+        const chainWei = BigInt(await contract.methods.originBalance(tid).call());
+
+        if (localWei > chainWei) {
+          const diff = localWei - chainWei;
+
+          console.log(`SYNC → Token ${tid}: add ${diff} wei`);
+
+          const method = contract.methods.backendCreditOrigin(tid, diff);
+
+          const gas = await method.estimateGas({ from: owner.address });
+
+          const tx = {
+            from: owner.address,
+            to: process.env.CONTRACT_ADDRESS,
+            gas,
+            data: method.encodeABI()
+          };
+
+          const signed = await web3.eth.accounts.signTransaction(tx, process.env.PRIVATE_KEY);
+          const sent = await web3.eth.sendSignedTransaction(signed.rawTransaction);
+
+          synced.push({ tokenId: tid, addedWei: diff.toString(), tx: sent.transactionHash });
+        }
+      }
+
+      return res.json({ ok:true, synced });
     }
 
-    const method = contract.methods.withdraw();
+    // ========================================================
+    // ACTION: WITHDRAW
+    // ========================================================
+    if (action === "withdraw") {
+      const { tokenId } = body;
+      console.log("WITHDRAW token:", tokenId);
 
-    let gas;
-    try {
-      gas = await method.estimateGas({ from: owner.address });
-    } catch (e) {
-      console.log("GAS FAIL:", e.message);
-      return res.json({ ok:false, error:"gas estimation fail: "+e.message });
+      const method = contract.methods.withdrawOrigin(tokenId);
+      const gas = await method.estimateGas({ from: owner.address });
+
+      const tx = {
+        from: owner.address,
+        to: process.env.CONTRACT_ADDRESS,
+        gas,
+        data: method.encodeABI()
+      };
+
+      const signed = await web3.eth.accounts.signTransaction(tx, process.env.PRIVATE_KEY);
+      const sent = await web3.eth.sendSignedTransaction(signed.rawTransaction);
+
+      return res.json({ ok:true, tx: sent.transactionHash });
     }
 
-    console.log("Gas:", gas);
-
-    const tx = {
-      from: owner.address,
-      to: process.env.CONTRACT_ADDRESS,
-      gas,
-      data: method.encodeABI()
-    };
-
-    const signed = await web3.eth.accounts.signTransaction(tx, process.env.PRIVATE_KEY);
-    const sent = await web3.eth.sendSignedTransaction(signed.rawTransaction);
-
-    console.log("TX HASH:", sent.transactionHash);
-
-    return res.json({
-      ok: true,
-      tx: sent.transactionHash,
-      withdrawn: amount,
-      sentTo: userWallet
-    });
+    return res.json({ ok:false, error:"Unknown action" });
 
   } catch (e) {
     console.log("FATAL:", e.message);
