@@ -5,7 +5,7 @@
   "description": "Backend API for minting NFTs on Base Sepolia using raw transaction signing (no ethers.js).",
   "scripts": {
     "dev": "vercel dev",
-    "start": "node api/mintchain.js"
+   // "start": "node api/mintchain.js"
   },
   "keywords": [
     "nft",
