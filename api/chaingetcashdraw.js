@@ -3,6 +3,28 @@ console.log("=== BOOT: WITHDRAW BACKEND (contract-level) ===");
 import Web3 from "web3";
 
 // ============================================================
+// SAFE BODY PARSER FOR VERCEL
+// ============================================================
+async function parseBody(req) {
+  return new Promise((resolve) => {
+    try {
+      let data = "";
+      req.on("data", chunk => data += chunk);
+      req.on("end", () => {
+        try {
+          const json = JSON.parse(data || "{}");
+          resolve(json);
+        } catch {
+          resolve({});
+        }
+      });
+    } catch {
+      resolve({});
+    }
+  });
+}
+
+// ============================================================
 // RPC FALLBACK
 // ============================================================
 const PRIMARY = process.env.PROVIDER_URL;
@@ -15,7 +37,6 @@ const FALLBACKS = [
 
 async function initWeb3() {
   const rpcs = [PRIMARY, ...FALLBACKS];
-
   for (let rpc of rpcs) {
     if (!rpc) continue;
     try {
@@ -23,7 +44,7 @@ async function initWeb3() {
       await w3.eth.getBlockNumber();
       console.log("[RPC] OK:", rpc);
       return w3;
-    } catch(e) {
+    } catch (e) {
       console.log("[RPC] FAIL:", rpc, e.message);
     }
   }
@@ -53,10 +74,21 @@ export default async function handler(req, res) {
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Headers", "*");
 
-  try {
-    const { amount, userWallet } = req.body;
+  // 💥 FIX: safe JSON parser
+  const body = await parseBody(req);
 
-    console.log("Requested withdraw:", amount, "ETH");
+  console.log("Parsed body:", body);
+
+  try {
+    const amount = body.amount;
+    const userWallet = body.userWallet;
+
+    if (!amount || !userWallet) {
+      console.log("INVALID REQUEST:", body);
+      return res.json({ ok:false, error:"Missing amount or wallet" });
+    }
+
+    console.log("Requested withdraw:", amount);
     console.log("User wallet:", userWallet);
 
     const web3 = await initWeb3();
@@ -68,17 +100,22 @@ export default async function handler(req, res) {
     const contractBalWei = await web3.eth.getBalance(process.env.CONTRACT_ADDRESS);
     const contractBal = Number(contractBalWei) / 1e18;
 
-    console.log("Contract balance:", contractBal, "ETH");
+    console.log("Contract balance:", contractBal);
 
-    // LIMIT
     if (Number(amount) > contractBal) {
-      console.log("ERROR: amount > contract balance");
+      console.log("ERROR: amount > balance");
       return res.json({ ok:false, error:"not enough funds in contract" });
     }
 
-    // SEND TX
     const method = contract.methods.withdraw();
-    const gas = await method.estimateGas({ from: owner.address });
+
+    let gas;
+    try {
+      gas = await method.estimateGas({ from: owner.address });
+    } catch (e) {
+      console.log("GAS FAIL:", e.message);
+      return res.json({ ok:false, error:"gas estimation fail: "+e.message });
+    }
 
     console.log("Gas:", gas);
 
@@ -97,11 +134,11 @@ export default async function handler(req, res) {
     return res.json({
       ok: true,
       tx: sent.transactionHash,
-      sentTo: userWallet,
-      withdrawn: amount
+      withdrawn: amount,
+      sentTo: userWallet
     });
 
-  } catch(e) {
+  } catch (e) {
     console.log("FATAL:", e.message);
     return res.json({ ok:false, error:e.message });
   }
