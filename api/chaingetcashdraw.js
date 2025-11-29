@@ -2,14 +2,15 @@ import Web3 from "web3";
 
 const RPC = "https://mainnet.base.org";
 const CONTRACT = process.env.CONTRACT_ADDRESS;
+
 const ABI = [
-  // MINIMUM needed ABI for withdraw system
+  // essential read
   {"inputs":[],"name":"tokenIdCounter","outputs":[{"type":"uint256"}],"stateMutability":"view","type":"function"},
   {"inputs":[{"type":"uint256"}],"name":"ownerOf","outputs":[{"type":"address"}],"stateMutability":"view","type":"function"},
   {"inputs":[{"type":"uint256"}],"name":"copyToOriginal","outputs":[{"type":"uint256"}],"stateMutability":"view","type":"function"},
   {"inputs":[{"type":"uint256"}],"name":"originBalance","outputs":[{"type":"uint256"}],"stateMutability":"view","type":"function"},
 
-  // withdrawOrigin(id)
+  // withdrawOrigin
   {
     "inputs":[{"internalType":"uint256","name":"id","type":"uint256"}],
     "name":"withdrawOrigin",
@@ -19,7 +20,6 @@ const ABI = [
   }
 ];
 
-// INIT
 const web3 = new Web3(RPC);
 const contract = new web3.eth.Contract(ABI, CONTRACT);
 
@@ -31,12 +31,12 @@ export default async function handler(req, res) {
 
   try {
 
-    /* ============================================================
-       1) LIST TOKENS (origin only)
-    ============================================================ */
+    /* ---------------------------------------------------------
+       A1) RETURN ONLY ORIGIN TOKENS USER OWNS
+    ----------------------------------------------------------*/
     if (action === "listTokens") {
       const wallet = req.query.wallet?.toLowerCase();
-      if (!wallet) return res.status(400).json({error:"no wallet"});
+      if (!wallet) return res.json({ tokens: [] });
 
       const counter = await contract.methods.tokenIdCounter().call();
       let tokens = [];
@@ -47,33 +47,32 @@ export default async function handler(req, res) {
           if (owner !== wallet) continue;
 
           const parent = await contract.methods.copyToOriginal(id).call();
-          if (parent != 0) continue; // COPY → skip
+          if (parent != 0) continue; // skip copy
 
           tokens.push(id);
-        } catch {}
+        } catch (err) {
+          // ignore invalid ids
+        }
       }
 
-      return res.json({tokens});
+      return res.json({ tokens });
     }
 
-    /* ============================================================
-       2) GET BALANCE (originBalance)
-    ============================================================ */
+    /* ---------------------------------------------------------
+       A2) GET ORIGIN BALANCE
+    ----------------------------------------------------------*/
     if (action === "getBalance") {
       const id = req.query.id;
       const bal = await contract.methods.originBalance(id).call();
-      return res.json({balance: bal});
+      return res.json({ balance: bal });
     }
 
-    /* ============================================================
-       3) PREPARE WITHDRAW (raw tx)
-    ============================================================ */
+    /* ---------------------------------------------------------
+       A3) PREPARE RAW WITHDRAW TX (user signs)
+    ----------------------------------------------------------*/
     if (action === "prepareWithdraw") {
       const id = req.body.id;
       const from = req.body.wallet;
-
-      if (!id || !from)
-        return res.status(400).json({error:"missing id/wallet"});
 
       const txData = contract.methods.withdrawOrigin(id).encodeABI();
 
@@ -81,26 +80,24 @@ export default async function handler(req, res) {
         from,
         to: CONTRACT,
         data: txData,
-        gas: 120000 // safe
+        gas: 150000
       };
 
-      return res.json({tx});
+      return res.json({ tx });
     }
 
-    /* ============================================================
-       4) BROADCAST SIGNED TX
-    ============================================================ */
+    /* ---------------------------------------------------------
+       A4) BROADCAST SIGNED TX
+    ----------------------------------------------------------*/
     if (action === "broadcast") {
       const raw = req.body.signedTx;
-      if (!raw) return res.status(400).json({error:"no raw tx"});
-
       const receipt = await web3.eth.sendSignedTransaction(raw);
-      return res.json({ok:true, hash: receipt.transactionHash});
+      return res.json({ ok: true, hash: receipt.transactionHash });
     }
 
-    return res.status(400).json({error:"unknown action"});
+    return res.json({ error: "unknown action" });
 
   } catch (e) {
-    return res.status(500).json({error:e.message});
+    return res.json({ error: e.message });
   }
 }
