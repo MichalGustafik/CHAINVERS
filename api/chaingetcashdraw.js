@@ -1,46 +1,41 @@
+console.log("=== BOOT: chaingetcashdraw.js LOADED ===");
+
 import Web3 from "web3";
 
 // ============================================================
-//  RPC FALLBACKS (primárny z ENV, ostatné automaticky ako backup)
+// RPC FALLBACK SYSTEM
 // ============================================================
-const PRIMARY_RPC = process.env.PROVIDER_URL;
-
-const FALLBACK_RPCS = [
+const PRIMARY = process.env.PROVIDER_URL || "";
+const FALLBACKS = [
   "https://base.llamarpc.com",
-  "https://base.blockpi.network/v1/rpc/public",
   "https://base.publicnode.com",
+  "https://base.blockpi.network/v1/rpc/public",
   "https://rpc.ankr.com/base"
 ];
 
-// ============================================================
-function createWeb3Instance(rpc) {
-  return new Web3(new Web3.providers.HttpProvider(rpc, {
-    timeout: 12000,
-  }));
-}
-
-// ============================================================
-//   SAFE WEB3 INITIALIZER (tries ENV → fallback 1 → fallback 2 → ...)
-// ============================================================
 async function initWeb3() {
-  const rpcList = [PRIMARY_RPC, ...FALLBACK_RPCS];
+  const rpcs = [PRIMARY, ...FALLBACKS];
 
-  for (let rpc of rpcList) {
+  for (let rpc of rpcs) {
+    if (!rpc) continue;
+
+    console.log("[RPC] Trying:", rpc);
+
     try {
-      const w3 = createWeb3Instance(rpc);
+      const w3 = new Web3(rpc);
       await w3.eth.net.isListening();
-      console.log("RPC OK:", rpc);
+      console.log("[RPC] SUCCESS:", rpc);
       return w3;
     } catch (e) {
-      console.log("RPC FAIL:", rpc);
+      console.log("[RPC] FAIL:", rpc, e.message);
     }
   }
 
-  throw new Error("No working RPC endpoint available.");
+  throw new Error("No RPC works.");
 }
 
 // ============================================================
-// ABI (origin/copy withdraw kontrakt CHAINVERS)
+// ABI REQUIRED FOR WITHDRAW + BALANCE
 // ============================================================
 const ABI = [
   {
@@ -86,57 +81,78 @@ const ABI = [
 // ============================================================
 export default async function handler(req, res) {
 
+  console.log("=== API CALL chaingetcashdraw ===");
+
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Headers", "*");
 
   try {
+    console.log("ENV PROVIDER_URL =", process.env.PROVIDER_URL);
+    console.log("ENV CONTRACT_ADDRESS =", process.env.CONTRACT_ADDRESS);
+    console.log("ENV PRIVATE_KEY (exists) =", !!process.env.PRIVATE_KEY);
 
-    // INIT WEB3 S FALLBACKOM
     const web3 = await initWeb3();
-    const contract = new web3.eth.Contract(ABI, process.env.CONTRACT_ADDRESS);
+    console.log("[INIT] Web3 initialized.");
 
-    // LOAD OWNER WALLET
+    const contract = new web3.eth.Contract(ABI, process.env.CONTRACT_ADDRESS);
+    console.log("[INIT] Contract OK.");
+
     const account = web3.eth.accounts.privateKeyToAccount(process.env.PRIVATE_KEY);
     web3.eth.accounts.wallet.add(account);
+    console.log("[INIT] OWNER =", account.address);
 
     const action = req.query.action;
+    console.log("[ACTION]", action);
 
-    // ========================================================
-    // BALANCE REQUEST
-    // ========================================================
+    // ======================================================
+    // BALANCE
+    // ======================================================
     if (action === "balance") {
       const id = req.query.id;
+      console.log("[BALANCE] id =", id);
 
-      let isCopy = await contract.methods.copyToOriginal(id).call();
+      const isCopy = await contract.methods.copyToOriginal(id).call();
+      console.log("[BALANCE] copyToOriginal =", isCopy);
 
       if (isCopy === "0") {
         const bal = await contract.methods.originBalance(id).call();
+        console.log("[BALANCE] ORIGIN BAL =", bal);
         return res.json({ ok:true, type:"origin", balance:bal });
       } else {
         const bal = await contract.methods.copyBalance(id).call();
+        console.log("[BALANCE] COPY BAL =", bal);
         return res.json({ ok:true, type:"copy", balance:bal });
       }
     }
 
-    // ========================================================
-    // WITHDRAW (COPYMINT OPAČNE)
-    // ========================================================
+    // ======================================================
+    // WITHDRAW
+    // ======================================================
     if (action === "withdraw") {
-
       let { id } = req.body;
       id = Number(id);
 
-      let isCopy = await contract.methods.copyToOriginal(id).call();
+      console.log("[WITHDRAW] ID =", id);
+
+      const isCopy = await contract.methods.copyToOriginal(id).call();
+      console.log("[WITHDRAW] isCopy =", isCopy);
 
       const method =
         (isCopy === "0")
           ? contract.methods.withdrawOrigin(id)
           : contract.methods.withdrawCopy(id);
 
-      // GAS ESTIMATE
-      const gas = await method.estimateGas({ from: account.address });
+      console.log("[WITHDRAW] selected method:", isCopy === "0" ? "withdrawOrigin" : "withdrawCopy");
 
-      // TX
+      let gas;
+      try {
+        gas = await method.estimateGas({ from: account.address });
+        console.log("[GAS ESTIMATE] =", gas);
+      } catch (e) {
+        console.log("[GAS ERROR]", e.message);
+        return res.json({ ok:false, error:"GAS_FAIL: " + e.message });
+      }
+
       const tx = {
         from: account.address,
         to: process.env.CONTRACT_ADDRESS,
@@ -144,19 +160,32 @@ export default async function handler(req, res) {
         data: method.encodeABI()
       };
 
-      const signed = await web3.eth.accounts.signTransaction(tx, process.env.PRIVATE_KEY);
-      const sent = await web3.eth.sendSignedTransaction(signed.rawTransaction);
+      console.log("[TX] Prepared:", tx);
 
-      return res.json({
-        ok:true,
-        tx: sent.transactionHash,
-        type: isCopy === "0" ? "origin" : "copy"
-      });
+      try {
+        const signed = await web3.eth.accounts.signTransaction(tx, process.env.PRIVATE_KEY);
+        console.log("[TX] Signed.");
+
+        const sent = await web3.eth.sendSignedTransaction(signed.rawTransaction);
+        console.log("[TX] SENT:", sent.transactionHash);
+
+        return res.json({
+          ok:true,
+          tx: sent.transactionHash,
+          type: isCopy === "0" ? "origin" : "copy"
+        });
+
+      } catch (e) {
+        console.log("[SEND ERROR]", e.message);
+        return res.json({ ok:false, error:e.message });
+      }
     }
 
+    console.log("[ERROR] UNKNOWN ACTION");
     return res.json({ ok:false, error:"unknown action" });
 
   } catch (e) {
+    console.log("[FATAL ERROR]", e.message);
     return res.json({ ok:false, error:e.message });
   }
 }
