@@ -1,103 +1,82 @@
 import Web3 from "web3";
 
-const RPC = "https://mainnet.base.org";
+const RPC = process.env.PROVIDER_URL;        // Infura / Base RPC
+const PRIVATE_KEY = process.env.PRIVATE_KEY; // tvoje owner PK
 const CONTRACT = process.env.CONTRACT_ADDRESS;
 
-const ABI = [
-  // essential read
-  {"inputs":[],"name":"tokenIdCounter","outputs":[{"type":"uint256"}],"stateMutability":"view","type":"function"},
-  {"inputs":[{"type":"uint256"}],"name":"ownerOf","outputs":[{"type":"address"}],"stateMutability":"view","type":"function"},
-  {"inputs":[{"type":"uint256"}],"name":"copyToOriginal","outputs":[{"type":"uint256"}],"stateMutability":"view","type":"function"},
-  {"inputs":[{"type":"uint256"}],"name":"originBalance","outputs":[{"type":"uint256"}],"stateMutability":"view","type":"function"},
+const web3 = new Web3(RPC);
 
-  // withdrawOrigin
-  {
-    "inputs":[{"internalType":"uint256","name":"id","type":"uint256"}],
-    "name":"withdrawOrigin",
-    "outputs":[],
-    "stateMutability":"nonpayable",
-    "type":"function"
-  }
+const ABI = [
+  // balance reads
+  {"inputs":[{"type":"uint256"}],"name":"originBalance","outputs":[{"type":"uint256"}],"stateMutability":"view","type":"function"},
+  {"inputs":[{"type":"uint256"}],"name":"copyBalance","outputs":[{"type":"uint256"}],"stateMutability":"view","type":"function"},
+  {"inputs":[{"type":"uint256"}],"name":"copyToOriginal","outputs":[{"type":"uint256"}],"stateMutability":"view","type":"function"},
+
+  // withdraw functions
+  {"inputs":[{"type":"uint256","name":"id"}],"name":"withdrawOrigin","outputs":[],"stateMutability":"nonpayable","type":"function"},
+  {"inputs":[{"type":"uint256","name":"id"}],"name":"withdrawCopy","outputs":[],"stateMutability":"nonpayable","type":"function"},
 ];
 
-const web3 = new Web3(RPC);
 const contract = new web3.eth.Contract(ABI, CONTRACT);
+const account = web3.eth.accounts.privateKeyToAccount(PRIVATE_KEY);
+web3.eth.accounts.wallet.add(account);
 
 export default async function handler(req, res) {
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Headers", "*");
 
-  const action = req.query.action;
-
   try {
+    const action = req.query.action;
 
-    /* ---------------------------------------------------------
-       A1) RETURN ONLY ORIGIN TOKENS USER OWNS
-    ----------------------------------------------------------*/
-    if (action === "listTokens") {
-      const wallet = req.query.wallet?.toLowerCase();
-      if (!wallet) return res.json({ tokens: [] });
-
-      const counter = await contract.methods.tokenIdCounter().call();
-      let tokens = [];
-
-      for (let id = 1; id < counter; id++) {
-        try {
-          const owner = (await contract.methods.ownerOf(id).call()).toLowerCase();
-          if (owner !== wallet) continue;
-
-          const parent = await contract.methods.copyToOriginal(id).call();
-          if (parent != 0) continue; // skip copy
-
-          tokens.push(id);
-        } catch (err) {
-          // ignore invalid ids
-        }
-      }
-
-      return res.json({ tokens });
-    }
-
-    /* ---------------------------------------------------------
-       A2) GET ORIGIN BALANCE
-    ----------------------------------------------------------*/
-    if (action === "getBalance") {
+    /* ======================================================
+       GET ONCHAIN BALANCE (origin or copy)
+    ======================================================= */
+    if (action === "balance") {
       const id = req.query.id;
-      const bal = await contract.methods.originBalance(id).call();
-      return res.json({ balance: bal });
+      const isCopy = await contract.methods.copyToOriginal(id).call();
+      if (isCopy == 0) {
+        const bal = await contract.methods.originBalance(id).call();
+        return res.json({ type:"origin", balance: bal });
+      } else {
+        const bal = await contract.methods.copyBalance(id).call();
+        return res.json({ type:"copy", balance: bal });
+      }
     }
 
-    /* ---------------------------------------------------------
-       A3) PREPARE RAW WITHDRAW TX (user signs)
-    ----------------------------------------------------------*/
-    if (action === "prepareWithdraw") {
-      const id = req.body.id;
-      const from = req.body.wallet;
+    /* ======================================================
+       WITHDRAW (backend signs, user pays 0 gas)
+    ======================================================= */
+    if (action === "withdraw") {
+      let { id, amountWei } = req.body;
 
-      const txData = contract.methods.withdrawOrigin(id).encodeABI();
+      id = Number(id);
+      amountWei = String(amountWei);
+
+      // zisti či je origin alebo copy
+      const isCopy = await contract.methods.copyToOriginal(id).call();
+      const method = (isCopy == 0)
+          ? contract.methods.withdrawOrigin(id)
+          : contract.methods.withdrawCopy(id);
+
+      const gas = await method.estimateGas({ from: account.address });
+      const txData = method.encodeABI();
 
       const tx = {
-        from,
+        from: account.address,
         to: CONTRACT,
-        data: txData,
-        gas: 150000
+        gas,
+        data: txData
       };
 
-      return res.json({ tx });
+      const signed = await web3.eth.accounts.signTransaction(tx, PRIVATE_KEY);
+      const sent = await web3.eth.sendSignedTransaction(signed.rawTransaction);
+
+      return res.json({ ok:true, tx: sent.transactionHash });
     }
 
-    /* ---------------------------------------------------------
-       A4) BROADCAST SIGNED TX
-    ----------------------------------------------------------*/
-    if (action === "broadcast") {
-      const raw = req.body.signedTx;
-      const receipt = await web3.eth.sendSignedTransaction(raw);
-      return res.json({ ok: true, hash: receipt.transactionHash });
-    }
-
-    return res.json({ error: "unknown action" });
+    return res.json({ error:"unknown action" });
 
   } catch (e) {
-    return res.json({ error: e.message });
+    return res.json({ error:e.message });
   }
 }
