@@ -1,11 +1,11 @@
-console.log("=== BOOT: chaingetcashdraw.js LOADED ===");
+console.log("=== BOOT: WITHDRAW BACKEND (contract-level) ===");
 
 import Web3 from "web3";
 
 // ============================================================
-// RPC FALLBACK SYSTEM
+// RPC FALLBACK
 // ============================================================
-const PRIMARY = process.env.PROVIDER_URL || "";
+const PRIMARY = process.env.PROVIDER_URL;
 const FALLBACKS = [
   "https://base.llamarpc.com",
   "https://base.publicnode.com",
@@ -18,174 +18,91 @@ async function initWeb3() {
 
   for (let rpc of rpcs) {
     if (!rpc) continue;
-
-    console.log("[RPC] Trying:", rpc);
-
     try {
       const w3 = new Web3(rpc);
-      await w3.eth.net.isListening();
-      console.log("[RPC] SUCCESS:", rpc);
+      await w3.eth.getBlockNumber();
+      console.log("[RPC] OK:", rpc);
       return w3;
-    } catch (e) {
+    } catch(e) {
       console.log("[RPC] FAIL:", rpc, e.message);
     }
   }
-
-  throw new Error("No RPC works.");
+  throw new Error("No working RPC");
 }
 
 // ============================================================
-// ABI REQUIRED FOR WITHDRAW + BALANCE
+// ABI – only withdraw()
 // ============================================================
 const ABI = [
   {
-    "inputs":[{"internalType":"uint256","name":"","type":"uint256"}],
-    "name":"originBalance",
-    "outputs":[{"internalType":"uint256","name":"","type":"uint256"}],
-    "stateMutability":"view",
-    "type":"function"
-  },
-  {
-    "inputs":[{"internalType":"uint256","name":"","type":"uint256"}],
-    "name":"copyBalance",
-    "outputs":[{"internalType":"uint256","name":"","type":"uint256"}],
-    "stateMutability":"view",
-    "type":"function"
-  },
-  {
-    "inputs":[{"internalType":"uint256","name":"","type":"uint256"}],
-    "name":"copyToOriginal",
-    "outputs":[{"internalType":"uint256","name":"","type":"uint256"}],
-    "stateMutability":"view",
-    "type":"function"
-  },
-  {
-    "inputs":[{"internalType":"uint256","name":"id","type":"uint256"}],
-    "name":"withdrawOrigin",
-    "outputs":[],
-    "stateMutability":"nonpayable",
-    "type":"function"
-  },
-  {
-    "inputs":[{"internalType":"uint256","name":"id","type":"uint256"}],
-    "name":"withdrawCopy",
-    "outputs":[],
-    "stateMutability":"nonpayable",
-    "type":"function"
+    "inputs": [],
+    "name": "withdraw",
+    "outputs": [],
+    "stateMutability": "nonpayable",
+    "type": "function"
   }
 ];
-
 
 // ============================================================
 // MAIN HANDLER
 // ============================================================
 export default async function handler(req, res) {
 
-  console.log("=== API CALL chaingetcashdraw ===");
+  console.log("=== API CALL: CONTRACT WITHDRAW ===");
 
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Headers", "*");
 
   try {
-    console.log("ENV PROVIDER_URL =", process.env.PROVIDER_URL);
-    console.log("ENV CONTRACT_ADDRESS =", process.env.CONTRACT_ADDRESS);
-    console.log("ENV PRIVATE_KEY (exists) =", !!process.env.PRIVATE_KEY);
+    const { amount, userWallet } = req.body;
+
+    console.log("Requested withdraw:", amount, "ETH");
+    console.log("User wallet:", userWallet);
 
     const web3 = await initWeb3();
-    console.log("[INIT] Web3 initialized.");
-
     const contract = new web3.eth.Contract(ABI, process.env.CONTRACT_ADDRESS);
-    console.log("[INIT] Contract OK.");
 
-    const account = web3.eth.accounts.privateKeyToAccount(process.env.PRIVATE_KEY);
-    web3.eth.accounts.wallet.add(account);
-    console.log("[INIT] OWNER =", account.address);
+    const owner = web3.eth.accounts.privateKeyToAccount(process.env.PRIVATE_KEY);
+    web3.eth.accounts.wallet.add(owner);
 
-    const action = req.query.action;
-    console.log("[ACTION]", action);
+    const contractBalWei = await web3.eth.getBalance(process.env.CONTRACT_ADDRESS);
+    const contractBal = Number(contractBalWei) / 1e18;
 
-    // ======================================================
-    // BALANCE
-    // ======================================================
-    if (action === "balance") {
-      const id = req.query.id;
-      console.log("[BALANCE] id =", id);
+    console.log("Contract balance:", contractBal, "ETH");
 
-      const isCopy = await contract.methods.copyToOriginal(id).call();
-      console.log("[BALANCE] copyToOriginal =", isCopy);
-
-      if (isCopy === "0") {
-        const bal = await contract.methods.originBalance(id).call();
-        console.log("[BALANCE] ORIGIN BAL =", bal);
-        return res.json({ ok:true, type:"origin", balance:bal });
-      } else {
-        const bal = await contract.methods.copyBalance(id).call();
-        console.log("[BALANCE] COPY BAL =", bal);
-        return res.json({ ok:true, type:"copy", balance:bal });
-      }
+    // LIMIT
+    if (Number(amount) > contractBal) {
+      console.log("ERROR: amount > contract balance");
+      return res.json({ ok:false, error:"not enough funds in contract" });
     }
 
-    // ======================================================
-    // WITHDRAW
-    // ======================================================
-    if (action === "withdraw") {
-      let { id } = req.body;
-      id = Number(id);
+    // SEND TX
+    const method = contract.methods.withdraw();
+    const gas = await method.estimateGas({ from: owner.address });
 
-      console.log("[WITHDRAW] ID =", id);
+    console.log("Gas:", gas);
 
-      const isCopy = await contract.methods.copyToOriginal(id).call();
-      console.log("[WITHDRAW] isCopy =", isCopy);
+    const tx = {
+      from: owner.address,
+      to: process.env.CONTRACT_ADDRESS,
+      gas,
+      data: method.encodeABI()
+    };
 
-      const method =
-        (isCopy === "0")
-          ? contract.methods.withdrawOrigin(id)
-          : contract.methods.withdrawCopy(id);
+    const signed = await web3.eth.accounts.signTransaction(tx, process.env.PRIVATE_KEY);
+    const sent = await web3.eth.sendSignedTransaction(signed.rawTransaction);
 
-      console.log("[WITHDRAW] selected method:", isCopy === "0" ? "withdrawOrigin" : "withdrawCopy");
+    console.log("TX HASH:", sent.transactionHash);
 
-      let gas;
-      try {
-        gas = await method.estimateGas({ from: account.address });
-        console.log("[GAS ESTIMATE] =", gas);
-      } catch (e) {
-        console.log("[GAS ERROR]", e.message);
-        return res.json({ ok:false, error:"GAS_FAIL: " + e.message });
-      }
+    return res.json({
+      ok: true,
+      tx: sent.transactionHash,
+      sentTo: userWallet,
+      withdrawn: amount
+    });
 
-      const tx = {
-        from: account.address,
-        to: process.env.CONTRACT_ADDRESS,
-        gas,
-        data: method.encodeABI()
-      };
-
-      console.log("[TX] Prepared:", tx);
-
-      try {
-        const signed = await web3.eth.accounts.signTransaction(tx, process.env.PRIVATE_KEY);
-        console.log("[TX] Signed.");
-
-        const sent = await web3.eth.sendSignedTransaction(signed.rawTransaction);
-        console.log("[TX] SENT:", sent.transactionHash);
-
-        return res.json({
-          ok:true,
-          tx: sent.transactionHash,
-          type: isCopy === "0" ? "origin" : "copy"
-        });
-
-      } catch (e) {
-        console.log("[SEND ERROR]", e.message);
-        return res.json({ ok:false, error:e.message });
-      }
-    }
-
-    console.log("[ERROR] UNKNOWN ACTION");
-    return res.json({ ok:false, error:"unknown action" });
-
-  } catch (e) {
-    console.log("[FATAL ERROR]", e.message);
+  } catch(e) {
+    console.log("FATAL:", e.message);
     return res.json({ ok:false, error:e.message });
   }
 }
