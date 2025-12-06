@@ -1,40 +1,34 @@
-console.log("=== BOOT: CHAINVERS chaingetcashdraw.js ===");
+console.log("=== BOOT: CHAINVERS chaingetcashdraw.js (NO TOKEN-ID MODE) ===");
 
 import Web3 from "web3";
-import axios from "axios";
 
 /* ============================================================
-   SAFE BODY PARSER (Vercel)
+   SAFE BODY PARSER
 ============================================================ */
 async function parseBody(req) {
   return new Promise(resolve => {
-    try {
-      let raw = "";
-      req.on("data", c => raw += c);
-      req.on("end", () => {
-        try { resolve(JSON.parse(raw || "{}")); }
-        catch { resolve({}); }
-      });
-    } catch {
-      resolve({});
-    }
+    let raw = "";
+    req.on("data", c => raw += c);
+    req.on("end", () => {
+      try { resolve(JSON.parse(raw || "{}")); }
+      catch { resolve({}); }
+    });
   });
 }
 
 /* ============================================================
    RPC FALLBACK
 ============================================================ */
-const PRIMARY = process.env.PROVIDER_URL;
-const FALLBACKS = [
+const RPCs = [
+  process.env.PROVIDER_URL,
   "https://base.llamarpc.com",
   "https://base.publicnode.com",
   "https://base.blockpi.network/v1/rpc/public",
   "https://rpc.ankr.com/base"
-];
+].filter(Boolean);
 
 async function initWeb3() {
-  const list = [PRIMARY, ...FALLBACKS].filter(Boolean);
-  for (const rpc of list) {
+  for (const rpc of RPCs) {
     try {
       const w3 = new Web3(rpc);
       await w3.eth.getBlockNumber();
@@ -48,67 +42,20 @@ async function initWeb3() {
 }
 
 /* ============================================================
-   ABI – originBalance + backendCreditOrigin + withdrawOrigin
+   ONLY ABI WE NEED → backendWithdraw(address,uint256)
 ============================================================ */
 const ABI = [
   {
-    "inputs":[{"internalType":"uint256","name":"","type":"uint256"}],
-    "name":"originBalance",
-    "outputs":[{"internalType":"uint256","name":"","type":"uint256"}],
-    "stateMutability":"view",
-    "type":"function"
-  },
-  {
     "inputs":[
-      {"internalType":"uint256","name":"id","type":"uint256"},
-      {"internalType":"uint256","name":"amt","type":"uint256"}
+      {"internalType":"address","name":"to","type":"address"},
+      {"internalType":"uint256","name":"amount","type":"uint256"}
     ],
-    "name":"backendCreditOrigin",
-    "outputs":[],
-    "stateMutability":"nonpayable",
-    "type":"function"
-  },
-  {
-    "inputs":[{"internalType":"uint256","name":"id","type":"uint256"}],
-    "name":"withdrawOrigin",
+    "name":"backendWithdraw",
     "outputs":[],
     "stateMutability":"nonpayable",
     "type":"function"
   }
 ];
-
-/* ============================================================
-   FILTER ORDERS → UNIKÁTNE NFT
-============================================================ */
-function filterOrders(raw, user) {
-  const byId = {};
-
-  for (const o of raw || []) {
-    try {
-      const ua = (o.user_address || "").toLowerCase();
-      if (ua && user && ua !== user.toLowerCase()) continue;
-
-      if (o.token_id == null) continue;
-      const tid = parseInt(o.token_id);
-      if (!tid || tid <= 0) continue;
-
-      const cs = o.chain_status || "";
-      // toleruj paid / in_chain / paid emoji
-      if (!cs) continue;
-
-      // posledný záznam vyhráva
-      const gain = Number(o.contract_gain ?? 0);
-
-      byId[tid] = {
-        token_id: tid,
-        contract_gain: isNaN(gain) ? 0 : gain,
-        chain_status: cs
-      };
-    } catch {}
-  }
-
-  return Object.values(byId);
-}
 
 /* ============================================================
    MAIN HANDLER
@@ -124,10 +71,8 @@ export default async function handler(req, res) {
 
   console.log("=== API CALL chaingetcashdraw ===");
 
-  const body  = await parseBody(req);
-  const q     = req.query || {};
-  const action = body.action || q.action || "none";
-
+  const body = await parseBody(req);
+  const action = body.action || "none";
   console.log("ACTION:", action);
 
   try {
@@ -137,116 +82,63 @@ export default async function handler(req, res) {
 
     const owner = web3.eth.accounts.privateKeyToAccount(process.env.PRIVATE_KEY);
     web3.eth.accounts.wallet.add(owner);
-    console.log("OWNER:", owner.address);
 
     /* --------------------------------------------------------
-       ACTION: balanceOrigin
-       GET /api/chaingetcashdraw?action=balanceOrigin&id=309
+       ACTION: withdraw
+       POST {
+         action:"withdraw",
+         user:"0x1234...",
+         amount:0.01
+       }
     -------------------------------------------------------- */
-    if (action === "balanceOrigin") {
-      const id = parseInt(q.id || body.id || 0);
-      console.log("[BALANCE] id =", id);
+    if (action === "withdraw") {
 
-      if (!id) return res.json({ ok:false, error:"Missing id" });
+      const user   = body.user;
+      const amount = Number(body.amount);
 
-      const balWei = await contract.methods.originBalance(id).call();
-      console.log("[BALANCE] originBalance =", balWei, "wei");
-
-      return res.json({ ok:true, id, balance: balWei });
-    }
-
-    /* --------------------------------------------------------
-       ACTION: sync
-       POST { action:"sync", user:"0x..." }
-       - načíta orders z InfinityFree
-       - zistí diff (local > onchain) → backendCreditOrigin
-    -------------------------------------------------------- */
-    if (action === "sync") {
-      const user = body.user || q.user;
-      if (!user) return res.json({ ok:false, error:"No user" });
-
-      const base = process.env.INF_FREE_URL || "https://chainvers.free.nf";
-      const url  = `${base.replace(/\/+$/,"")}/get_orders_raw.php?user=${encodeURIComponent(user)}`;
-
-      console.log("[SYNC] Loading orders:", url);
-      const resp  = await axios.get(url, { timeout: 8000 });
-      const raw   = resp.data || [];
-      console.log("[SYNC] Raw orders count:", Array.isArray(raw) ? raw.length : "N/A");
-
-      const orders = filterOrders(raw, user);
-      console.log("[SYNC] Filtered NFT count:", orders.length);
-
-      const results = [];
-
-      for (const o of orders) {
-        const tid = o.token_id;
-        const localGain = Number(o.contract_gain || 0);
-        if (!localGain || localGain <= 0) continue;
-
-        const localWei = BigInt(Math.round(localGain * 1e18));
-        const chainWei = BigInt(await contract.methods.originBalance(tid).call());
-
-        if (localWei > chainWei) {
-          const diff = localWei - chainWei;
-          console.log(`[SYNC] Token ${tid}: local ${localWei}, chain ${chainWei}, adding diff ${diff}`);
-
-          const method = contract.methods.backendCreditOrigin(tid, diff.toString());
-          const gas = await method.estimateGas({ from: owner.address });
-
-          const txData = {
-            from: owner.address,
-            to:   contractAddr,
-            gas,
-            data: method.encodeABI()
-          };
-
-          const signed = await web3.eth.accounts.signTransaction(txData, process.env.PRIVATE_KEY);
-          const sent   = await web3.eth.sendSignedTransaction(signed.rawTransaction);
-
-          results.push({
-            token_id: tid,
-            added_wei: diff.toString(),
-            tx: sent.transactionHash
-          });
-        }
+      if (!user || !user.startsWith("0x")) {
+        return res.json({ ok:false, error:"Invalid user address" });
+      }
+      if (amount <= 0) {
+        return res.json({ ok:false, error:"Amount must be > 0" });
       }
 
-      return res.json({ ok:true, synced: results });
-    }
+      console.log("[WITHDRAW] user =", user, "amount =", amount);
 
-    /* --------------------------------------------------------
-       ACTION: withdrawOrigin
-       POST { action:"withdrawOrigin", tokenId: 309 }
-       - volá withdrawOrigin(id) z owner adresy
-    -------------------------------------------------------- */
-    if (action === "withdrawOrigin") {
-      const tokenId = parseInt(body.tokenId || 0);
-      console.log("[WITHDRAW ORIGIN] id =", tokenId);
+      const weiFull = BigInt(web3.utils.toWei(amount.toString(), "ether"));
 
-      if (!tokenId) return res.json({ ok:false, error:"Missing tokenId" });
+      // --- 1. Gas estimation ---
+      const gas = await contract.methods.backendWithdraw(user, weiFull.toString())
+        .estimateGas({ from: owner.address });
 
-      const method = contract.methods.withdrawOrigin(tokenId);
+      const gasPrice = BigInt(await web3.eth.getGasPrice());
+      const gasCost  = BigInt(gas) * gasPrice;
 
-      let gas;
-      try {
-        gas = await method.estimateGas({ from: owner.address });
-      } catch (e) {
-        console.log("[GAS ERROR]", e.message);
-        return res.json({ ok:false, error:"Gas estimation failed: "+e.message });
+      console.log("[GAS] gas =", gas, "gasPrice =", gasPrice.toString(), "gasCost =", gasCost.toString());
+
+      // --- 2. Final amount after gas deduction ---
+      const weiFinal = weiFull - gasCost;
+      if (weiFinal <= 0n) {
+        return res.json({ ok:false, error:"Zadaná suma nepokryje gas. Zadaj viac." });
       }
 
-      const txData = {
+      console.log("[FINAL AMOUNT]", weiFinal.toString(), "wei");
+
+      // --- 3. Execute backendWithdraw ---
+      const method = contract.methods.backendWithdraw(user, weiFinal.toString());
+
+      const tx = await method.send({
         from: owner.address,
-        to:   contractAddr,
-        gas,
-        data: method.encodeABI()
-      };
+        gas
+      });
 
-      const signed = await web3.eth.accounts.signTransaction(txData, process.env.PRIVATE_KEY);
-      const sent   = await web3.eth.sendSignedTransaction(signed.rawTransaction);
+      console.log("[TX]", tx.transactionHash);
 
-      console.log("[WITHDRAW ORIGIN] TX:", sent.transactionHash);
-      return res.json({ ok:true, tx: sent.transactionHash });
+      return res.json({
+        ok:true,
+        tx: tx.transactionHash,
+        finalAmountWei: weiFinal.toString()
+      });
     }
 
     return res.json({ ok:false, error:"Unknown action" });
