@@ -1,9 +1,9 @@
-console.log("=== BOOT: CHAINVERS chaingetcashdraw.js (NO TOKEN-ID MODE, FIXED GAS) ===");
+console.log("=== BOOT: CHAINVERS chaingetcashdraw.js (FINAL NO ESTIMATE) ===");
 
 import Web3 from "web3";
 
 /* ============================================================
-   SAFE BODY PARSER (Vercel)
+   BODY PARSER
 ============================================================ */
 async function parseBody(req) {
     return new Promise(resolve => {
@@ -17,7 +17,7 @@ async function parseBody(req) {
 }
 
 /* ============================================================
-   RPC FALLBACKS
+   RPC INIT
 ============================================================ */
 const RPCs = [
     process.env.PROVIDER_URL,
@@ -34,15 +34,13 @@ async function initWeb3() {
             await w3.eth.getBlockNumber();
             console.log("[RPC OK]", rpc);
             return w3;
-        } catch (e) {
-            console.log("[RPC FAIL]", rpc, e.message);
-        }
+        } catch {}
     }
-    throw new Error("No working RPC available");
+    throw new Error("NO RPC AVAILABLE");
 }
 
 /* ============================================================
-   ABI – only backendWithdraw(to,amount)
+   ABI backendWithdraw only
 ============================================================ */
 const ABI = [
     {
@@ -61,110 +59,84 @@ const ABI = [
    MAIN HANDLER
 ============================================================ */
 export default async function handler(req, res) {
+
     res.setHeader("Access-Control-Allow-Origin", "*");
     res.setHeader("Access-Control-Allow-Headers", "*");
     res.setHeader("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
 
     if (req.method === "OPTIONS") return res.status(200).end();
 
-    console.log("=== API CALL chaingetcashdraw ===");
-
     const body = await parseBody(req);
     const action = body.action || "none";
 
-    console.log("ACTION:", action);
+    console.log("=== API CALL:", action);
+
+    if (action !== "withdraw") {
+        return res.json({ ok:false, error:"Invalid action" });
+    }
 
     try {
         const web3 = await initWeb3();
         const contractAddr = process.env.CONTRACT_ADDRESS;
-        const contract = new web3.eth.Contract(ABI, contractAddr);
 
+        const contract = new web3.eth.Contract(ABI, contractAddr);
         const owner = web3.eth.accounts.privateKeyToAccount(process.env.PRIVATE_KEY);
         web3.eth.accounts.wallet.add(owner);
 
-        console.log("OWNER:", owner.address);
+        const user = body.user;
+        const amount = Number(body.amount);
 
-        /* ============================================================
-           ACTION: withdraw (NO TOKEN ID)
-        ============================================================ */
-        if (action === "withdraw") {
+        if (!user || !user.startsWith("0x"))
+            return res.json({ ok:false, error:"Invalid user address" });
 
-            const user   = body.user;
-            const amount = Number(body.amount);
+        if (amount <= 0)
+            return res.json({ ok:false, error:"Amount must be > 0" });
 
-            if (!user || !user.startsWith("0x")) {
-                return res.json({ ok:false, error:"Invalid user address" });
-            }
-            if (amount <= 0) {
-                return res.json({ ok:false, error:"Amount must be > 0" });
-            }
+        console.log("[WITHDRAW] requested:", amount, "ETH");
 
-            console.log("[WITHDRAW] USER:", user, "REQUESTED:", amount);
+        // ------------------------------------------------------------
+        // WEI
+        const amountWei = BigInt(web3.utils.toWei(amount.toString(), "ether"));
 
-            // FULL AMOUNT IN WEI
-            const amountWei = BigInt(web3.utils.toWei(amount.toString(), "ether"));
+        // ------------------------------------------------------------
+        // FIXED GAS LIMIT (NO estimateGas!)
+        const gasLimit = BigInt(100000);
 
-            /* ============================================================
-               FIXED GAS ESTIMATION (IMPORTANT FIX)
-               → we NEVER estimateGas using large amount (it reverts)
-               → we estimate using EXACT 1 wei (always safe)
-            ============================================================ */
-            const minimalWei = "1"; // 1 wei
+        const gasPrice = BigInt(await web3.eth.getGasPrice());
+        const gasCost = gasLimit * gasPrice;
 
-            let gas;
-            try {
-                gas = await contract.methods.backendWithdraw(user, minimalWei)
-                    .estimateGas({ from: owner.address });
-            } catch (e) {
-                console.log("[GAS ERROR]", e.message);
-                return res.json({ ok:false, error:"Gas estimation failed: "+e.message });
-            }
+        console.log("[GAS COST WEI]", gasCost.toString());
 
-            const gasPrice = BigInt(await web3.eth.getGasPrice());
-            const gasCost  = BigInt(gas) * gasPrice;
+        const finalWei = amountWei - gasCost;
 
-            console.log("[GAS] gas =", gas, "gasPrice =", gasPrice.toString(), "gasCost =", gasCost.toString());
-
-            /* ============================================================
-               FINAL AMOUNT AFTER GAS DEDUCTION
-            ============================================================ */
-            const finalWei = amountWei - gasCost;
-
-            if (finalWei <= 0n) {
-                return res.json({
-                    ok:false,
-                    error:"Zadaná suma nepokryje gas. Zadaj vyššiu sumu."
-                });
-            }
-
-            console.log("[FINAL WEI TO SEND]:", finalWei.toString());
-
-            /* ============================================================
-               SEND TRANSACTION backendWithdraw(user, finalWei)
-            ============================================================ */
-            let tx;
-            try {
-                tx = await contract.methods.backendWithdraw(user, finalWei.toString())
-                    .send({ from: owner.address, gas });
-            } catch (e) {
-                console.log("[TX ERROR]", e.message);
-                return res.json({ ok:false, error:"TX failed: "+e.message });
-            }
-
-            console.log("[TX SUCCESS]:", tx.transactionHash);
-
+        if (finalWei <= 0n) {
             return res.json({
-                ok: true,
-                tx: tx.transactionHash,
-                sentWei: finalWei.toString(),
-                sentEth: web3.utils.fromWei(finalWei.toString(), "ether")
+                ok:false,
+                error:"Zadaná suma nepokryje poplatky (gas)."
             });
         }
 
-        return res.json({ ok:false, error:"Unknown action" });
+        console.log("[FINAL WEI TO SEND]", finalWei.toString());
+
+        // ------------------------------------------------------------
+        // SEND TX
+        const tx = await contract.methods.backendWithdraw(user, finalWei.toString())
+            .send({
+                from: owner.address,
+                gas: Number(gasLimit)
+            });
+
+        console.log("[TX SUCCESS]", tx.transactionHash);
+
+        return res.json({
+            ok:true,
+            tx: tx.transactionHash,
+            finalWei: finalWei.toString(),
+            finalEth: web3.utils.fromWei(finalWei.toString(), "ether")
+        });
 
     } catch (e) {
-        console.log("[FATAL ERROR]", e);
-        return res.json({ ok:false, error: e.message });
+        console.log("[FATAL]", e.message);
+        return res.json({ ok:false, error:e.message });
     }
 }
