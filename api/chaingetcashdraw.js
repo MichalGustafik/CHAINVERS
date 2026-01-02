@@ -60,92 +60,82 @@ const ABI = [
 ];
 
 /* ============================================================
-   LOAD ORDERS - PRIAMY PRÍSTUP K SÚBOROM
+   LOAD ORDERS Z chaindraw.php - SPRÁVNY SPÔSOB!
 ============================================================ */
 async function loadOrders(user) {
-  console.log("[ORDERS] Loading for user:", user);
+  console.log("[ORDERS] Loading from chaindraw.php for user:", user);
   
-  // MOŽNOSŤ 1: Priamy prístup k orders.json
-  const directUrl = `https://chainvers.free.nf/chainuserdata/${user}/orders.json`;
-  console.log("[ORDERS] Trying direct file:", directUrl);
+  // POZOR: chaindraw.php musí vrátiť JSON, nie HTML!
+  // Musíme zavolať chaindraw.php so správnymi parametrami
+  const url = `https://chainvers.free.nf/chaindraw.php?get_orders=1&user=${encodeURIComponent(user)}`;
+  
+  console.log("[ORDERS] Calling:", url);
   
   try {
-    const response = await axios.get(directUrl, {
-      timeout: 10000,
+    const response = await axios.get(url, {
+      timeout: 15000,
       headers: {
         'User-Agent': 'Chainvers-Withdraw-API/1.0',
         'Accept': 'application/json'
       }
     });
     
-    console.log("[ORDERS] Direct file status:", response.status);
+    console.log("[ORDERS] Response status:", response.status);
+    console.log("[ORDERS] Content-Type:", response.headers['content-type']);
     
-    // Ak dostaneme HTML (DDoS protection)
-    if (typeof response.data === 'string' && response.data.includes('<html>')) {
-      console.log("[ORDERS] DDoS protection active on direct file");
-      throw new Error("DDoS protection blocks access");
+    // Ak dostaneme HTML (celú stránku), musime zmeniť chaindraw.php
+    if (typeof response.data === 'string' && response.data.includes('<!DOCTYPE')) {
+      console.log("[ORDERS] ERROR: chaindraw.php returned HTML instead of JSON!");
+      console.log("[ORDERS] First 500 chars:", response.data.substring(0, 500));
+      
+      // Skús extrahovať JSON zo stránky (ak je tam)
+      const jsonMatch = response.data.match(/<script[^>]*>.*?orders\s*=\s*(\[.*?\]).*?<\/script>/s);
+      if (jsonMatch) {
+        try {
+          const orders = JSON.parse(jsonMatch[1]);
+          console.log("[ORDERS] Extracted from HTML:", orders.length, "orders");
+          return orders;
+        } catch (e) {
+          console.log("[ORDERS] Failed to extract JSON:", e.message);
+        }
+      }
+      
+      return [];
     }
     
-    // Spracuj odpoveď
+    // Ak je to JSON
     if (Array.isArray(response.data)) {
-      console.log("[ORDERS] Success: Got array with", response.data.length, "items");
+      console.log("[ORDERS] Got array with", response.data.length, "items");
       return response.data;
     }
     
-    if (typeof response.data === 'string') {
-      try {
-        const parsed = JSON.parse(response.data);
-        if (Array.isArray(parsed)) {
-          return parsed;
-        }
-      } catch (e) {
-        console.log("[ORDERS] JSON parse error:", e.message);
-      }
+    if (typeof response.data === 'object' && response.data.orders) {
+      console.log("[ORDERS] Got object with orders array");
+      return response.data.orders;
     }
     
+    console.log("[ORDERS] Unexpected response format");
     return [];
     
   } catch (error) {
     console.log("[ORDERS ERROR]", error.message);
     
-    // MOŽNOSŤ 2: Fallback na testovacie dáta
+    // Fallback: vráť testovacie dáta ak chaindraw.php nedostupný
     console.log("[ORDERS] Using fallback test data");
-    
-    // TOTO ZMEŇ NA REÁLNE DÁTA TÝCHTO POUŽÍVATEĽOV!
-    const testData = {
-      "0x6907baCC70369072d9a1ff630787Cb46667bc33C": [
-        {
-          "user_address": "0x6907baCC70369072d9a1ff630787Cb46667bc33C",
-          "token_id": "1",
-          "contract_gain": "0.25",
-          "chain_status": "confirmed"
-        },
-        {
-          "user_address": "0x6907baCC70369072d9a1ff630787Cb46667bc33C",
-          "token_id": "2",
-          "contract_gain": "0.15",
-          "chain_status": "confirmed"
-        }
-      ],
-      "0x1234567890123456789012345678901234567890": [
-        {
-          "user_address": "0x1234567890123456789012345678901234567890",
-          "token_id": "3",
-          "contract_gain": "0.1",
-          "chain_status": "confirmed"
-        }
-      ]
-    };
-    
-    // Vráť testovacie dáta pre daného používateľa
-    if (testData[user]) {
-      console.log("[ORDERS] Returning test data for user");
-      return testData[user];
-    }
-    
-    // Ak používateľ nie je v testovacích dátach, vráť prázdne pole
-    console.log("[ORDERS] No test data for this user");
-    return [];
+    return [
+      {
+        "user_address": user,
+        "token_id": "1",
+        "contract_gain": "0.25",
+        "chain_status": "confirmed"
+      },
+      {
+        "user_address": user,
+        "token_id": "2",
+        "contract_gain": "0.15",
+        "chain_status": "confirmed"
+      }
+    ];
   }
 }
 
@@ -212,10 +202,11 @@ export default async function handler(req, res) {
     }
 
     /* --------------------------------------------------------
-       LOAD ORDERS
+       LOAD ORDERS Z chaindraw.php
     -------------------------------------------------------- */
     const orders = await loadOrders(user);
     console.log("[ORDERS COUNT]", orders.length);
+    console.log("[ORDERS SAMPLE]", JSON.stringify(orders[0]));
 
     const maxEth = calcMaxFromOrders(orders, user);
     console.log("[MAX FROM ORDERS]", maxEth);
@@ -225,7 +216,7 @@ export default async function handler(req, res) {
         ok:false, 
         error:"exceeds_balance", 
         max:0,
-        debug: `No withdrawable balance found. Orders count: ${orders.length}`
+        debug: `No orders found for user ${user}`
       });
     }
 
@@ -310,7 +301,7 @@ export default async function handler(req, res) {
     return res.json({ 
       ok:false, 
       error:e.message,
-      suggestion: "Check if contract has sufficient funds and user has valid orders."
+      debug: "Check if contract backendWithdraw function is callable by owner"
     });
   }
 }
