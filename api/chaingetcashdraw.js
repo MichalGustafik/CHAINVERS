@@ -64,7 +64,7 @@ const ABI = [{
 ============================================================ */
 async function loadOrders(user){
   const base = process.env.INF_FREE_URL;
-  const url = `${base}/get_orders_raw.php?user=${encodeURIComponent(user)}`;
+  const url = "https://chainvers.free.nf/chaindraw.php?api=get_orders_raw&user=" + encodeURIComponent(user);
 
   console.log("[ORDERS FETCH]", url);
   const r = await axios.get(url, { timeout: 10000 });
