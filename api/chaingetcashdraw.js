@@ -103,11 +103,35 @@ async function loadOrders(user, log){
   const url = `${base.replace(/\/+$/, "")}/chaindraw.php?api=get_orders_raw&user=${encodeURIComponent(user)}`;
 
   log.push("[ORDERS FETCH]", url);
-  const r = await axios.get(url, { timeout: 15000 });
+
+  const r = await axios.get(url, {
+    timeout: 15000,
+    responseType: "text",
+    transformResponse: [data => data]
+  });
 
   if (Array.isArray(r.data)) {
-    log.push("[ORDERS FETCH OK] COUNT", r.data.length);
+    log.push("[ORDERS FETCH OK ARRAY] COUNT", r.data.length);
     return r.data;
+  }
+
+  if (typeof r.data === "string") {
+    const raw = r.data.trim();
+    log.push("[ORDERS FETCH STRING LEN]", raw.length);
+    log.push("[ORDERS FETCH STRING PREVIEW]", raw.slice(0, 300));
+
+    try {
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed)) {
+        log.push("[ORDERS PARSED FROM STRING] COUNT", parsed.length);
+        return parsed;
+      }
+      log.push("[ORDERS PARSED BUT NOT ARRAY]", typeof parsed);
+      return [];
+    } catch (e) {
+      log.push("[ORDERS JSON PARSE FAIL]", e.message);
+      return [];
+    }
   }
 
   log.push("[ORDERS FETCH NON-ARRAY]", typeof r.data);
