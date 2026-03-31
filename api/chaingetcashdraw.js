@@ -67,14 +67,14 @@ async function initWeb3(log) {
    ABI – BACKEND WITHDRAW ONLY
 ============================================================ */
 const ABI = [{
-  inputs:[
-    {internalType:"address",name:"to",type:"address"},
-    {internalType:"uint256",name:"amount",type:"uint256"}
+  inputs: [
+    { internalType: "address", name: "to", type: "address" },
+    { internalType: "uint256", name: "amount", type: "uint256" }
   ],
-  name:"backendWithdraw",
-  outputs:[],
-  stateMutability:"nonpayable",
-  type:"function"
+  name: "backendWithdraw",
+  outputs: [],
+  stateMutability: "nonpayable",
+  type: "function"
 }];
 
 /* ============================================================
@@ -87,17 +87,17 @@ function normalizeUser(u) {
 /* ============================================================
    MAIN HANDLER
 ============================================================ */
-export default async function handler(req, res){
-  res.setHeader("Access-Control-Allow-Origin","*");
-  res.setHeader("Access-Control-Allow-Headers","Content-Type");
-  res.setHeader("Access-Control-Allow-Methods","POST,OPTIONS");
-  if(req.method==="OPTIONS") return res.end();
+export default async function handler(req, res) {
+  res.setHeader("Access-Control-Allow-Origin", "*");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+  res.setHeader("Access-Control-Allow-Methods", "POST,OPTIONS");
+  if (req.method === "OPTIONS") return res.end();
 
   const log = mkLog();
   log.push("=== API CALL: chaingetcashdraw ===");
   log.push("[METHOD]", req.method);
 
-  try{
+  try {
     const body = await parseBody(req);
 
     log.push("[BODY]", body);
@@ -110,31 +110,31 @@ export default async function handler(req, res){
     log.push("[REQ TOKEN ID]", tokenId);
     log.push("[REQ AMOUNT NUM]", reqEth);
 
-    if(!user){
+    if (!user) {
       log.push("[FAIL] NO USER");
-      return res.json({ok:false,error:"bad_input_user",logs:log.rows});
+      return res.json({ ok: false, error: "bad_input_user", logs: log.rows });
     }
 
-    if(!tokenId || tokenId <= 0){
+    if (!tokenId || tokenId <= 0) {
       log.push("[FAIL] BAD TOKEN ID");
-      return res.json({ok:false,error:"bad_input_token_id",logs:log.rows});
+      return res.json({ ok: false, error: "bad_input_token_id", logs: log.rows });
     }
 
-    if(!reqEth || reqEth <= 0){
+    if (!reqEth || reqEth <= 0) {
       log.push("[FAIL] BAD AMOUNT");
-      return res.json({ok:false,error:"bad_input_amount",logs:log.rows});
+      return res.json({ ok: false, error: "bad_input_amount", logs: log.rows });
     }
 
     const web3 = await initWeb3(log);
     const contractAddr = process.env.CONTRACT_ADDRESS;
     if (!contractAddr) {
       log.push("[FAIL] MISSING CONTRACT_ADDRESS");
-      return res.json({ok:false,error:"missing_contract_address",logs:log.rows});
+      return res.json({ ok: false, error: "missing_contract_address", logs: log.rows });
     }
 
     if (!process.env.PRIVATE_KEY) {
       log.push("[FAIL] MISSING PRIVATE_KEY");
-      return res.json({ok:false,error:"missing_private_key",logs:log.rows});
+      return res.json({ ok: false, error: "missing_private_key", logs: log.rows });
     }
 
     const contract = new web3.eth.Contract(ABI, contractAddr);
@@ -147,32 +147,53 @@ export default async function handler(req, res){
     log.push("[OWNER]", owner.address);
     log.push("[CONTRACT]", contractAddr);
 
-    const grossWei = web3.utils.toWei(reqEth.toString(),"ether");
+    const grossWei = web3.utils.toWei(reqEth.toString(), "ether");
     log.push("[GROSS WEI]", grossWei);
 
+    const ownerNativeBalance = await web3.eth.getBalance(owner.address);
+    const contractNativeBalance = await web3.eth.getBalance(contractAddr);
+
+    log.push("[OWNER NATIVE BALANCE]", ownerNativeBalance);
+    log.push("[CONTRACT NATIVE BALANCE]", contractNativeBalance);
+
     const method = contract.methods.backendWithdraw(user, grossWei);
-    const gasLimit = await method.estimateGas({from: owner.address});
+
+    try {
+      await method.call({ from: owner.address });
+      log.push("[CALL PRECHECK] OK");
+    } catch (e) {
+      log.push("[CALL PRECHECK FAIL]", e.message || String(e));
+      throw e;
+    }
+
+    let gasLimit;
+    try {
+      gasLimit = await method.estimateGas({ from: owner.address });
+      log.push("[GAS LIMIT]", gasLimit);
+    } catch (e) {
+      log.push("[ESTIMATE GAS FAIL]", e.message || String(e));
+      throw e;
+    }
 
     const block = await web3.eth.getBlock("latest");
     const baseFee = block?.baseFeePerGas
       ? BigInt(block.baseFeePerGas)
-      : BigInt(web3.utils.toWei("0.0000005","ether"));
+      : BigInt(web3.utils.toWei("0.0000005", "ether"));
 
     const maxFeePerGas = baseFee * 2n;
-    const priorityFee = BigInt(web3.utils.toWei("0.0000005","ether"));
+    const priorityFee = BigInt(web3.utils.toWei("0.0000005", "ether"));
     const gasCostWei = BigInt(gasLimit) * maxFeePerGas;
 
     log.push("[BLOCK NUMBER]", block?.number);
     log.push("[BASE FEE]", baseFee.toString());
-    log.push("[GAS LIMIT]", gasLimit);
     log.push("[MAX FEE PER GAS]", maxFeePerGas.toString());
     log.push("[PRIORITY FEE]", priorityFee.toString());
     log.push("[GAS COST WEI]", gasCostWei.toString());
 
     const netWei = BigInt(grossWei) - gasCostWei;
-    if(netWei <= 0n){
+    if (netWei <= 0n) {
       log.push("[FAIL] TOO SMALL FOR GAS");
-      return res.json({ok:false,error:"amount_too_small_for_gas",logs:log.rows});
+      return res.json({ ok: false, error: "amount_too_small_for_gas", logs: log.rows });
     }
 
     log.push("[FINAL WEI]", netWei.toString());
@@ -205,22 +226,24 @@ export default async function handler(req, res){
     log.push("[TX OK]", sent.transactionHash);
 
     return res.json({
-      ok:true,
+      ok: true,
       tx: sent.transactionHash,
       token_id: tokenId,
       requested_eth: reqEth,
-      sent_eth: web3.utils.fromWei(netWei.toString(),"ether"),
-      gas_paid_by_backend: web3.utils.fromWei(gasCostWei.toString(),"ether"),
+      sent_eth: web3.utils.fromWei(netWei.toString(), "ether"),
+      gas_paid_by_backend: web3.utils.fromWei(gasCostWei.toString(), "ether"),
+      owner_native_balance: web3.utils.fromWei(ownerNativeBalance, "ether"),
+      contract_native_balance: web3.utils.fromWei(contractNativeBalance, "ether"),
       logs: log.rows
     });
 
-  }catch(e){
+  } catch (e) {
     log.push("[FATAL]", e?.message || String(e));
     if (e?.stack) log.push("[STACK]", e.stack);
 
     return res.json({
-      ok:false,
-      error:e?.message || "unknown_error",
+      ok: false,
+      error: e?.message || "unknown_error",
       logs: log.rows
     });
   }
