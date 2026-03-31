@@ -1,3 +1,5 @@
+export const maxDuration = 60;
+
 export default async function handler(req, res) {
   const { PRINTIFY_API_KEY } = process.env;
   if (!PRINTIFY_API_KEY) {
