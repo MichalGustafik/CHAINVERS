@@ -1,7 +1,9 @@
-console.log("=== BOOT: CHAINVERS chaingetcashdraw.js (ROBUST) ===");
+console.log("=== BOOT: CHAINVERS chaingetcashdraw.js (FINAL ROBUST) ===");
 
 import Web3 from "web3";
 import axios from "axios";
+
+export const maxDuration = 60;
 
 /* ============================================================
    SAFE BODY PARSER
@@ -22,6 +24,23 @@ async function parseBody(req) {
 }
 
 /* ============================================================
+   LOG COLLECTOR
+============================================================ */
+function mkLog() {
+  const rows = [];
+  function push(...args) {
+    const line = args.map(v => {
+      if (typeof v === "string") return v;
+      try { return JSON.stringify(v); } catch (_) { return String(v); }
+    }).join(" ");
+    const msg = `[${new Date().toISOString()}] ${line}`;
+    rows.push(msg);
+    console.log(msg);
+  }
+  return { push, rows };
+}
+
+/* ============================================================
    RPC FALLBACK
 ============================================================ */
 const RPCS = [
@@ -31,15 +50,15 @@ const RPCS = [
   "https://rpc.ankr.com/base"
 ].filter(Boolean);
 
-async function initWeb3() {
+async function initWeb3(log) {
   for (const r of RPCS) {
     try {
       const w = new Web3(r);
-      await w.eth.getBlockNumber();
-      console.log("[RPC OK]", r);
+      const bn = await w.eth.getBlockNumber();
+      log.push("[RPC OK]", r, "BLOCK", bn);
       return w;
     } catch (e) {
-      console.log("[RPC FAIL]", r);
+      log.push("[RPC FAIL]", r, e.message || String(e));
     }
   }
   throw new Error("NO_RPC_AVAILABLE");
@@ -60,16 +79,93 @@ const ABI = [{
 }];
 
 /* ============================================================
+   HELPERS
+============================================================ */
+function normalizeUser(u) {
+  return String(u || "").trim().toLowerCase();
+}
+
+function normalizeCrypto(c) {
+  return String(c || "ETH").trim().toUpperCase();
+}
+
+function makeTestOrderId(user, crypto) {
+  const walletPart = (user || "").slice(0, 10).replace(/[^a-zA-Z0-9]/g, "");
+  const rand = Math.random().toString(36).slice(2, 8).toUpperCase();
+  return `TEST-${crypto}-${walletPart}-${Date.now()}-${rand}`;
+}
+
+/* ============================================================
    LOAD ORDERS
 ============================================================ */
-async function loadOrders(user){
-  const base = process.env.INF_FREE_URL;
-  const url = "https://chainvers.free.nf/chaindraw.php?api=get_orders_raw&user=" + encodeURIComponent(user);
+async function loadOrders(user, log){
+  const base = process.env.INF_FREE_URL || "https://chainvers.free.nf";
+  const url = `${base.replace(/\/+$/, "")}/chaindraw.php?api=get_orders_raw&user=${encodeURIComponent(user)}`;
 
-  console.log("[ORDERS FETCH]", url);
-  const r = await axios.get(url, { timeout: 10000 });
+  log.push("[ORDERS FETCH]", url);
+  const r = await axios.get(url, { timeout: 15000 });
 
-  return Array.isArray(r.data) ? r.data : [];
+  if (Array.isArray(r.data)) {
+    log.push("[ORDERS FETCH OK] COUNT", r.data.length);
+    return r.data;
+  }
+
+  log.push("[ORDERS FETCH NON-ARRAY]", typeof r.data);
+  return [];
+}
+
+/* ============================================================
+   SUM AVAILABLE
+============================================================ */
+function sumAvailableOrders(orders, user, log) {
+  let maxEth = 0;
+  let countMatched = 0;
+
+  for (const o of orders) {
+    if (!o || !o.user_address) continue;
+    if (String(o.user_address).toLowerCase() !== user.toLowerCase()) continue;
+
+    const gainRaw = o.contract_gain ?? 0;
+    const gain = Number(String(gainRaw).replace(",", "."));
+    if (!Number.isFinite(gain) || gain <= 0) continue;
+
+    countMatched++;
+    maxEth += gain;
+  }
+
+  log.push("[MATCHED ORDERS]", countMatched);
+  log.push("[MAX FROM ORDERS ETH]", maxEth);
+  return maxEth;
+}
+
+/* ============================================================
+   BUILD TEST ORDER
+============================================================ */
+function buildTestOrder({ user, crypto, amount, maxEth, tokenId, log }) {
+  const supportedLiveWithdraw = ["ETH"];
+  const liveSupported = supportedLiveWithdraw.includes(crypto);
+
+  const testOrder = {
+    ok: true,
+    test: true,
+    action: "test_order",
+    order_id: makeTestOrderId(user, crypto),
+    wallet: user,
+    token_id: tokenId || null,
+    selected_crypto: crypto,
+    selected_amount: amount,
+    network: "BASE",
+    available_eth_from_orders: maxEth,
+    live_withdraw_supported: liveSupported,
+    status: "created_for_testing",
+    note: liveSupported
+      ? "Selected crypto is supported for live backend withdraw."
+      : "This is a test order only. Live backend withdraw is currently implemented for ETH only.",
+    created_at: new Date().toISOString()
+  };
+
+  log.push("[TEST ORDER CREATED]", testOrder);
+  return testOrder;
 }
 
 /* ============================================================
@@ -81,18 +177,27 @@ export default async function handler(req, res){
   res.setHeader("Access-Control-Allow-Methods","GET,POST,OPTIONS");
   if(req.method==="OPTIONS") return res.end();
 
-  console.log("=== API CALL: withdraw ===");
+  const log = mkLog();
+  log.push("=== API CALL: chaingetcashdraw ===");
+  log.push("[METHOD]", req.method);
 
   try{
     const body = await parseBody(req);
 
-    console.log("[BODY]", body);
-    console.log("[QUERY]", req.query);
+    log.push("[BODY]", body);
+    log.push("[QUERY]", req.query || {});
 
-    const user =
+    const action =
+      body.action ||
+      req.query?.action ||
+      req.headers["x-action"] ||
+      "withdraw";
+
+    const user = normalizeUser(
       body.user ||
       req.query?.user ||
-      req.headers["x-user"];
+      req.headers["x-user"]
+    );
 
     const amountRaw =
       body.amount ||
@@ -101,17 +206,79 @@ export default async function handler(req, res){
 
     const reqEth = Number(amountRaw);
 
-    console.log("[REQ USER]", user);
-    console.log("[REQ AMOUNT RAW]", amountRaw);
-    console.log("[REQ AMOUNT NUM]", reqEth);
+    const crypto = normalizeCrypto(
+      body.crypto ||
+      req.query?.crypto ||
+      req.headers["x-crypto"] ||
+      "ETH"
+    );
 
-    if(!user || !reqEth || reqEth <= 0){
-      console.log("[FAIL] BAD INPUT");
-      return res.json({ok:false,error:"bad_input"});
+    const tokenId =
+      body.token_id ||
+      req.query?.token_id ||
+      req.headers["x-token-id"] ||
+      null;
+
+    log.push("[ACTION]", action);
+    log.push("[REQ USER]", user);
+    log.push("[REQ AMOUNT RAW]", amountRaw);
+    log.push("[REQ AMOUNT NUM]", reqEth);
+    log.push("[REQ CRYPTO]", crypto);
+    log.push("[REQ TOKEN ID]", tokenId);
+
+    if(!user){
+      log.push("[FAIL] NO USER");
+      return res.json({ok:false,error:"bad_input_user",logs:log.rows});
     }
 
-    const web3 = await initWeb3();
+    const orders = await loadOrders(user, log);
+    const maxEth = sumAvailableOrders(orders, user, log);
+
+    if (action === "test_order") {
+      const testOrder = buildTestOrder({
+        user,
+        crypto,
+        amount: Number.isFinite(reqEth) ? reqEth : null,
+        maxEth,
+        tokenId,
+        log
+      });
+
+      return res.json({
+        ok: true,
+        action: "test_order",
+        order: testOrder,
+        logs: log.rows
+      });
+    }
+
+    if(!reqEth || reqEth <= 0){
+      log.push("[FAIL] BAD AMOUNT");
+      return res.json({ok:false,error:"bad_input_amount",logs:log.rows});
+    }
+
+    if (crypto !== "ETH") {
+      log.push("[FAIL] LIVE WITHDRAW ONLY FOR ETH");
+      return res.json({
+        ok:false,
+        error:"live_withdraw_only_eth",
+        selected_crypto: crypto,
+        logs: log.rows
+      });
+    }
+
+    const web3 = await initWeb3(log);
     const contractAddr = process.env.CONTRACT_ADDRESS;
+    if (!contractAddr) {
+      log.push("[FAIL] MISSING CONTRACT_ADDRESS");
+      return res.json({ok:false,error:"missing_contract_address",logs:log.rows});
+    }
+
+    if (!process.env.PRIVATE_KEY) {
+      log.push("[FAIL] MISSING PRIVATE_KEY");
+      return res.json({ok:false,error:"missing_private_key",logs:log.rows});
+    }
+
     const contract = new web3.eth.Contract(ABI, contractAddr);
 
     const owner = web3.eth.accounts.privateKeyToAccount(
@@ -119,76 +286,88 @@ export default async function handler(req, res){
     );
     web3.eth.accounts.wallet.add(owner);
 
-    console.log("[OWNER]", owner.address);
-
-    const orders = await loadOrders(user);
-    console.log("[ORDERS COUNT]", orders.length);
-
-    let maxEth = 0;
-    for(const o of orders){
-      if(o.user_address?.toLowerCase() !== user.toLowerCase()) continue;
-      if(!o.contract_gain) continue;
-      maxEth += Number(o.contract_gain);
-    }
-
-    console.log("[MAX FROM ORDERS]", maxEth);
+    log.push("[OWNER]", owner.address);
+    log.push("[CONTRACT]", contractAddr);
 
     if(reqEth > maxEth){
-      console.log("[DENY] EXCEEDS BALANCE");
-      return res.json({ok:false,error:"exceeds_balance",max:maxEth});
+      log.push("[DENY] EXCEEDS BALANCE", "REQ", reqEth, "MAX", maxEth);
+      return res.json({ok:false,error:"exceeds_balance",max:maxEth,logs:log.rows});
     }
 
     const grossWei = web3.utils.toWei(reqEth.toString(),"ether");
+    log.push("[GROSS WEI]", grossWei);
+
     const method = contract.methods.backendWithdraw(user, grossWei);
     const gasLimit = await method.estimateGas({from: owner.address});
 
     const block = await web3.eth.getBlock("latest");
-    const maxFeePerGas = BigInt(block.baseFeePerGas) * 2n;
+    const baseFee = block?.baseFeePerGas ? BigInt(block.baseFeePerGas) : BigInt(web3.utils.toWei("0.0000005","ether"));
+    const maxFeePerGas = baseFee * 2n;
+    const priorityFee = BigInt(web3.utils.toWei("0.0000005","ether"));
     const gasCostWei = BigInt(gasLimit) * maxFeePerGas;
 
-    console.log("[GAS LIMIT]", gasLimit);
-    console.log("[GAS COST WEI]", gasCostWei.toString());
+    log.push("[BLOCK NUMBER]", block?.number);
+    log.push("[BASE FEE]", baseFee.toString());
+    log.push("[GAS LIMIT]", gasLimit);
+    log.push("[MAX FEE PER GAS]", maxFeePerGas.toString());
+    log.push("[PRIORITY FEE]", priorityFee.toString());
+    log.push("[GAS COST WEI]", gasCostWei.toString());
 
     const netWei = BigInt(grossWei) - gasCostWei;
     if(netWei <= 0n){
-      console.log("[FAIL] TOO SMALL FOR GAS");
-      return res.json({ok:false,error:"amount_too_small_for_gas"});
+      log.push("[FAIL] TOO SMALL FOR GAS");
+      return res.json({ok:false,error:"amount_too_small_for_gas",logs:log.rows});
     }
 
-    console.log("[FINAL WEI]", netWei.toString());
+    log.push("[FINAL WEI]", netWei.toString());
 
     const tx = {
       from: owner.address,
       to: contractAddr,
       gas: gasLimit,
-      maxFeePerGas,
-      maxPriorityFeePerGas: web3.utils.toWei("0.0000005","ether"),
+      maxFeePerGas: maxFeePerGas.toString(),
+      maxPriorityFeePerGas: priorityFee.toString(),
       data: contract.methods.backendWithdraw(
         user,
         netWei.toString()
       ).encodeABI()
     };
 
+    log.push("[TX BUILD OK]", tx);
+
     const signed = await web3.eth.accounts.signTransaction(
       tx,
       process.env.PRIVATE_KEY
     );
 
+    log.push("[SIGNED TX READY]");
+
     const sent = await web3.eth.sendSignedTransaction(
       signed.rawTransaction
     );
 
-    console.log("[TX OK]", sent.transactionHash);
+    log.push("[TX OK]", sent.transactionHash);
 
     return res.json({
       ok:true,
+      action:"withdraw",
       tx: sent.transactionHash,
+      selected_crypto: crypto,
+      requested_eth: reqEth,
       sent_eth: web3.utils.fromWei(netWei.toString(),"ether"),
-      gas_paid_by_backend: web3.utils.fromWei(gasCostWei.toString(),"ether")
+      gas_paid_by_backend: web3.utils.fromWei(gasCostWei.toString(),"ether"),
+      max_available_eth: maxEth,
+      logs: log.rows
     });
 
   }catch(e){
-    console.log("[FATAL]", e);
-    return res.json({ok:false,error:e.message});
+    log.push("[FATAL]", e?.message || String(e));
+    if (e?.stack) log.push("[STACK]", e.stack);
+
+    return res.json({
+      ok:false,
+      error:e?.message || "unknown_error",
+      logs: log.rows
+    });
   }
 }
