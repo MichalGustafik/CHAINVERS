@@ -9,11 +9,11 @@ export default async function handler(req, res) {
   }
 
   try {
-    const { crop_id, image_base64 } = req.body;
-    if (!crop_id || !image_base64) {
+    const { crop_id, printify_image_id } = req.body;
+    if (!crop_id || !printify_image_id) {
       return res
         .status(400)
-        .json({ ok: false, error: "Missing crop_id or image_base64" });
+        .json({ ok: false, error: "Missing crop_id or printify_image_id" });
     }
 
     const authHeader = { Authorization: `Bearer ${PRINTIFY_API_KEY}` };
@@ -40,26 +40,7 @@ export default async function handler(req, res) {
     let order = null;
 
     if (!existing) {
-      // 3) Upload obrázka
-      const uploadResp = await fetch(
-        `https://api.printify.com/v1/uploads/images.json`,
-        {
-          method: "POST",
-          headers: { ...authHeader, "Content-Type": "application/json" },
-          body: JSON.stringify({
-            file_name: `${crop_id}.png`,
-            contents: image_base64,
-          }),
-        }
-      );
-      const uploadData = await uploadResp.json();
-      if (!uploadData.id) {
-        return res
-          .status(500)
-          .json({ ok: false, error: "Upload failed", resp: uploadData });
-      }
-
-      // 4) Blueprint / provider / variant
+      // 3) Blueprint / provider / variant
       const blueprintId = 9; // Classic Tee
       const providersResp = await fetch(
         `https://api.printify.com/v1/catalog/blueprints/${blueprintId}/print_providers.json`,
@@ -92,7 +73,7 @@ export default async function handler(req, res) {
       }
       const variantId = variant.id;
 
-      // 5) Create product
+      // 4) Create product
       const productPayload = {
         title: `CHAINVERS Tee ${crop_id}`,
         description: `Unikátne tričko s panelom ${crop_id}`,
@@ -107,7 +88,7 @@ export default async function handler(req, res) {
                 position: "front",
                 images: [
                   {
-                    id: uploadData.id,
+                    id: printify_image_id,
                     x: 0.5,
                     y: 0.5,
                     scale: 1,
@@ -139,7 +120,7 @@ export default async function handler(req, res) {
       }
       product = created;
 
-      // 6) Publish product
+      // 5) Publish product
       await fetch(
         `https://api.printify.com/v1/shops/${shopId}/products/${product.id}/publish.json`,
         {
@@ -165,7 +146,7 @@ export default async function handler(req, res) {
         product = createdDetailData;
       }
 
-      // 7) Create order (test)
+      // 6) Create order (test)
       const orderPayload = {
         external_id: externalId,
         line_items: [
