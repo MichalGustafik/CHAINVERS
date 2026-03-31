@@ -9,15 +9,28 @@ export default async function handler(req, res) {
   }
 
   try {
-    const { crop_id, image_base64 } = req.body;
-    if (!crop_id || !image_base64) {
+    const { crop_id, image_url } = req.body;
+    if (!crop_id || !image_url) {
       return res
         .status(400)
-        .json({ ok: false, error: "Missing crop_id or image_base64" });
+        .json({ ok: false, error: "Missing crop_id or image_url" });
     }
 
     const authHeader = { Authorization: `Bearer ${PRINTIFY_API_KEY}` };
 
+    // stiahni obrázok a premeň na base64 až na Verceli
+    const imageResp = await fetch(image_url);
+    if (!imageResp.ok) {
+      return res.status(500).json({
+        ok: false,
+        error: "Image download failed",
+        resp: { status: imageResp.status, statusText: imageResp.statusText, image_url },
+      });
+    }
+    const imageArrayBuffer = await imageResp.arrayBuffer();
+    const imageBase64 = Buffer.from(imageArrayBuffer).toString("base64");
+
+    // 1) Shop ID
     const shopsResp = await fetch("https://api.printify.com/v1/shops.json", {
       headers: authHeader,
     });
@@ -25,6 +38,7 @@ export default async function handler(req, res) {
     const shopId = shops[0]?.id;
     if (!shopId) return res.status(500).json({ ok: false, error: "No shop found" });
 
+    // 2) Skontroluj existujúci produkt
     const prodsResp = await fetch(
       `https://api.printify.com/v1/shops/${shopId}/products.json`,
       { headers: authHeader }
@@ -38,6 +52,7 @@ export default async function handler(req, res) {
     let order = null;
 
     if (!existing) {
+      // 3) Upload obrázka
       const uploadResp = await fetch(
         `https://api.printify.com/v1/uploads/images.json`,
         {
@@ -45,7 +60,7 @@ export default async function handler(req, res) {
           headers: { ...authHeader, "Content-Type": "application/json" },
           body: JSON.stringify({
             file_name: `${crop_id}.png`,
-            contents: image_base64,
+            contents: imageBase64,
           }),
         }
       );
@@ -56,7 +71,8 @@ export default async function handler(req, res) {
           .json({ ok: false, error: "Upload failed", resp: uploadData });
       }
 
-      const blueprintId = 9;
+      // 4) Blueprint / provider / variant
+      const blueprintId = 9; // Classic Tee
       const providersResp = await fetch(
         `https://api.printify.com/v1/catalog/blueprints/${blueprintId}/print_providers.json`,
         { headers: authHeader }
@@ -88,6 +104,7 @@ export default async function handler(req, res) {
       }
       const variantId = variant.id;
 
+      // 5) Create product
       const productPayload = {
         title: `CHAINVERS Tee ${crop_id}`,
         description: `Unikátne tričko s panelom ${crop_id}`,
@@ -134,6 +151,7 @@ export default async function handler(req, res) {
       }
       product = created;
 
+      // 6) Publish product
       await fetch(
         `https://api.printify.com/v1/shops/${shopId}/products/${product.id}/publish.json`,
         {
@@ -149,6 +167,7 @@ export default async function handler(req, res) {
         }
       );
 
+      // načítaj detail produktu kvôli preview obrázkom
       const createdDetailResp = await fetch(
         `https://api.printify.com/v1/shops/${shopId}/products/${product.id}.json`,
         { headers: authHeader }
@@ -158,6 +177,7 @@ export default async function handler(req, res) {
         product = createdDetailData;
       }
 
+      // 7) Create order (test)
       const orderPayload = {
         external_id: externalId,
         line_items: [
