@@ -1,4 +1,4 @@
-console.log("=== BOOT: CHAINVERS chaingetcashdraw.js (FINAL ROBUST) ===");
+console.log("=== BOOT: CHAINVERS chaingetcashdraw.js (FINAL LIVE) ===");
 
 import Web3 from "web3";
 import axios from "axios";
@@ -85,16 +85,6 @@ function normalizeUser(u) {
   return String(u || "").trim().toLowerCase();
 }
 
-function normalizeCrypto(c) {
-  return String(c || "ETH").trim().toUpperCase();
-}
-
-function makeTestOrderId(user, crypto) {
-  const walletPart = (user || "").slice(0, 10).replace(/[^a-zA-Z0-9]/g, "");
-  const rand = Math.random().toString(36).slice(2, 8).toUpperCase();
-  return `TEST-${crypto}-${walletPart}-${Date.now()}-${rand}`;
-}
-
 /* ============================================================
    LOAD ORDERS
 ============================================================ */
@@ -141,13 +131,17 @@ async function loadOrders(user, log){
 /* ============================================================
    SUM AVAILABLE
 ============================================================ */
-function sumAvailableOrders(orders, user, log) {
+function sumAvailableOrders(orders, user, tokenId, log) {
   let maxEth = 0;
   let countMatched = 0;
 
   for (const o of orders) {
     if (!o || !o.user_address) continue;
     if (String(o.user_address).toLowerCase() !== user.toLowerCase()) continue;
+
+    const orderTokenId = Number(o.token_id || 0);
+    if (!orderTokenId) continue;
+    if (Number(tokenId) !== orderTokenId) continue;
 
     const gainRaw = o.contract_gain ?? 0;
     const gain = Number(String(gainRaw).replace(",", "."));
@@ -160,36 +154,6 @@ function sumAvailableOrders(orders, user, log) {
   log.push("[MATCHED ORDERS]", countMatched);
   log.push("[MAX FROM ORDERS ETH]", maxEth);
   return maxEth;
-}
-
-/* ============================================================
-   BUILD TEST ORDER
-============================================================ */
-function buildTestOrder({ user, crypto, amount, maxEth, tokenId, log }) {
-  const supportedLiveWithdraw = ["ETH"];
-  const liveSupported = supportedLiveWithdraw.includes(crypto);
-
-  const testOrder = {
-    ok: true,
-    test: true,
-    action: "test_order",
-    order_id: makeTestOrderId(user, crypto),
-    wallet: user,
-    token_id: tokenId || null,
-    selected_crypto: crypto,
-    selected_amount: amount,
-    network: "BASE",
-    available_eth_from_orders: maxEth,
-    live_withdraw_supported: liveSupported,
-    status: "created_for_testing",
-    note: liveSupported
-      ? "Selected crypto is supported for live backend withdraw."
-      : "This is a test order only. Live backend withdraw is currently implemented for ETH only.",
-    created_at: new Date().toISOString()
-  };
-
-  log.push("[TEST ORDER CREATED]", testOrder);
-  return testOrder;
 }
 
 /* ============================================================
@@ -211,12 +175,6 @@ export default async function handler(req, res){
     log.push("[BODY]", body);
     log.push("[QUERY]", req.query || {});
 
-    const action =
-      body.action ||
-      req.query?.action ||
-      req.headers["x-action"] ||
-      "withdraw";
-
     const user = normalizeUser(
       body.user ||
       req.query?.user ||
@@ -230,24 +188,15 @@ export default async function handler(req, res){
 
     const reqEth = Number(amountRaw);
 
-    const crypto = normalizeCrypto(
-      body.crypto ||
-      req.query?.crypto ||
-      req.headers["x-crypto"] ||
-      "ETH"
-    );
-
     const tokenId =
       body.token_id ||
       req.query?.token_id ||
       req.headers["x-token-id"] ||
       null;
 
-    log.push("[ACTION]", action);
     log.push("[REQ USER]", user);
     log.push("[REQ AMOUNT RAW]", amountRaw);
     log.push("[REQ AMOUNT NUM]", reqEth);
-    log.push("[REQ CRYPTO]", crypto);
     log.push("[REQ TOKEN ID]", tokenId);
 
     if(!user){
@@ -255,25 +204,9 @@ export default async function handler(req, res){
       return res.json({ok:false,error:"bad_input_user",logs:log.rows});
     }
 
-    const orders = await loadOrders(user, log);
-    const maxEth = sumAvailableOrders(orders, user, log);
-
-    if (action === "test_order") {
-      const testOrder = buildTestOrder({
-        user,
-        crypto,
-        amount: Number.isFinite(reqEth) ? reqEth : null,
-        maxEth,
-        tokenId,
-        log
-      });
-
-      return res.json({
-        ok: true,
-        action: "test_order",
-        order: testOrder,
-        logs: log.rows
-      });
+    if(!tokenId || Number(tokenId) <= 0){
+      log.push("[FAIL] BAD TOKEN ID");
+      return res.json({ok:false,error:"bad_input_token_id",logs:log.rows});
     }
 
     if(!reqEth || reqEth <= 0){
@@ -281,15 +214,8 @@ export default async function handler(req, res){
       return res.json({ok:false,error:"bad_input_amount",logs:log.rows});
     }
 
-    if (crypto !== "ETH") {
-      log.push("[FAIL] LIVE WITHDRAW ONLY FOR ETH");
-      return res.json({
-        ok:false,
-        error:"live_withdraw_only_eth",
-        selected_crypto: crypto,
-        logs: log.rows
-      });
-    }
+    const orders = await loadOrders(user, log);
+    const maxEth = sumAvailableOrders(orders, user, tokenId, log);
 
     const web3 = await initWeb3(log);
     const contractAddr = process.env.CONTRACT_ADDRESS;
@@ -374,9 +300,8 @@ export default async function handler(req, res){
 
     return res.json({
       ok:true,
-      action:"withdraw",
       tx: sent.transactionHash,
-      selected_crypto: crypto,
+      token_id: Number(tokenId),
       requested_eth: reqEth,
       sent_eth: web3.utils.fromWei(netWei.toString(),"ether"),
       gas_paid_by_backend: web3.utils.fromWei(gasCostWei.toString(),"ether"),
