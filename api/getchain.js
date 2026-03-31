@@ -82,7 +82,7 @@ export default async function handler(req, res) {
         ? variantsData.variants
         : [];
 
-      const variant = variants[0]; // vezmeme prvý variant (napr. S / Asphalt)
+      const variant = variants[0];
       if (!variant) {
         return res.status(500).json({
           ok: false,
@@ -155,6 +155,16 @@ export default async function handler(req, res) {
         }
       );
 
+      // načítaj detail produktu kvôli preview obrázkom
+      const createdDetailResp = await fetch(
+        `https://api.printify.com/v1/shops/${shopId}/products/${product.id}.json`,
+        { headers: authHeader }
+      );
+      const createdDetailData = await createdDetailResp.json();
+      if (createdDetailResp.ok && createdDetailData.id) {
+        product = createdDetailData;
+      }
+
       // 7) Create order (test)
       const orderPayload = {
         external_id: externalId,
@@ -186,12 +196,22 @@ export default async function handler(req, res) {
         }
       );
       order = await orderResp.json();
+
       if (!orderResp.ok) {
-        return res.status(500).json({
-          ok: false,
-          error: "Order creation failed",
-          resp: order,
-        });
+        const duplicateOrder =
+          order?.code === 8100 &&
+          typeof order?.errors?.reason === "string" &&
+          order.errors.reason.includes("already exists");
+
+        if (!duplicateOrder) {
+          return res.status(500).json({
+            ok: false,
+            error: "Order creation failed",
+            resp: order,
+          });
+        }
+
+        order = null;
       }
     } else {
       const detailResp = await fetch(
