@@ -1,7 +1,6 @@
-console.log("=== BOOT: CHAINVERS chaingetcashdraw.js (FINAL LIVE) ===");
+console.log("=== BOOT: CHAINVERS chaingetcashdraw.js (FINAL LIVE INTERNAL) ===");
 
 import Web3 from "web3";
-import axios from "axios";
 
 export const maxDuration = 60;
 
@@ -86,83 +85,12 @@ function normalizeUser(u) {
 }
 
 /* ============================================================
-   LOAD ORDERS
-============================================================ */
-async function loadOrders(user, log){
-  const base = process.env.INF_FREE_URL || "https://chainvers.free.nf";
-  const url = `${base.replace(/\/+$/, "")}/chaindraw.php?api=get_orders_raw&user=${encodeURIComponent(user)}`;
-
-  log.push("[ORDERS FETCH]", url);
-
-  const r = await axios.get(url, {
-    timeout: 15000,
-    responseType: "text",
-    transformResponse: [data => data]
-  });
-
-  if (Array.isArray(r.data)) {
-    log.push("[ORDERS FETCH OK ARRAY] COUNT", r.data.length);
-    return r.data;
-  }
-
-  if (typeof r.data === "string") {
-    const raw = r.data.trim();
-    log.push("[ORDERS FETCH STRING LEN]", raw.length);
-    log.push("[ORDERS FETCH STRING PREVIEW]", raw.slice(0, 300));
-
-    try {
-      const parsed = JSON.parse(raw);
-      if (Array.isArray(parsed)) {
-        log.push("[ORDERS PARSED FROM STRING] COUNT", parsed.length);
-        return parsed;
-      }
-      log.push("[ORDERS PARSED BUT NOT ARRAY]", typeof parsed);
-      return [];
-    } catch (e) {
-      log.push("[ORDERS JSON PARSE FAIL]", e.message);
-      return [];
-    }
-  }
-
-  log.push("[ORDERS FETCH NON-ARRAY]", typeof r.data);
-  return [];
-}
-
-/* ============================================================
-   SUM AVAILABLE
-============================================================ */
-function sumAvailableOrders(orders, user, tokenId, log) {
-  let maxEth = 0;
-  let countMatched = 0;
-
-  for (const o of orders) {
-    if (!o || !o.user_address) continue;
-    if (String(o.user_address).toLowerCase() !== user.toLowerCase()) continue;
-
-    const orderTokenId = Number(o.token_id || 0);
-    if (!orderTokenId) continue;
-    if (Number(tokenId) !== orderTokenId) continue;
-
-    const gainRaw = o.contract_gain ?? 0;
-    const gain = Number(String(gainRaw).replace(",", "."));
-    if (!Number.isFinite(gain) || gain <= 0) continue;
-
-    countMatched++;
-    maxEth += gain;
-  }
-
-  log.push("[MATCHED ORDERS]", countMatched);
-  log.push("[MAX FROM ORDERS ETH]", maxEth);
-  return maxEth;
-}
-
-/* ============================================================
    MAIN HANDLER
 ============================================================ */
 export default async function handler(req, res){
   res.setHeader("Access-Control-Allow-Origin","*");
-  res.setHeader("Access-Control-Allow-Headers","*");
-  res.setHeader("Access-Control-Allow-Methods","GET,POST,OPTIONS");
+  res.setHeader("Access-Control-Allow-Headers","Content-Type");
+  res.setHeader("Access-Control-Allow-Methods","POST,OPTIONS");
   if(req.method==="OPTIONS") return res.end();
 
   const log = mkLog();
@@ -173,38 +101,21 @@ export default async function handler(req, res){
     const body = await parseBody(req);
 
     log.push("[BODY]", body);
-    log.push("[QUERY]", req.query || {});
 
-    const user = normalizeUser(
-      body.user ||
-      req.query?.user ||
-      req.headers["x-user"]
-    );
-
-    const amountRaw =
-      body.amount ||
-      req.query?.amount ||
-      req.headers["x-amount"];
-
-    const reqEth = Number(amountRaw);
-
-    const tokenId =
-      body.token_id ||
-      req.query?.token_id ||
-      req.headers["x-token-id"] ||
-      null;
+    const user = normalizeUser(body.user);
+    const tokenId = Number(body.token_id || 0);
+    const reqEth = Number(body.amount || 0);
 
     log.push("[REQ USER]", user);
-    log.push("[REQ AMOUNT RAW]", amountRaw);
-    log.push("[REQ AMOUNT NUM]", reqEth);
     log.push("[REQ TOKEN ID]", tokenId);
+    log.push("[REQ AMOUNT NUM]", reqEth);
 
     if(!user){
       log.push("[FAIL] NO USER");
       return res.json({ok:false,error:"bad_input_user",logs:log.rows});
     }
 
-    if(!tokenId || Number(tokenId) <= 0){
+    if(!tokenId || tokenId <= 0){
       log.push("[FAIL] BAD TOKEN ID");
       return res.json({ok:false,error:"bad_input_token_id",logs:log.rows});
     }
@@ -213,9 +124,6 @@ export default async function handler(req, res){
       log.push("[FAIL] BAD AMOUNT");
       return res.json({ok:false,error:"bad_input_amount",logs:log.rows});
     }
-
-    const orders = await loadOrders(user, log);
-    const maxEth = sumAvailableOrders(orders, user, tokenId, log);
 
     const web3 = await initWeb3(log);
     const contractAddr = process.env.CONTRACT_ADDRESS;
@@ -239,11 +147,6 @@ export default async function handler(req, res){
     log.push("[OWNER]", owner.address);
     log.push("[CONTRACT]", contractAddr);
 
-    if(reqEth > maxEth){
-      log.push("[DENY] EXCEEDS BALANCE", "REQ", reqEth, "MAX", maxEth);
-      return res.json({ok:false,error:"exceeds_balance",max:maxEth,logs:log.rows});
-    }
-
     const grossWei = web3.utils.toWei(reqEth.toString(),"ether");
     log.push("[GROSS WEI]", grossWei);
 
@@ -251,7 +154,10 @@ export default async function handler(req, res){
     const gasLimit = await method.estimateGas({from: owner.address});
 
     const block = await web3.eth.getBlock("latest");
-    const baseFee = block?.baseFeePerGas ? BigInt(block.baseFeePerGas) : BigInt(web3.utils.toWei("0.0000005","ether"));
+    const baseFee = block?.baseFeePerGas
+      ? BigInt(block.baseFeePerGas)
+      : BigInt(web3.utils.toWei("0.0000005","ether"));
+
     const maxFeePerGas = baseFee * 2n;
     const priorityFee = BigInt(web3.utils.toWei("0.0000005","ether"));
     const gasCostWei = BigInt(gasLimit) * maxFeePerGas;
@@ -301,11 +207,10 @@ export default async function handler(req, res){
     return res.json({
       ok:true,
       tx: sent.transactionHash,
-      token_id: Number(tokenId),
+      token_id: tokenId,
       requested_eth: reqEth,
       sent_eth: web3.utils.fromWei(netWei.toString(),"ether"),
       gas_paid_by_backend: web3.utils.fromWei(gasCostWei.toString(),"ether"),
-      max_available_eth: maxEth,
       logs: log.rows
     });
 
