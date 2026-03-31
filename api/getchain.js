@@ -194,7 +194,21 @@ export default async function handler(req, res) {
         });
       }
     } else {
-      product = existing;
+      const detailResp = await fetch(
+        `https://api.printify.com/v1/shops/${shopId}/products/${existing.id}.json`,
+        { headers: authHeader }
+      );
+      const detailData = await detailResp.json();
+
+      if (!detailResp.ok || !detailData.id) {
+        return res.status(500).json({
+          ok: false,
+          error: "Existing product detail load failed",
+          resp: detailData,
+        });
+      }
+
+      product = detailData;
     }
 
     return res.status(200).json({ ok: true, product, order, exists: !!existing });
