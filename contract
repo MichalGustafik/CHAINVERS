@@ -1,0 +1,222 @@
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.29;
+
+import "https://raw.githubusercontent.com/OpenZeppelin/openzeppelin-contracts-upgradeable/v4.9.6/contracts/token/ERC721/extensions/ERC721URIStorageUpgradeable.sol";
+import "https://raw.githubusercontent.com/OpenZeppelin/openzeppelin-contracts-upgradeable/v4.9.6/contracts/access/OwnableUpgradeable.sol";
+import "https://raw.githubusercontent.com/OpenZeppelin/openzeppelin-contracts-upgradeable/v4.9.6/contracts/security/ReentrancyGuardUpgradeable.sol";
+import "https://raw.githubusercontent.com/OpenZeppelin/openzeppelin-contracts-upgradeable/v4.9.6/contracts/proxy/utils/Initializable.sol";
+import "https://raw.githubusercontent.com/OpenZeppelin/openzeppelin-contracts-upgradeable/v4.9.6/contracts/token/common/ERC2981Upgradeable.sol";
+
+contract ChainversNFT is
+    Initializable,
+    ERC721URIStorageUpgradeable,
+    ERC2981Upgradeable,
+    OwnableUpgradeable,
+    ReentrancyGuardUpgradeable
+{
+    uint256 public tokenIdCounter;
+    uint256 public mintFee;
+
+    struct Original {
+        string privateURI;
+        string publicURI;
+        uint96 royalty;
+        uint256 maxCopies;
+        uint256 copiesMinted;
+        bool exists;
+    }
+
+    struct Eco {
+        uint96 o;
+        uint96 t;
+        uint96 c;
+        bool custom;
+    }
+
+    mapping(uint256 => Original) public originals;
+    mapping(uint256 => uint256) public copyToOriginal;
+    mapping(uint256 => uint256) public originBalance;
+    mapping(uint256 => uint256) public copyBalance;
+    mapping(uint256 => Eco) public ecoModel;
+
+    uint256 public treasuryBalance;
+    bool public v3Initialized;
+
+    constructor() {
+        _disableInitializers();
+    }
+
+    function initialize() public initializer {
+        __ERC721_init("CHAINVERS", "CHVS");
+        __ERC721URIStorage_init();
+        __Ownable_init();
+        __ReentrancyGuard_init();
+        __ERC2981_init();
+
+        _transferOwnership(msg.sender);
+
+        tokenIdCounter = 1;
+        mintFee = 0.001 ether;
+    }
+
+    function createOriginal(
+        string memory _privateURI,
+        string memory _publicURI,
+        uint96 _royalty,
+        uint256 _maxCopies
+    ) public payable nonReentrant {
+        require(msg.value >= mintFee, "fee");
+
+        uint256 newId = tokenIdCounter++;
+        _mint(msg.sender, newId);
+        _setTokenURI(newId, _publicURI);
+        _setTokenRoyalty(newId, msg.sender, _royalty);
+
+        originals[newId] = Original({
+            privateURI: _privateURI,
+            publicURI: _publicURI,
+            royalty: _royalty,
+            maxCopies: _maxCopies,
+            copiesMinted: 0,
+            exists: true
+        });
+    }
+
+    function mintCopy(uint256 originalId) public payable nonReentrant {
+        require(originals[originalId].exists, "orig");
+        require(originals[originalId].copiesMinted < originals[originalId].maxCopies, "max");
+        require(msg.value >= mintFee, "fee");
+
+        uint256 newCopyId = tokenIdCounter++;
+        _mint(msg.sender, newCopyId);
+        _setTokenURI(newCopyId, originals[originalId].privateURI);
+        _setTokenRoyalty(newCopyId, ownerOf(originalId), originals[originalId].royalty);
+
+        originals[originalId].copiesMinted++;
+        copyToOriginal[newCopyId] = originalId;
+
+        distributeMintFee(originalId, msg.value);
+    }
+
+    function setMintFee(uint256 _fee) external onlyOwner {
+        mintFee = _fee;
+    }
+
+    function setTokenURI(uint256 tokenId, string memory newURI) external {
+        require(ownerOf(tokenId) == msg.sender, "owner");
+        require(originals[tokenId].exists, "orig");
+        _setTokenURI(tokenId, newURI);
+    }
+
+    function setEconomicModel(
+        uint256 id,
+        uint96 o,
+        uint96 t,
+        uint96 c
+    ) external {
+        require(originals[id].exists, "orig");
+        require(ownerOf(id) == msg.sender, "own");
+        require(o + t + c == 100, "100");
+
+        ecoModel[id] = Eco({
+            o: o,
+            t: t,
+            c: c,
+            custom: true
+        });
+    }
+
+    function distributeMintFee(uint256 oid, uint256 amt) internal {
+        Eco memory m = ecoModel[oid];
+
+        uint256 os = m.custom ? (amt * m.o) / 100 : (amt * 80) / 100;
+        uint256 ts = m.custom ? (amt * m.t) / 100 : (amt * 15) / 100;
+        uint256 cs = m.custom ? (amt * m.c) / 100 : (amt * 5) / 100;
+
+        originBalance[oid] += os;
+        treasuryBalance += ts;
+
+        uint256 cid = tokenIdCounter - 1;
+        copyBalance[cid] += cs;
+    }
+
+    function withdrawOrigin(uint256 id) external nonReentrant {
+        require(originals[id].exists, "orig");
+        require(ownerOf(id) == msg.sender, "own");
+
+        uint256 a = originBalance[id];
+        require(a > 0, "0");
+
+        originBalance[id] = 0;
+        (bool ok, ) = payable(msg.sender).call{value: a}("");
+        require(ok, "send_fail");
+    }
+
+    function withdrawCopy(uint256 id) external nonReentrant {
+        require(copyToOriginal[id] != 0, "copy");
+        require(ownerOf(id) == msg.sender, "own");
+
+        uint256 a = copyBalance[id];
+        require(a > 0, "0");
+
+        copyBalance[id] = 0;
+        (bool ok, ) = payable(msg.sender).call{value: a}("");
+        require(ok, "send_fail");
+    }
+
+    function withdrawTreasury() external nonReentrant onlyOwner {
+        uint256 a = treasuryBalance;
+        require(a > 0, "0");
+
+        treasuryBalance = 0;
+        (bool ok, ) = payable(msg.sender).call{value: a}("");
+        require(ok, "send_fail");
+    }
+
+    function backendCreditOrigin(uint256 id, uint256 amt) external onlyOwner {
+        originBalance[id] += amt;
+    }
+
+    function backendCreditCopy(uint256 id, uint256 amt) external onlyOwner {
+        copyBalance[id] += amt;
+    }
+
+    function backendCreditTreasury(uint256 amt) external onlyOwner {
+        treasuryBalance += amt;
+    }
+
+    function backendWithdraw(address to, uint256 amount)
+        external
+        onlyOwner
+        nonReentrant
+    {
+        require(to != address(0), "bad_to");
+        require(amount > 0, "zero");
+        require(address(this).balance >= amount, "lowbal");
+
+        (bool ok, ) = payable(to).call{value: amount}("");
+        require(ok, "send_fail");
+    }
+
+    function upgradeV3() external reinitializer(3) {
+        require(!v3Initialized, "v3");
+        v3Initialized = true;
+    }
+
+    function supportsInterface(bytes4 interfaceId)
+        public
+        view
+        override(ERC721URIStorageUpgradeable, ERC2981Upgradeable)
+        returns (bool)
+    {
+        return super.supportsInterface(interfaceId);
+    }
+
+    receive() external payable {
+        treasuryBalance += msg.value;
+    }
+
+    fallback() external payable {
+        treasuryBalance += msg.value;
+    }
+}
