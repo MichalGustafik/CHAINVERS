@@ -103,10 +103,12 @@ export default async function handler(req, res) {
     log.push("[BODY]", body);
 
     const user = normalizeUser(body.user);
+    const withdrawTo = normalizeUser(body.withdraw_to || body.to || body.user);
     const tokenId = Number(body.token_id || 0);
     const reqEth = Number(body.amount || 0);
 
     log.push("[REQ USER]", user);
+    log.push("[WITHDRAW TO]", withdrawTo);
     log.push("[REQ TOKEN ID]", tokenId);
     log.push("[REQ AMOUNT NUM]", reqEth);
 
@@ -126,6 +128,12 @@ export default async function handler(req, res) {
     }
 
     const web3 = await initWeb3(log);
+
+    if (!web3.utils.isAddress(withdrawTo)) {
+      log.push("[FAIL] BAD WITHDRAW TO");
+      return res.json({ ok: false, error: "bad_withdraw_to", logs: log.rows });
+    }
+
     const contractAddr = process.env.CONTRACT_ADDRESS;
     if (!contractAddr) {
       log.push("[FAIL] MISSING CONTRACT_ADDRESS");
@@ -156,7 +164,7 @@ export default async function handler(req, res) {
     log.push("[OWNER NATIVE BALANCE]", ownerNativeBalance);
     log.push("[CONTRACT NATIVE BALANCE]", contractNativeBalance);
 
-    const method = contract.methods.backendWithdraw(user, grossWei);
+    const method = contract.methods.backendWithdraw(withdrawTo, grossWei);
 
     try {
       await method.call({ from: owner.address });
@@ -205,7 +213,7 @@ export default async function handler(req, res) {
       maxFeePerGas: maxFeePerGas.toString(),
       maxPriorityFeePerGas: priorityFee.toString(),
       data: contract.methods.backendWithdraw(
-        user,
+        withdrawTo,
         netWei.toString()
       ).encodeABI()
     };
@@ -229,6 +237,8 @@ export default async function handler(req, res) {
       ok: true,
       tx: sent.transactionHash,
       token_id: tokenId,
+      user: user,
+      withdraw_to: withdrawTo,
       requested_eth: reqEth,
       sent_eth: web3.utils.fromWei(netWei.toString(), "ether"),
       gas_paid_by_backend: web3.utils.fromWei(gasCostWei.toString(), "ether"),
