@@ -1,4 +1,4 @@
-console.log("=== BOOT: CHAINVERS chaingetcashdraw.js (FINAL LIVE INTERNAL) ===");
+console.log("=== BOOT: CHAINVERS chaingetcashdraw.js (FINAL LIVE INTERNAL ENV ABI) ===");
 
 import Web3 from "web3";
 
@@ -64,24 +64,24 @@ async function initWeb3(log) {
 }
 
 /* ============================================================
-   ABI – BACKEND WITHDRAW ONLY
-============================================================ */
-const ABI = [{
-  inputs: [
-    { internalType: "address", name: "to", type: "address" },
-    { internalType: "uint256", name: "amount", type: "uint256" }
-  ],
-  name: "backendWithdraw",
-  outputs: [],
-  stateMutability: "nonpayable",
-  type: "function"
-}];
-
-/* ============================================================
    HELPERS
 ============================================================ */
 function normalizeUser(u) {
   return String(u || "").trim().toLowerCase();
+}
+
+function loadAbi(log) {
+  try {
+    const abi = JSON.parse(process.env.CONTRACT_ABI || "[]");
+    if (!Array.isArray(abi) || abi.length === 0) {
+      throw new Error("CONTRACT_ABI_EMPTY");
+    }
+    log.push("[ABI LOADED]", abi.length, "items");
+    return abi;
+  } catch (e) {
+    log.push("[ABI LOAD FAIL]", e.message || String(e));
+    throw new Error("invalid_contract_abi");
+  }
 }
 
 /* ============================================================
@@ -145,6 +145,7 @@ export default async function handler(req, res) {
       return res.json({ ok: false, error: "missing_private_key", logs: log.rows });
     }
 
+    const ABI = loadAbi(log);
     const contract = new web3.eth.Contract(ABI, contractAddr);
 
     const owner = web3.eth.accounts.privateKeyToAccount(
@@ -152,8 +153,26 @@ export default async function handler(req, res) {
     );
     web3.eth.accounts.wallet.add(owner);
 
-    log.push("[OWNER]", owner.address);
+    log.push("[OWNER FROM PRIVATE KEY]", owner.address);
     log.push("[CONTRACT]", contractAddr);
+
+    try {
+      const realOwner = await contract.methods.owner().call();
+      log.push("[CONTRACT OWNER()]", realOwner);
+
+      if (realOwner.toLowerCase() !== owner.address.toLowerCase()) {
+        log.push("[OWNER MISMATCH]", "PRIVATE_KEY_OWNER", owner.address, "CONTRACT_OWNER", realOwner);
+        return res.json({
+          ok: false,
+          error: "owner_mismatch",
+          private_key_owner: owner.address,
+          contract_owner: realOwner,
+          logs: log.rows
+        });
+      }
+    } catch (e) {
+      log.push("[OWNER CHECK FAIL]", e.message || String(e));
+    }
 
     const grossWei = web3.utils.toWei(reqEth.toString(), "ether");
     log.push("[GROSS WEI]", grossWei);
