@@ -8,8 +8,8 @@ function isValidAddress(addr) {
   return web3.utils.isAddress(addr);
 }
 
-function encodeFunctionCall(metadataURI) {
-  const abi = [{
+const contractAbi = [
+  {
     type: 'function',
     name: 'createOriginal',
     inputs: [
@@ -18,8 +18,18 @@ function encodeFunctionCall(metadataURI) {
       { type: 'uint96', name: 'royaltyFeeNumerator' },
       { type: 'uint256', name: 'maxCopies' }
     ]
-  }];
-  const contract = new web3.eth.Contract(abi);
+  },
+  {
+    type: 'function',
+    name: 'mintFee',
+    inputs: [],
+    outputs: [{ type: 'uint256' }],
+    stateMutability: 'view'
+  }
+];
+
+function encodeFunctionCall(metadataURI) {
+  const contract = new web3.eth.Contract(contractAbi);
 
   log(`📎 metadataURI to send in contract: ${metadataURI}`);
 
@@ -94,15 +104,28 @@ export default async function handler(req, res) {
     const balance = await web3.eth.getBalance(FROM);
     log(`🔗 Chain ID: ${chainId}, balance: ${web3.utils.fromWei(balance)} ETH`);
 
+    const contract = new web3.eth.Contract(contractAbi, TO);
+    const mintFee = await contract.methods.mintFee().call();
+
+    log(`💰 Mint fee: ${web3.utils.fromWei(mintFee)} ETH`);
+
     const gasPrice = await getGasPrice();
     const data = encodeFunctionCall(metadataURI);
-    const gasLimit = await web3.eth.estimateGas({ from: FROM, to: TO, data });
+
+    const gasLimit = await web3.eth.estimateGas({
+      from: FROM,
+      to: TO,
+      data,
+      value: mintFee
+    });
 
     const gasCost = web3.utils.toBN(gasPrice).mul(web3.utils.toBN(gasLimit));
-    if (web3.utils.toBN(balance).lt(gasCost)) {
+    const totalCost = gasCost.add(web3.utils.toBN(mintFee));
+
+    if (web3.utils.toBN(balance).lt(totalCost)) {
       return res.status(400).json({
-        error: 'Insufficient ETH for gas',
-        required: web3.utils.fromWei(gasCost),
+        error: 'Insufficient ETH for mintFee + gas',
+        required: web3.utils.fromWei(totalCost),
         have: web3.utils.fromWei(balance)
       });
     }
@@ -113,6 +136,7 @@ export default async function handler(req, res) {
       nonce: await web3.eth.getTransactionCount(FROM),
       gasPrice: web3.utils.toHex(gasPrice),
       gas: web3.utils.toHex(gasLimit),
+      value: web3.utils.toHex(mintFee),
       data,
     };
 
