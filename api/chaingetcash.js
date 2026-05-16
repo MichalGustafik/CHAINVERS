@@ -34,21 +34,49 @@ async function initWeb3() {
 const web3 = await initWeb3();
 
 /* ============================================================
-   ABI – only mintCopy (your contract)
+   ABI
 ============================================================ */
 const ABI = [
   {
     type: "function",
-    name: "mintCopy",
-    inputs: [{ type: "uint256", name: "originalId" }],
-    stateMutability: "payable"
+    name: "isOriginalToken",
+    inputs: [{ type: "uint256", name: "id" }],
+    outputs: [{ type: "bool" }],
+    stateMutability: "view"
+  },
+  {
+    type: "function",
+    name: "backendCreditOrigin",
+    inputs: [
+      { type: "uint256", name: "id" },
+      { type: "uint256", name: "amt" }
+    ],
+    stateMutability: "nonpayable"
+  },
+  {
+    type: "function",
+    name: "backendCreditCopy",
+    inputs: [
+      { type: "uint256", name: "id" },
+      { type: "uint256", name: "amt" }
+    ],
+    stateMutability: "nonpayable"
+  },
+  {
+    type: "function",
+    name: "tokenAvailableForWithdraw",
+    inputs: [{ type: "uint256", name: "id" }],
+    outputs: [{ type: "uint256" }],
+    stateMutability: "view"
   }
 ];
 
 /* ============================================================
-   LOGGING – InfinityFree AntiBot bypass
+   LOGGING
 ============================================================ */
 async function sendLog(msg) {
+  if (!INF_FREE_URL) return;
+
   const target = `${INF_FREE_URL}/accptpay.php?action=save_log`;
 
   try {
@@ -59,10 +87,13 @@ async function sendLog(msg) {
         "User-Agent": "Mozilla/5.0",
         "Referer": INF_FREE_URL
       },
-      body: new URLSearchParams({ message: `[${new Date().toISOString()}] ${msg}` })
+      body: new URLSearchParams({
+        message: `[${new Date().toISOString()}] ${msg}`
+      })
     });
 
-    let t1 = await r1.text();
+    const t1 = await r1.text();
+
     if (!t1.includes("__test=")) return;
 
     const match = t1.match(/__test=([a-fA-F0-9]+)/);
@@ -77,10 +108,11 @@ async function sendLog(msg) {
           "Cookie": `__test=${cookieValue}`,
           "Referer": INF_FREE_URL
         },
-        body: new URLSearchParams({ message: `[${new Date().toISOString()}] ${msg}` })
+        body: new URLSearchParams({
+          message: `[${new Date().toISOString()}] ${msg}`
+        })
       });
     }
-
   } catch (e) {
     console.log("log_fail:", e.message);
   }
@@ -88,11 +120,11 @@ async function sendLog(msg) {
 
 const log = async (...m) => {
   console.log(...m);
-  sendLog(m.join(" "));
+  await sendLog(m.join(" "));
 };
 
 /* ============================================================
-   UTIL: RATE, GAS, BALANCE
+   UTIL
 ============================================================ */
 async function getRate() {
   try {
@@ -107,8 +139,11 @@ async function getRate() {
 }
 
 async function getGas() {
-  try { return await web3.eth.getGasPrice(); }
-  catch { return web3.utils.toWei("0.2", "gwei"); }
+  try {
+    return await web3.eth.getGasPrice();
+  } catch {
+    return web3.utils.toWei("0.2", "gwei");
+  }
 }
 
 async function balanceEth() {
@@ -116,40 +151,45 @@ async function balanceEth() {
   return Number(web3.utils.fromWei(w, "ether"));
 }
 
-/* ============================================================
-   MINT with contract balance tracking
-============================================================ */
-async function sendMint(tokenId, ethValue) {
-
-  const contract = new web3.eth.Contract(ABI, CONTRACT);
-
-  const valueWei =
-    Number(ethValue) === 0 ? "0" : web3.utils.toWei(ethValue.toString(), "ether");
-
-  await log(`MINT → token=${tokenId}, ETH=${ethValue}, WEI=${valueWei}`);
-
-  // CONTRACT BALANCE BEFORE
-  const bal_before = await web3.eth.getBalance(CONTRACT);
-  await log(`CONTRACT BEFORE = ${web3.utils.fromWei(bal_before)} ETH`);
-
+async function sendEthToContract(valueWei) {
   const gasPrice = await getGas();
-
-  let gasLimit;
-  try {
-    gasLimit = await contract.methods.mintCopy(tokenId).estimateGas({
-      from: FROM,
-      value: valueWei
-    });
-  } catch(e) {
-    await log("⚠️ estimateGas FAIL:", e.message);
-    throw e;
-  }
 
   const tx = {
     from: FROM,
     to: CONTRACT,
     value: valueWei,
-    data: contract.methods.mintCopy(tokenId).encodeABI(),
+    gas: 50000,
+    gasPrice,
+    nonce: await web3.eth.getTransactionCount(FROM, "pending"),
+    chainId: await web3.eth.getChainId()
+  };
+
+  const signed = await web3.eth.accounts.signTransaction(tx, PRIVATE_KEY);
+  const receipt = await web3.eth.sendSignedTransaction(signed.rawTransaction);
+
+  return receipt.transactionHash;
+}
+
+async function creditInternalBalance(tokenId, valueWei) {
+  const contract = new web3.eth.Contract(ABI, CONTRACT);
+
+  const isOriginal = await contract.methods.isOriginalToken(tokenId).call();
+
+  const method = isOriginal
+    ? contract.methods.backendCreditOrigin(tokenId, valueWei)
+    : contract.methods.backendCreditCopy(tokenId, valueWei);
+
+  const gasPrice = await getGas();
+
+  const gasLimit = await method.estimateGas({
+    from: FROM
+  });
+
+  const tx = {
+    from: FROM,
+    to: CONTRACT,
+    value: "0",
+    data: method.encodeABI(),
     gas: gasLimit,
     gasPrice,
     nonce: await web3.eth.getTransactionCount(FROM, "pending"),
@@ -157,31 +197,53 @@ async function sendMint(tokenId, ethValue) {
   };
 
   const signed = await web3.eth.accounts.signTransaction(tx, PRIVATE_KEY);
+  const receipt = await web3.eth.sendSignedTransaction(signed.rawTransaction);
 
-  try {
-    const receipt = await web3.eth.sendSignedTransaction(signed.rawTransaction);
+  const available = await contract.methods.tokenAvailableForWithdraw(tokenId).call();
 
-    const hash = receipt.transactionHash;
-    await log(`🔥 Mint OK → TX=${hash}`);
+  return {
+    txHash: receipt.transactionHash,
+    tokenType: isOriginal ? "origin" : "copy",
+    availableWei: available,
+    availableEth: web3.utils.fromWei(available, "ether")
+  };
+}
 
-    // CONTRACT BALANCE AFTER
-    const bal_after = await web3.eth.getBalance(CONTRACT);
-    await log(`CONTRACT AFTER = ${web3.utils.fromWei(bal_after)} ETH`);
+async function creditNFT(tokenId, ethValue) {
+  const valueWei = web3.utils.toWei(ethValue.toString(), "ether");
 
-    const gain = Number(web3.utils.fromWei(bal_after)) - Number(web3.utils.fromWei(bal_before));
-    await log(`GAIN = ${gain} ETH`);
+  await log(`CREDIT NFT START → token=${tokenId}, ETH=${ethValue}, WEI=${valueWei}`);
 
-    return {
-      hash,
-      bal_before,
-      bal_after,
-      gain
-    };
+  const balBefore = await web3.eth.getBalance(CONTRACT);
+  await log(`CONTRACT BEFORE = ${web3.utils.fromWei(balBefore, "ether")} ETH`);
 
-  } catch(e) {
-    await log(`❌ Mint FAIL → ${e.message}`);
-    throw e;
-  }
+  await log("STEP 1 → SEND ETH TO CONTRACT");
+  const txSend = await sendEthToContract(valueWei);
+  await log(`SEND ETH OK → TX=${txSend}`);
+
+  const balMiddle = await web3.eth.getBalance(CONTRACT);
+  await log(`CONTRACT AFTER SEND = ${web3.utils.fromWei(balMiddle, "ether")} ETH`);
+
+  await log("STEP 2 → CREDIT NFT INTERNAL BALANCE");
+  const credit = await creditInternalBalance(tokenId, valueWei);
+  await log(`CREDIT OK → TX=${credit.txHash}`);
+  await log(`NFT TYPE = ${credit.tokenType}`);
+  await log(`NFT AVAILABLE = ${credit.availableEth} ETH`);
+
+  const balAfter = await web3.eth.getBalance(CONTRACT);
+  await log(`CONTRACT AFTER CREDIT = ${web3.utils.fromWei(balAfter, "ether")} ETH`);
+
+  return {
+    tx_send: txSend,
+    tx_credit: credit.txHash,
+    token_type: credit.tokenType,
+    sent_wei: valueWei,
+    sent_eth: web3.utils.fromWei(valueWei, "ether"),
+    contract_before: web3.utils.fromWei(balBefore, "ether"),
+    contract_after_send: web3.utils.fromWei(balMiddle, "ether"),
+    contract_after_credit: web3.utils.fromWei(balAfter, "ether"),
+    available_eth: credit.availableEth
+  };
 }
 
 /* ============================================================
@@ -198,49 +260,64 @@ export default async function handler(req, res) {
     const body = req.body || {};
     const action = body.action;
 
-    /* === BALANCE === */
     if (action === "balance") {
       const b = await balanceEth();
-      await log(`💠 Balance: ${b} ETH`);
+      await log(`💠 FROM balance: ${b} ETH`);
       return res.json({ ok:true, balance_eth:b });
     }
 
-    /* === MINT === */
-    if (action === "mint") {
-
+    if (action === "credit_nft") {
       const paymentId = body.payment_id;
       const tokenId   = Number(body.token_id);
       const eur       = Number(body.amount_eur || 0);
+      const user      = body.user_address || "";
 
-      await log("===== NEW MINT =====");
-      await log(`Order=${paymentId} | Token=${tokenId} | EUR=${eur}`);
+      await log("===== NEW CREDIT NFT =====");
+      await log(`Order=${paymentId} | Token=${tokenId} | EUR=${eur} | User=${user}`);
+
+      if (!tokenId || tokenId <= 0) {
+        return res.json({ ok:false, error:"Missing token_id" });
+      }
+
+      if (eur <= 0) {
+        return res.json({ ok:false, error:"Amount must be > 0" });
+      }
 
       const rate = await getRate();
-      let eth = eur > 0 ? eur / rate : 0;
+      const eth = eur / rate;
 
-      await log(`Rate=${rate} → ETH=${eth}`);
-
-      if (eur === 0) {
-        eth = 0;
-        await log("FREE MINT MODE → 0 ETH");
-      }
+      await log(`Rate=${rate} EUR/ETH → ETH=${eth}`);
 
       const walletBal = await balanceEth();
+
       if (walletBal < eth) {
         await log(`❌ Wallet=${walletBal} ETH < Needed=${eth}`);
-        return res.json({ ok:false, error:"Low wallet balance" });
+        return res.json({
+          ok:false,
+          error:"Low wallet balance",
+          wallet_eth: walletBal,
+          needed_eth: eth
+        });
       }
 
-      const mint = await sendMint(tokenId, eth);
+      const result = await creditNFT(tokenId, eth);
 
       return res.json({
         ok:true,
+        action:"credit_nft",
         payment_id: paymentId,
-        tx_hash: mint.hash,
-        sent_eth: eth,
-        contract_before: web3.utils.fromWei(mint.bal_before,"ether"),
-        contract_after:  web3.utils.fromWei(mint.bal_after,"ether"),
-        contract_gain:   mint.gain
+        token_id: tokenId,
+        user_address: user,
+        tx_hash: result.tx_credit,
+        tx_hash_send: result.tx_send,
+        tx_hash_credit: result.tx_credit,
+        token_type: result.token_type,
+        sent_eth: result.sent_eth,
+        contract_before: result.contract_before,
+        contract_after_send: result.contract_after_send,
+        contract_after_credit: result.contract_after_credit,
+        contract_gain: result.sent_eth,
+        available_eth: result.available_eth
       });
     }
 
