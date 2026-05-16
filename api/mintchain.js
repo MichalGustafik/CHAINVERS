@@ -8,35 +8,29 @@ function isValidAddress(addr) {
   return web3.utils.isAddress(addr);
 }
 
-const contractAbi = [
-  {
-    type: 'function',
-    name: 'createOriginal',
-    inputs: [
-      { type: 'string', name: 'privateURI' },
-      { type: 'string', name: 'publicURI' },
-      { type: 'uint96', name: 'royaltyFeeNumerator' },
-      { type: 'uint256', name: 'maxCopies' }
-    ]
-  },
-  {
-    type: 'function',
-    name: 'mintFee',
-    inputs: [],
-    outputs: [{ type: 'uint256' }],
-    stateMutability: 'view'
-  }
-];
-
 function encodeFunctionCall(metadataURI) {
-  const contract = new web3.eth.Contract(contractAbi);
+  const data = web3.eth.abi.encodeFunctionCall(
+    {
+      type: 'function',
+      name: 'createOriginal',
+      inputs: [
+        { type: 'string', name: 'privateURI' },
+        { type: 'string', name: 'publicURI' },
+        { type: 'uint96', name: 'royaltyFeeNumerator' },
+        { type: 'uint256', name: 'maxCopies' }
+      ]
+    },
+    [metadataURI, metadataURI, '0', '1000000']
+  );
 
   log(`📎 metadataURI to send in contract: ${metadataURI}`);
+  return data;
+}
 
-  // Pre oba URIs použijeme rovnaké metadataURI, publicURI zatiaľ necháme rovnaké
-  return contract.methods
-    .createOriginal(metadataURI, metadataURI, 0, 1000000)
-    .encodeABI();
+async function getMintFee(TO) {
+  const data = web3.eth.abi.encodeFunctionSignature('mintFee()');
+  const result = await web3.eth.call({ to: TO, data });
+  return web3.eth.abi.decodeParameter('uint256', result);
 }
 
 // ✅ Čaká, kým budú metadáta dostupné na ipfs.io gateway
@@ -104,9 +98,7 @@ export default async function handler(req, res) {
     const balance = await web3.eth.getBalance(FROM);
     log(`🔗 Chain ID: ${chainId}, balance: ${web3.utils.fromWei(balance)} ETH`);
 
-    const contract = new web3.eth.Contract(contractAbi, TO);
-    const mintFee = await contract.methods.mintFee().call();
-
+    const mintFee = await getMintFee(TO);
     log(`💰 Mint fee: ${web3.utils.fromWei(mintFee)} ETH`);
 
     const gasPrice = await getGasPrice();
