@@ -17,7 +17,7 @@ const RPCs = [
   PROVIDER_URL,
   "https://mainnet.base.org",
   "https://base.llamarpc.com"
-];
+].filter(Boolean);
 
 async function initWeb3() {
   for (const rpc of RPCs) {
@@ -151,6 +151,28 @@ async function balanceEth() {
   return Number(web3.utils.fromWei(w, "ether"));
 }
 
+function cleanEthString(value) {
+  let s = String(value || "0").trim().replace(",", ".");
+
+  if (!s || s === "." || Number(s) <= 0) return "0";
+
+  if (s.includes("e") || s.includes("E")) {
+    s = Number(s).toFixed(18);
+  }
+
+  if (s.includes(".")) {
+    const [a, b] = s.split(".");
+    s = a + "." + b.slice(0, 18);
+  }
+
+  s = s.replace(/\.?0+$/, "");
+
+  return s || "0";
+}
+
+/* ============================================================
+   STEP 1: SEND ETH TO CONTRACT
+============================================================ */
 async function sendEthToContract(valueWei) {
   const gasPrice = await getGas();
 
@@ -170,6 +192,9 @@ async function sendEthToContract(valueWei) {
   return receipt.transactionHash;
 }
 
+/* ============================================================
+   STEP 2: CREDIT INTERNAL NFT BALANCE
+============================================================ */
 async function creditInternalBalance(tokenId, valueWei) {
   const contract = new web3.eth.Contract(ABI, CONTRACT);
 
@@ -209,10 +234,13 @@ async function creditInternalBalance(tokenId, valueWei) {
   };
 }
 
-async function creditNFT(tokenId, ethValue) {
-  const valueWei = web3.utils.toWei(ethValue.toString(), "ether");
+/* ============================================================
+   CREDIT NFT TWO-STEP
+============================================================ */
+async function creditNFT(tokenId, ethString) {
+  const valueWei = web3.utils.toWei(ethString, "ether");
 
-  await log(`CREDIT NFT START → token=${tokenId}, ETH=${ethValue}, WEI=${valueWei}`);
+  await log(`CREDIT NFT START → token=${tokenId}, ETH=${ethString}, WEI=${valueWei}`);
 
   const balBefore = await web3.eth.getBalance(CONTRACT);
   await log(`CONTRACT BEFORE = ${web3.utils.fromWei(balBefore, "ether")} ETH`);
@@ -267,40 +295,55 @@ export default async function handler(req, res) {
     }
 
     if (action === "credit_nft") {
-      const paymentId = body.payment_id;
-      const tokenId   = Number(body.token_id);
-      const eur       = Number(body.amount_eur || 0);
-      const user      = body.user_address || "";
+      const paymentId  = body.payment_id;
+      const tokenId    = Number(body.token_id);
+      const eur        = Number(body.amount_eur || 0);
+      const amountMode = body.amount_mode || "eur";
+      const amountEth  = body.amount_eth || "0";
+      const user       = body.user_address || "";
 
       await log("===== NEW CREDIT NFT =====");
-      await log(`Order=${paymentId} | Token=${tokenId} | EUR=${eur} | User=${user}`);
+      await log(`Order=${paymentId} | Token=${tokenId} | Mode=${amountMode} | EUR=${eur} | ETH=${amountEth} | User=${user}`);
 
       if (!tokenId || tokenId <= 0) {
         return res.json({ ok:false, error:"Missing token_id" });
       }
 
-      if (eur <= 0) {
-        return res.json({ ok:false, error:"Amount must be > 0" });
+      let ethString = "0";
+      let rate = null;
+
+      if (amountMode === "eth") {
+        ethString = cleanEthString(amountEth);
+      } else {
+        if (eur <= 0) {
+          return res.json({ ok:false, error:"Amount EUR must be > 0" });
+        }
+
+        rate = await getRate();
+        const ethCalc = eur / rate;
+        ethString = cleanEthString(ethCalc);
+
+        await log(`Rate=${rate} EUR/ETH → ETH=${ethString}`);
       }
 
-      const rate = await getRate();
-      const eth = eur / rate;
-
-      await log(`Rate=${rate} EUR/ETH → ETH=${eth}`);
+      if (Number(ethString) <= 0) {
+        return res.json({ ok:false, error:"ETH amount must be > 0" });
+      }
 
       const walletBal = await balanceEth();
+      const neededEth = Number(ethString);
 
-      if (walletBal < eth) {
-        await log(`❌ Wallet=${walletBal} ETH < Needed=${eth}`);
+      if (walletBal < neededEth) {
+        await log(`❌ Wallet=${walletBal} ETH < Needed=${neededEth}`);
         return res.json({
           ok:false,
           error:"Low wallet balance",
           wallet_eth: walletBal,
-          needed_eth: eth
+          needed_eth: neededEth
         });
       }
 
-      const result = await creditNFT(tokenId, eth);
+      const result = await creditNFT(tokenId, ethString);
 
       return res.json({
         ok:true,
@@ -308,11 +351,14 @@ export default async function handler(req, res) {
         payment_id: paymentId,
         token_id: tokenId,
         user_address: user,
+        amount_mode: amountMode,
+        rate_eur_eth: rate,
         tx_hash: result.tx_credit,
         tx_hash_send: result.tx_send,
         tx_hash_credit: result.tx_credit,
         token_type: result.token_type,
         sent_eth: result.sent_eth,
+        sent_wei: result.sent_wei,
         contract_before: result.contract_before,
         contract_after_send: result.contract_after_send,
         contract_after_credit: result.contract_after_credit,
