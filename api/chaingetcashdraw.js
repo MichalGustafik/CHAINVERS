@@ -1,4 +1,4 @@
-console.log("=== BOOT: CHAINVERS chaingetcashdraw.js BACKEND WITHDRAW ===");
+console.log("=== BOOT: CHAINVERS chaingetcashdraw.js BACKEND WITHDRAW CHECKED ===");
 
 import Web3 from "web3";
 
@@ -8,28 +8,14 @@ const ABI = [
   {
     inputs: [],
     name: "owner",
-    outputs: [
-      {
-        internalType: "address",
-        name: "",
-        type: "address"
-      }
-    ],
+    outputs: [{ internalType: "address", name: "", type: "address" }],
     stateMutability: "view",
     type: "function"
   },
   {
     inputs: [
-      {
-        internalType: "address",
-        name: "to",
-        type: "address"
-      },
-      {
-        internalType: "uint256",
-        name: "amount",
-        type: "uint256"
-      }
+      { internalType: "address", name: "to", type: "address" },
+      { internalType: "uint256", name: "amount", type: "uint256" }
     ],
     name: "backendWithdraw",
     outputs: [],
@@ -41,60 +27,43 @@ const ABI = [
 async function parseBody(req) {
   return new Promise(resolve => {
     let raw = "";
-
-    req.on("data", chunk => {
-      raw += chunk;
-    });
-
+    req.on("data", c => raw += c);
     req.on("end", () => {
-      try {
-        resolve(JSON.parse(raw || "{}"));
-      } catch {
-        resolve({});
-      }
+      try { resolve(JSON.parse(raw || "{}")); }
+      catch { resolve({}); }
     });
   });
 }
 
-function logCollector() {
+function logger() {
   const rows = [];
-
   return {
-    push: (...args) => {
-      const msg = `[${new Date().toISOString()}] ` + args.join(" ");
-      console.log(msg);
-      rows.push(msg);
+    push: (...a) => {
+      const m = `[${new Date().toISOString()}] ` + a.join(" ");
+      console.log(m);
+      rows.push(m);
     },
     rows
   };
 }
 
-function cleanPrivateKey(pk) {
-  if (!pk) return "";
-  pk = String(pk).trim();
+function cleanPk(pk) {
+  pk = String(pk || "").trim();
   return pk.startsWith("0x") ? pk : "0x" + pk;
 }
 
-function ethToWei(web3, amount) {
-  const n = Number(String(amount).replace(",", "."));
-
-  if (!Number.isFinite(n) || n <= 0) {
-    return null;
-  }
-
+function toWeiSafe(web3, eth) {
+  const n = Number(String(eth).replace(",", "."));
+  if (!Number.isFinite(n) || n <= 0) return null;
   return web3.utils.toWei(n.toFixed(18), "ether");
 }
 
 export default async function handler(req, res) {
-  const log = logCollector();
+  const log = logger();
 
   try {
     if (req.method !== "POST") {
-      return res.status(405).json({
-        ok: false,
-        error: "method_not_allowed",
-        logs: log.rows
-      });
+      return res.status(405).json({ ok: false, error: "method_not_allowed", logs: log.rows });
     }
 
     const body = await parseBody(req);
@@ -108,36 +77,15 @@ export default async function handler(req, res) {
     log.push("[ACTION]", action);
     log.push("[BODY]", JSON.stringify(body));
 
-    if (!process.env.PROVIDER_URL) {
-      return res.json({
-        ok: false,
-        error: "missing_PROVIDER_URL",
-        logs: log.rows
-      });
-    }
-
-    if (!process.env.CONTRACT_ADDRESS) {
-      return res.json({
-        ok: false,
-        error: "missing_CONTRACT_ADDRESS",
-        logs: log.rows
-      });
-    }
-
-    if (!process.env.PRIVATE_KEY) {
-      return res.json({
-        ok: false,
-        error: "missing_PRIVATE_KEY",
-        logs: log.rows
-      });
-    }
+    if (!process.env.PROVIDER_URL) return res.json({ ok: false, error: "missing_PROVIDER_URL", logs: log.rows });
+    if (!process.env.CONTRACT_ADDRESS) return res.json({ ok: false, error: "missing_CONTRACT_ADDRESS", logs: log.rows });
+    if (!process.env.PRIVATE_KEY) return res.json({ ok: false, error: "missing_PRIVATE_KEY", logs: log.rows });
 
     const web3 = new Web3(process.env.PROVIDER_URL);
-
     const block = await web3.eth.getBlockNumber();
-    log.push("[RPC OK] BLOCK", String(block));
+    log.push("[RPC OK] block", String(block));
 
-    const pk = cleanPrivateKey(process.env.PRIVATE_KEY);
+    const pk = cleanPk(process.env.PRIVATE_KEY);
     const account = web3.eth.accounts.privateKeyToAccount(pk);
     web3.eth.accounts.wallet.add(account);
 
@@ -147,11 +95,10 @@ export default async function handler(req, res) {
     log.push("[SENDER]", account.address);
     log.push("[CONTRACT]", contractAddress);
 
-    let ownerNow = "unknown";
-
+    let owner = "unknown";
     try {
-      ownerNow = await contract.methods.owner().call();
-      log.push("[OWNER]", ownerNow);
+      owner = await contract.methods.owner().call();
+      log.push("[OWNER]", owner);
     } catch (e) {
       log.push("[OWNER READ FAIL]", e.message);
     }
@@ -160,57 +107,40 @@ export default async function handler(req, res) {
       return res.json({
         ok: false,
         error: "initialize_disabled",
-        detail: "Initialize nerob cez chaingetcashdraw.js. Tento endpoint je iba na backendWithdraw.",
-        owner_now: ownerNow,
-        logs: log.rows
-      });
-    }
-
-    if (!tokenId || tokenId <= 0) {
-      return res.json({
-        ok: false,
-        error: "bad_token_id",
-        token_id: tokenId,
+        owner_now: owner,
         logs: log.rows
       });
     }
 
     if (!web3.utils.isAddress(withdrawTo)) {
-      return res.json({
-        ok: false,
-        error: "bad_withdraw_to",
-        withdraw_to: withdrawTo,
-        logs: log.rows
-      });
+      return res.json({ ok: false, error: "bad_withdraw_to", withdraw_to: withdrawTo, logs: log.rows });
     }
 
-    const amountWei = ethToWei(web3, amountEth);
+    if (!tokenId || tokenId <= 0) {
+      return res.json({ ok: false, error: "bad_token_id", logs: log.rows });
+    }
 
+    const amountWei = toWeiSafe(web3, amountEth);
     if (!amountWei || BigInt(amountWei) <= 0n) {
-      return res.json({
-        ok: false,
-        error: "bad_amount",
-        amount: amountEth,
-        logs: log.rows
-      });
+      return res.json({ ok: false, error: "bad_amount", amount: amountEth, logs: log.rows });
     }
 
-    log.push("[TOKEN ID]", tokenId);
+    log.push("[TOKEN]", tokenId);
     log.push("[WITHDRAW TO]", withdrawTo);
     log.push("[AMOUNT ETH]", amountEth);
     log.push("[AMOUNT WEI]", amountWei);
 
-    const ownerNativeBalance = await web3.eth.getBalance(account.address);
-    const contractNativeBalance = await web3.eth.getBalance(contractAddress);
+    const ownerBalance = await web3.eth.getBalance(account.address);
+    const contractBalance = await web3.eth.getBalance(contractAddress);
 
-    log.push("[OWNER NATIVE BALANCE]", ownerNativeBalance);
-    log.push("[CONTRACT NATIVE BALANCE]", contractNativeBalance);
+    log.push("[OWNER NATIVE BALANCE]", ownerBalance);
+    log.push("[CONTRACT NATIVE BALANCE]", contractBalance);
 
-    if (BigInt(contractNativeBalance) < BigInt(amountWei)) {
+    if (BigInt(contractBalance) < BigInt(amountWei)) {
       return res.json({
         ok: false,
         error: "contract_native_balance_too_low",
-        contract_balance_wei: contractNativeBalance,
+        contract_balance_wei: contractBalance,
         requested_wei: amountWei,
         logs: log.rows
       });
@@ -219,44 +149,29 @@ export default async function handler(req, res) {
     const method = contract.methods.backendWithdraw(withdrawTo, amountWei);
 
     try {
-      await method.call({
-        from: account.address
-      });
-
+      await method.call({ from: account.address });
       log.push("[CALL OK] backendWithdraw");
     } catch (e) {
       log.push("[CALL FAIL]", e.message);
-
       return res.json({
         ok: false,
         error: "backendWithdraw_call_failed",
         detail: e.message,
-        owner_now: ownerNow,
+        owner_now: owner,
         sender: account.address,
         logs: log.rows
       });
     }
 
     let gas;
-
     try {
-      const estimatedGas = await method.estimateGas({
-        from: account.address
-      });
-
+      const estimatedGas = await method.estimateGas({ from: account.address });
       gas = Math.ceil(Number(estimatedGas) * 1.25);
-
       log.push("[GAS ESTIMATE]", String(estimatedGas));
-      log.push("[GAS USED LIMIT]", String(gas));
+      log.push("[GAS LIMIT]", String(gas));
     } catch (e) {
       log.push("[GAS FAIL]", e.message);
-
-      return res.json({
-        ok: false,
-        error: "estimate_gas_failed",
-        detail: e.message,
-        logs: log.rows
-      });
+      return res.json({ ok: false, error: "estimate_gas_failed", detail: e.message, logs: log.rows });
     }
 
     const gasPrice = await web3.eth.getGasPrice();
@@ -264,6 +179,12 @@ export default async function handler(req, res) {
 
     log.push("[GAS PRICE]", String(gasPrice));
     log.push("[NONCE]", String(nonce));
+
+    const beforeTo = await web3.eth.getBalance(withdrawTo);
+    const beforeContract = await web3.eth.getBalance(contractAddress);
+
+    log.push("[BEFORE TO BALANCE]", beforeTo);
+    log.push("[BEFORE CONTRACT BALANCE]", beforeContract);
 
     const tx = {
       from: account.address,
@@ -275,12 +196,35 @@ export default async function handler(req, res) {
     };
 
     const signed = await web3.eth.accounts.signTransaction(tx, pk);
+    const sent = await web3.eth.sendSignedTransaction(signed.rawTransaction);
 
-    const sent = await web3.eth.sendSignedTransaction(
-      signed.rawTransaction
-    );
+    const afterTo = await web3.eth.getBalance(withdrawTo);
+    const afterContract = await web3.eth.getBalance(contractAddress);
+
+    const receivedWei = BigInt(afterTo) - BigInt(beforeTo);
+    const contractLostWei = BigInt(beforeContract) - BigInt(afterContract);
 
     log.push("[TX OK]", sent.transactionHash);
+    log.push("[RECEIPT STATUS]", String(sent.status));
+    log.push("[AFTER TO BALANCE]", afterTo);
+    log.push("[AFTER CONTRACT BALANCE]", afterContract);
+    log.push("[TO RECEIVED WEI]", String(receivedWei));
+    log.push("[CONTRACT LOST WEI]", String(contractLostWei));
+
+    if (receivedWei <= 0n || contractLostWei <= 0n) {
+      return res.json({
+        ok: false,
+        error: "tx_success_but_no_eth_moved",
+        tx: sent.transactionHash,
+        before_to: beforeTo,
+        after_to: afterTo,
+        before_contract: beforeContract,
+        after_contract: afterContract,
+        to_received_wei: String(receivedWei),
+        contract_lost_wei: String(contractLostWei),
+        logs: log.rows
+      });
+    }
 
     return res.json({
       ok: true,
@@ -290,12 +234,13 @@ export default async function handler(req, res) {
       withdraw_to: withdrawTo,
       amount_eth: amountEth,
       amount_wei: amountWei,
+      to_received_wei: String(receivedWei),
+      contract_lost_wei: String(contractLostWei),
       logs: log.rows
     });
 
   } catch (e) {
     log.push("[HANDLER ERROR]", e.message);
-
     return res.json({
       ok: false,
       error: "handler_error",
