@@ -6,28 +6,46 @@ export const maxDuration = 60;
 
 const ABI = [
   {
-    "inputs": [],
-    "name": "owner",
-    "outputs": [{ "internalType": "address", "name": "", "type": "address" }],
-    "stateMutability": "view",
-    "type": "function"
+    inputs: [],
+    name: "owner",
+    outputs: [
+      {
+        internalType: "address",
+        name: "",
+        type: "address"
+      }
+    ],
+    stateMutability: "view",
+    type: "function"
   },
   {
-    "inputs": [
-      { "internalType": "address", "name": "to", "type": "address" },
-      { "internalType": "uint256", "name": "amount", "type": "uint256" }
+    inputs: [
+      {
+        internalType: "address",
+        name: "to",
+        type: "address"
+      },
+      {
+        internalType: "uint256",
+        name: "amount",
+        type: "uint256"
+      }
     ],
-    "name": "backendWithdraw",
-    "outputs": [],
-    "stateMutability": "nonpayable",
-    "type": "function"
+    name: "backendWithdraw",
+    outputs: [],
+    stateMutability: "nonpayable",
+    type: "function"
   }
 ];
 
 async function parseBody(req) {
   return new Promise(resolve => {
     let raw = "";
-    req.on("data", c => raw += c);
+
+    req.on("data", chunk => {
+      raw += chunk;
+    });
+
     req.on("end", () => {
       try {
         resolve(JSON.parse(raw || "{}"));
@@ -38,32 +56,37 @@ async function parseBody(req) {
   });
 }
 
-function logger() {
+function logCollector() {
   const rows = [];
+
   return {
-    push: (...a) => {
-      const m = `[${new Date().toISOString()}] ` + a.join(" ");
-      console.log(m);
-      rows.push(m);
+    push: (...args) => {
+      const msg = `[${new Date().toISOString()}] ` + args.join(" ");
+      console.log(msg);
+      rows.push(msg);
     },
     rows
   };
 }
 
-function cleanPk(pk) {
+function cleanPrivateKey(pk) {
   if (!pk) return "";
   pk = String(pk).trim();
   return pk.startsWith("0x") ? pk : "0x" + pk;
 }
 
-function toWeiSafe(web3, eth) {
-  const n = Number(String(eth).replace(",", "."));
-  if (!Number.isFinite(n) || n <= 0) return null;
+function ethToWei(web3, amount) {
+  const n = Number(String(amount).replace(",", "."));
+
+  if (!Number.isFinite(n) || n <= 0) {
+    return null;
+  }
+
   return web3.utils.toWei(n.toFixed(18), "ether");
 }
 
 export default async function handler(req, res) {
-  const log = logger();
+  const log = logCollector();
 
   try {
     if (req.method !== "POST") {
@@ -86,22 +109,35 @@ export default async function handler(req, res) {
     log.push("[BODY]", JSON.stringify(body));
 
     if (!process.env.PROVIDER_URL) {
-      return res.json({ ok: false, error: "missing_PROVIDER_URL", logs: log.rows });
+      return res.json({
+        ok: false,
+        error: "missing_PROVIDER_URL",
+        logs: log.rows
+      });
     }
 
     if (!process.env.CONTRACT_ADDRESS) {
-      return res.json({ ok: false, error: "missing_CONTRACT_ADDRESS", logs: log.rows });
+      return res.json({
+        ok: false,
+        error: "missing_CONTRACT_ADDRESS",
+        logs: log.rows
+      });
     }
 
     if (!process.env.PRIVATE_KEY) {
-      return res.json({ ok: false, error: "missing_PRIVATE_KEY", logs: log.rows });
+      return res.json({
+        ok: false,
+        error: "missing_PRIVATE_KEY",
+        logs: log.rows
+      });
     }
 
     const web3 = new Web3(process.env.PROVIDER_URL);
-    const block = await web3.eth.getBlockNumber();
-    log.push("[RPC OK] block", String(block));
 
-    const pk = cleanPk(process.env.PRIVATE_KEY);
+    const block = await web3.eth.getBlockNumber();
+    log.push("[RPC OK] BLOCK", String(block));
+
+    const pk = cleanPrivateKey(process.env.PRIVATE_KEY);
     const account = web3.eth.accounts.privateKeyToAccount(pk);
     web3.eth.accounts.wallet.add(account);
 
@@ -111,10 +147,11 @@ export default async function handler(req, res) {
     log.push("[SENDER]", account.address);
     log.push("[CONTRACT]", contractAddress);
 
-    let owner = "unknown";
+    let ownerNow = "unknown";
+
     try {
-      owner = await contract.methods.owner().call();
-      log.push("[OWNER]", owner);
+      ownerNow = await contract.methods.owner().call();
+      log.push("[OWNER]", ownerNow);
     } catch (e) {
       log.push("[OWNER READ FAIL]", e.message);
     }
@@ -122,9 +159,18 @@ export default async function handler(req, res) {
     if (action === "initialize") {
       return res.json({
         ok: false,
-        error: "initialize_disabled_in_this_backend",
-        detail: "Initialize nerob cez withdraw endpoint. Použi Remix/proxy admin iba ak je kontrakt neinitializovaný.",
-        owner_now: owner,
+        error: "initialize_disabled",
+        detail: "Initialize nerob cez chaingetcashdraw.js. Tento endpoint je iba na backendWithdraw.",
+        owner_now: ownerNow,
+        logs: log.rows
+      });
+    }
+
+    if (!tokenId || tokenId <= 0) {
+      return res.json({
+        ok: false,
+        error: "bad_token_id",
+        token_id: tokenId,
         logs: log.rows
       });
     }
@@ -138,15 +184,8 @@ export default async function handler(req, res) {
       });
     }
 
-    if (!tokenId || tokenId <= 0) {
-      return res.json({
-        ok: false,
-        error: "bad_token_id",
-        logs: log.rows
-      });
-    }
+    const amountWei = ethToWei(web3, amountEth);
 
-    const amountWei = toWeiSafe(web3, amountEth);
     if (!amountWei || BigInt(amountWei) <= 0n) {
       return res.json({
         ok: false,
@@ -156,22 +195,22 @@ export default async function handler(req, res) {
       });
     }
 
-    log.push("[TOKEN]", tokenId);
+    log.push("[TOKEN ID]", tokenId);
     log.push("[WITHDRAW TO]", withdrawTo);
     log.push("[AMOUNT ETH]", amountEth);
     log.push("[AMOUNT WEI]", amountWei);
 
-    const ownerBalance = await web3.eth.getBalance(account.address);
-    const contractBalance = await web3.eth.getBalance(contractAddress);
+    const ownerNativeBalance = await web3.eth.getBalance(account.address);
+    const contractNativeBalance = await web3.eth.getBalance(contractAddress);
 
-    log.push("[OWNER NATIVE BALANCE]", ownerBalance);
-    log.push("[CONTRACT NATIVE BALANCE]", contractBalance);
+    log.push("[OWNER NATIVE BALANCE]", ownerNativeBalance);
+    log.push("[CONTRACT NATIVE BALANCE]", contractNativeBalance);
 
-    if (BigInt(contractBalance) < BigInt(amountWei)) {
+    if (BigInt(contractNativeBalance) < BigInt(amountWei)) {
       return res.json({
         ok: false,
         error: "contract_native_balance_too_low",
-        contract_balance_wei: contractBalance,
+        contract_balance_wei: contractNativeBalance,
         requested_wei: amountWei,
         logs: log.rows
       });
@@ -180,27 +219,38 @@ export default async function handler(req, res) {
     const method = contract.methods.backendWithdraw(withdrawTo, amountWei);
 
     try {
-      await method.call({ from: account.address });
+      await method.call({
+        from: account.address
+      });
+
       log.push("[CALL OK] backendWithdraw");
     } catch (e) {
       log.push("[CALL FAIL]", e.message);
+
       return res.json({
         ok: false,
         error: "backendWithdraw_call_failed",
         detail: e.message,
-        owner_now: owner,
+        owner_now: ownerNow,
         sender: account.address,
         logs: log.rows
       });
     }
 
     let gas;
+
     try {
-      gas = await method.estimateGas({ from: account.address });
-      gas = Math.ceil(Number(gas) * 1.25);
-      log.push("[GAS]", gas);
+      const estimatedGas = await method.estimateGas({
+        from: account.address
+      });
+
+      gas = Math.ceil(Number(estimatedGas) * 1.25);
+
+      log.push("[GAS ESTIMATE]", String(estimatedGas));
+      log.push("[GAS USED LIMIT]", String(gas));
     } catch (e) {
       log.push("[GAS FAIL]", e.message);
+
       return res.json({
         ok: false,
         error: "estimate_gas_failed",
@@ -210,10 +260,10 @@ export default async function handler(req, res) {
     }
 
     const gasPrice = await web3.eth.getGasPrice();
-    log.push("[GAS PRICE]", gasPrice);
-
     const nonce = await web3.eth.getTransactionCount(account.address, "pending");
-    log.push("[NONCE]", nonce);
+
+    log.push("[GAS PRICE]", String(gasPrice));
+    log.push("[NONCE]", String(nonce));
 
     const tx = {
       from: account.address,
@@ -225,7 +275,10 @@ export default async function handler(req, res) {
     };
 
     const signed = await web3.eth.accounts.signTransaction(tx, pk);
-    const sent = await web3.eth.sendSignedTransaction(signed.rawTransaction);
+
+    const sent = await web3.eth.sendSignedTransaction(
+      signed.rawTransaction
+    );
 
     log.push("[TX OK]", sent.transactionHash);
 
