@@ -1,4 +1,4 @@
-console.log("=== BOOT: CHAINVERS chaingetcashdraw.js EMERGENCY WITHDRAW OK TRUE ===");
+console.log("=== BOOT: CHAINVERS chaingetcashdraw.js EMERGENCY WITHDRAW FINAL ===");
 
 import Web3 from "web3";
 
@@ -163,11 +163,9 @@ export default async function handler(req, res) {
 
     const ownerBalance = await web3.eth.getBalance(account.address);
     const contractBalance = await web3.eth.getBalance(contractAddress);
-    const toBalanceBefore = await web3.eth.getBalance(withdrawTo);
 
     log.push("[OWNER NATIVE BALANCE]", ownerBalance);
     log.push("[CONTRACT BALANCE BEFORE]", contractBalance);
-    log.push("[TO BALANCE BEFORE]", toBalanceBefore);
 
     if (BigInt(contractBalance) < BigInt(amountWei)) {
       return res.json({
@@ -230,42 +228,14 @@ export default async function handler(req, res) {
     const signed = await web3.eth.accounts.signTransaction(tx, pk);
     const sent = await web3.eth.sendSignedTransaction(signed.rawTransaction);
 
-    const contractBalanceAfter = await web3.eth.getBalance(contractAddress);
-    const toBalanceAfter = await web3.eth.getBalance(withdrawTo);
-
-    const toReceivedWei = BigInt(toBalanceAfter) - BigInt(toBalanceBefore);
-    const contractLostWei = BigInt(contractBalance) - BigInt(contractBalanceAfter);
-
     log.push("[TX OK]", sent.transactionHash);
     log.push("[RECEIPT STATUS]", String(sent.status));
-    log.push("[CONTRACT BALANCE AFTER]", contractBalanceAfter);
-    log.push("[TO BALANCE AFTER]", toBalanceAfter);
-    log.push("[TO RECEIVED WEI]", String(toReceivedWei));
-    log.push("[CONTRACT LOST WEI]", String(contractLostWei));
 
     if (String(sent.status) !== "true") {
       return res.json({
         ok: false,
         error: "tx_failed_status_false",
         tx: sent.transactionHash,
-        logs: log.rows
-      });
-    }
-
-    if (toReceivedWei <= 0n || contractLostWei <= 0n) {
-      log.push("[BALANCE CHECK WARNING]", "RPC balance did not update immediately, but receipt status is true");
-
-      return res.json({
-        ok: true,
-        warning: "balance_check_not_updated_immediately",
-        action: "emergencyWithdraw",
-        tx: sent.transactionHash,
-        token_id: tokenId,
-        withdraw_to: withdrawTo,
-        amount_eth: amountEth,
-        amount_wei: amountWei,
-        to_received_wei: String(toReceivedWei),
-        contract_lost_wei: String(contractLostWei),
         logs: log.rows
       });
     }
@@ -278,8 +248,6 @@ export default async function handler(req, res) {
       withdraw_to: withdrawTo,
       amount_eth: amountEth,
       amount_wei: amountWei,
-      to_received_wei: String(toReceivedWei),
-      contract_lost_wei: String(contractLostWei),
       logs: log.rows
     });
 
