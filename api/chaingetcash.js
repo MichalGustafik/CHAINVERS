@@ -34,44 +34,6 @@ async function initWeb3() {
 const web3 = await initWeb3();
 
 /* ============================================================
-   ABI
-============================================================ */
-const ABI = [
-  {
-    type: "function",
-    name: "isOriginalToken",
-    inputs: [{ type: "uint256", name: "id" }],
-    outputs: [{ type: "bool" }],
-    stateMutability: "view"
-  },
-  {
-    type: "function",
-    name: "backendCreditOrigin",
-    inputs: [
-      { type: "uint256", name: "id" },
-      { type: "uint256", name: "amt" }
-    ],
-    stateMutability: "nonpayable"
-  },
-  {
-    type: "function",
-    name: "backendCreditCopy",
-    inputs: [
-      { type: "uint256", name: "id" },
-      { type: "uint256", name: "amt" }
-    ],
-    stateMutability: "nonpayable"
-  },
-  {
-    type: "function",
-    name: "tokenAvailableForWithdraw",
-    inputs: [{ type: "uint256", name: "id" }],
-    outputs: [{ type: "uint256" }],
-    stateMutability: "view"
-  }
-];
-
-/* ============================================================
    LOGGING
 ============================================================ */
 async function sendLog(msg) {
@@ -161,13 +123,66 @@ function cleanEthString(value) {
   }
 
   if (s.includes(".")) {
-    const [a, b] = s.split(".");
+    const [a, b = ""] = s.split(".");
     s = a + "." + b.slice(0, 18);
   }
 
   s = s.replace(/\.?0+$/, "");
 
   return s || "0";
+}
+
+/* ============================================================
+   RAW ABI CALLS — no Contract object
+============================================================ */
+async function isOriginalTokenRaw(tokenId) {
+  const data = web3.eth.abi.encodeFunctionCall(
+    {
+      type: "function",
+      name: "isOriginalToken",
+      inputs: [{ type: "uint256", name: "id" }]
+    },
+    [String(tokenId)]
+  );
+
+  const result = await web3.eth.call({
+    to: CONTRACT,
+    data
+  });
+
+  return web3.eth.abi.decodeParameter("bool", result);
+}
+
+function encodeCreditCall(isOriginal, tokenId, valueWei) {
+  return web3.eth.abi.encodeFunctionCall(
+    {
+      type: "function",
+      name: isOriginal ? "backendCreditOrigin" : "backendCreditCopy",
+      inputs: [
+        { type: "uint256", name: "id" },
+        { type: "uint256", name: "amt" }
+      ]
+    },
+    [String(tokenId), String(valueWei)]
+  );
+}
+
+async function tokenAvailableRaw(tokenId) {
+  const data = web3.eth.abi.encodeFunctionCall(
+    {
+      type: "function",
+      name: "tokenAvailableForWithdraw",
+      inputs: [{ type: "uint256", name: "id" }]
+    },
+    [String(tokenId)]
+  );
+
+  const result = await web3.eth.call({
+    to: CONTRACT,
+    data
+  });
+
+  return web3.eth.abi.decodeParameter("uint256", result);
 }
 
 /* ============================================================
@@ -196,25 +211,25 @@ async function sendEthToContract(valueWei) {
    STEP 2: CREDIT INTERNAL NFT BALANCE
 ============================================================ */
 async function creditInternalBalance(tokenId, valueWei) {
-  const contract = new web3.eth.Contract(ABI, CONTRACT);
+  const isOriginal = await isOriginalTokenRaw(tokenId);
 
-  const isOriginal = await contract.methods.isOriginalToken(tokenId).call();
+  await log(`TOKEN TYPE DETECTED = ${isOriginal ? "ORIGIN" : "COPY"}`);
 
-  const method = isOriginal
-    ? contract.methods.backendCreditOrigin(tokenId, valueWei)
-    : contract.methods.backendCreditCopy(tokenId, valueWei);
-
+  const data = encodeCreditCall(isOriginal, tokenId, valueWei);
   const gasPrice = await getGas();
 
-  const gasLimit = await method.estimateGas({
-    from: FROM
+  const gasLimit = await web3.eth.estimateGas({
+    from: FROM,
+    to: CONTRACT,
+    data,
+    value: "0"
   });
 
   const tx = {
     from: FROM,
     to: CONTRACT,
     value: "0",
-    data: method.encodeABI(),
+    data,
     gas: gasLimit,
     gasPrice,
     nonce: await web3.eth.getTransactionCount(FROM, "pending"),
@@ -224,7 +239,7 @@ async function creditInternalBalance(tokenId, valueWei) {
   const signed = await web3.eth.accounts.signTransaction(tx, PRIVATE_KEY);
   const receipt = await web3.eth.sendSignedTransaction(signed.rawTransaction);
 
-  const available = await contract.methods.tokenAvailableForWithdraw(tokenId).call();
+  const available = await tokenAvailableRaw(tokenId);
 
   return {
     txHash: receipt.transactionHash,
@@ -254,6 +269,7 @@ async function creditNFT(tokenId, ethString) {
 
   await log("STEP 2 → CREDIT NFT INTERNAL BALANCE");
   const credit = await creditInternalBalance(tokenId, valueWei);
+
   await log(`CREDIT OK → TX=${credit.txHash}`);
   await log(`NFT TYPE = ${credit.tokenType}`);
   await log(`NFT AVAILABLE = ${credit.availableEth} ETH`);
