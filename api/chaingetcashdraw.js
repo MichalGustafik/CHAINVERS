@@ -1,4 +1,4 @@
-console.log("=== BOOT: CHAINVERS chaingetcashdraw.js EMERGENCY WITHDRAW OK ===");
+console.log("=== BOOT: CHAINVERS chaingetcashdraw.js EMERGENCY WITHDRAW OK TRUE ===");
 
 import Web3 from "web3";
 
@@ -162,19 +162,19 @@ export default async function handler(req, res) {
     log.push("[AMOUNT WEI]", amountWei);
 
     const ownerBalance = await web3.eth.getBalance(account.address);
-    const contractBalanceBefore = await web3.eth.getBalance(contractAddress);
+    const contractBalance = await web3.eth.getBalance(contractAddress);
     const toBalanceBefore = await web3.eth.getBalance(withdrawTo);
 
-    log.push("[OWNER NATIVE BALANCE]", String(ownerBalance));
-    log.push("[CONTRACT BALANCE BEFORE]", String(contractBalanceBefore));
-    log.push("[TO BALANCE BEFORE]", String(toBalanceBefore));
+    log.push("[OWNER NATIVE BALANCE]", ownerBalance);
+    log.push("[CONTRACT BALANCE BEFORE]", contractBalance);
+    log.push("[TO BALANCE BEFORE]", toBalanceBefore);
 
-    if (BigInt(contractBalanceBefore) < BigInt(amountWei)) {
+    if (BigInt(contractBalance) < BigInt(amountWei)) {
       return res.json({
         ok: false,
         error: "contract_native_balance_too_low",
-        contract_balance_wei: String(contractBalanceBefore),
-        requested_wei: String(amountWei),
+        contract_balance_wei: contractBalance,
+        requested_wei: amountWei,
         logs: log.rows
       });
     }
@@ -200,7 +200,6 @@ export default async function handler(req, res) {
     try {
       const estimatedGas = await method.estimateGas({ from: account.address });
       gas = Math.ceil(Number(estimatedGas) * 1.25);
-
       log.push("[GAS ESTIMATE]", String(estimatedGas));
       log.push("[GAS LIMIT]", String(gas));
     } catch (e) {
@@ -235,27 +234,36 @@ export default async function handler(req, res) {
     const toBalanceAfter = await web3.eth.getBalance(withdrawTo);
 
     const toReceivedWei = BigInt(toBalanceAfter) - BigInt(toBalanceBefore);
-    const contractLostWei = BigInt(contractBalanceBefore) - BigInt(contractBalanceAfter);
+    const contractLostWei = BigInt(contractBalance) - BigInt(contractBalanceAfter);
 
     log.push("[TX OK]", sent.transactionHash);
     log.push("[RECEIPT STATUS]", String(sent.status));
-    log.push("[CONTRACT BALANCE AFTER]", String(contractBalanceAfter));
-    log.push("[TO BALANCE AFTER]", String(toBalanceAfter));
+    log.push("[CONTRACT BALANCE AFTER]", contractBalanceAfter);
+    log.push("[TO BALANCE AFTER]", toBalanceAfter);
     log.push("[TO RECEIVED WEI]", String(toReceivedWei));
     log.push("[CONTRACT LOST WEI]", String(contractLostWei));
 
+    if (String(sent.status) !== "true") {
+      return res.json({
+        ok: false,
+        error: "tx_failed_status_false",
+        tx: sent.transactionHash,
+        logs: log.rows
+      });
+    }
+
     if (toReceivedWei <= 0n || contractLostWei <= 0n) {
-      log.push("[WARN]", "TX success but RPC balance check still stale / unchanged");
+      log.push("[BALANCE CHECK WARNING]", "RPC balance did not update immediately, but receipt status is true");
 
       return res.json({
         ok: true,
-        warning: "tx_success_balance_check_stale",
+        warning: "balance_check_not_updated_immediately",
         action: "emergencyWithdraw",
         tx: sent.transactionHash,
         token_id: tokenId,
         withdraw_to: withdrawTo,
         amount_eth: amountEth,
-        amount_wei: String(amountWei),
+        amount_wei: amountWei,
         to_received_wei: String(toReceivedWei),
         contract_lost_wei: String(contractLostWei),
         logs: log.rows
@@ -269,7 +277,7 @@ export default async function handler(req, res) {
       token_id: tokenId,
       withdraw_to: withdrawTo,
       amount_eth: amountEth,
-      amount_wei: String(amountWei),
+      amount_wei: amountWei,
       to_received_wei: String(toReceivedWei),
       contract_lost_wei: String(contractLostWei),
       logs: log.rows
