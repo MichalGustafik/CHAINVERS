@@ -1,10 +1,29 @@
-console.log("=== BOOT: CHAINVERS chaingetcashdraw.js WITH INIT DEBUG ===");
+console.log("=== BOOT: CHAINVERS chaingetcashdraw.js BACKEND WITHDRAW ===");
 
 import Web3 from "web3";
 
 export const maxDuration = 60;
 
-/* ============================================================ */
+const ABI = [
+  {
+    "inputs": [],
+    "name": "owner",
+    "outputs": [{ "internalType": "address", "name": "", "type": "address" }],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      { "internalType": "address", "name": "to", "type": "address" },
+      { "internalType": "uint256", "name": "amount", "type": "uint256" }
+    ],
+    "name": "backendWithdraw",
+    "outputs": [],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  }
+];
+
 async function parseBody(req) {
   return new Promise(resolve => {
     let raw = "";
@@ -19,205 +38,215 @@ async function parseBody(req) {
   });
 }
 
-function logCollector() {
+function logger() {
   const rows = [];
   return {
-    push: (...args) => {
-      const msg = `[${new Date().toISOString()}] ` + args.join(" ");
-      console.log(msg);
-      rows.push(msg);
+    push: (...a) => {
+      const m = `[${new Date().toISOString()}] ` + a.join(" ");
+      console.log(m);
+      rows.push(m);
     },
     rows
   };
 }
 
-function loadAbi(log) {
-  const abi = JSON.parse(process.env.CONTRACT_ABI || "[]");
-  log.push("[ABI LOADED]", abi.length);
-  return abi;
+function cleanPk(pk) {
+  if (!pk) return "";
+  pk = String(pk).trim();
+  return pk.startsWith("0x") ? pk : "0x" + pk;
 }
 
-async function initWeb3(log) {
-  const w = new Web3(process.env.PROVIDER_URL);
-  await w.eth.getBlockNumber();
-  log.push("[RPC OK]");
-  return w;
+function toWeiSafe(web3, eth) {
+  const n = Number(String(eth).replace(",", "."));
+  if (!Number.isFinite(n) || n <= 0) return null;
+  return web3.utils.toWei(n.toFixed(18), "ether");
 }
 
-/* ============================================================ */
 export default async function handler(req, res) {
-  const log = logCollector();
+  const log = logger();
 
   try {
-    const body = await parseBody(req);
-
-    const action = (body.action || "").toLowerCase();
-    const tokenId = Number(body.token_id || 0);
-
-    log.push("[ACTION]", action || "withdraw");
-    log.push("[BODY]", JSON.stringify(body));
-
-    const web3 = await initWeb3(log);
-
-    const abi = loadAbi(log);
-    const contract = new web3.eth.Contract(
-      abi,
-      process.env.CONTRACT_ADDRESS
-    );
-
-    const account = web3.eth.accounts.privateKeyToAccount(
-      process.env.PRIVATE_KEY
-    );
-    web3.eth.accounts.wallet.add(account);
-
-    log.push("[SENDER]", account.address);
-    log.push("[CONTRACT]", process.env.CONTRACT_ADDRESS);
-
-    /* ============================================================
-       CHECK OWNER
-    ============================================================ */
-    let ownerAddr = "unknown";
-
-    try {
-      ownerAddr = await contract.methods.owner().call();
-      log.push("[OWNER]", ownerAddr);
-    } catch (e) {
-      log.push("[OWNER READ FAIL]", e.message);
-    }
-
-    /* ============================================================
-       INITIALIZE (NEW)
-    ============================================================ */
-    if (action === "initialize") {
-      log.push("[INIT TRY]");
-
-      try {
-        const method = contract.methods.initialize();
-
-        // test call
-        await method.call({ from: account.address });
-        log.push("[INIT CALL OK]");
-
-        const gas = await method.estimateGas({
-          from: account.address
-        });
-
-        log.push("[INIT GAS]", gas);
-
-        const tx = {
-          from: account.address,
-          to: process.env.CONTRACT_ADDRESS,
-          gas,
-          data: method.encodeABI()
-        };
-
-        const signed = await web3.eth.accounts.signTransaction(
-          tx,
-          process.env.PRIVATE_KEY
-        );
-
-        const sent = await web3.eth.sendSignedTransaction(
-          signed.rawTransaction
-        );
-
-        log.push("[INIT TX OK]", sent.transactionHash);
-
-        const newOwner = await contract.methods.owner().call();
-        log.push("[NEW OWNER]", newOwner);
-
-        return res.json({
-          ok: true,
-          action: "initialized",
-          tx: sent.transactionHash,
-          new_owner: newOwner,
-          logs: log.rows
-        });
-
-      } catch (e) {
-        log.push("[INIT FAIL]", e.message);
-
-        return res.json({
-          ok: false,
-          error: "initialize_failed",
-          detail: e.message,
-          owner_now: ownerAddr,
-          logs: log.rows
-        });
-      }
-    }
-
-    /* ============================================================
-       NORMAL WITHDRAW (NFT OWNER)
-    ============================================================ */
-    if (!tokenId) {
-      return res.json({ ok: false, error: "bad_token_id", logs: log.rows });
-    }
-
-    const copyOriginal = await contract.methods.copyToOriginal(tokenId).call();
-    const isCopy = Number(copyOriginal) !== 0;
-
-    log.push("[IS COPY]", isCopy ? "YES" : "NO");
-
-    let balanceWei = "0";
-    let method;
-
-    if (isCopy) {
-      balanceWei = await contract.methods.copyBalance(tokenId).call();
-      method = contract.methods.withdrawCopy(tokenId);
-    } else {
-      balanceWei = await contract.methods.originBalance(tokenId).call();
-      method = contract.methods.withdrawOrigin(tokenId);
-    }
-
-    log.push("[CHAIN BALANCE]", balanceWei);
-
-    if (BigInt(balanceWei) <= 0n) {
-      return res.json({
+    if (req.method !== "POST") {
+      return res.status(405).json({
         ok: false,
-        error: "nothing_on_chain",
+        error: "method_not_allowed",
         logs: log.rows
       });
     }
 
-    try {
-      await method.call({ from: account.address });
-      log.push("[CALL OK]");
-    } catch (e) {
-      log.push("[CALL FAIL]", e.message);
-      throw e;
+    const body = await parseBody(req);
+
+    const action = String(body.action || "withdraw").toLowerCase();
+    const user = String(body.user || "").toLowerCase().trim();
+    const withdrawTo = String(body.withdraw_to || user).toLowerCase().trim();
+    const tokenId = Number(body.token_id || 0);
+    const amountEth = String(body.amount || "0").replace(",", ".");
+
+    log.push("[ACTION]", action);
+    log.push("[BODY]", JSON.stringify(body));
+
+    if (!process.env.PROVIDER_URL) {
+      return res.json({ ok: false, error: "missing_PROVIDER_URL", logs: log.rows });
     }
 
-    const gas = await method.estimateGas({ from: account.address });
+    if (!process.env.CONTRACT_ADDRESS) {
+      return res.json({ ok: false, error: "missing_CONTRACT_ADDRESS", logs: log.rows });
+    }
+
+    if (!process.env.PRIVATE_KEY) {
+      return res.json({ ok: false, error: "missing_PRIVATE_KEY", logs: log.rows });
+    }
+
+    const web3 = new Web3(process.env.PROVIDER_URL);
+    const block = await web3.eth.getBlockNumber();
+    log.push("[RPC OK] block", String(block));
+
+    const pk = cleanPk(process.env.PRIVATE_KEY);
+    const account = web3.eth.accounts.privateKeyToAccount(pk);
+    web3.eth.accounts.wallet.add(account);
+
+    const contractAddress = process.env.CONTRACT_ADDRESS;
+    const contract = new web3.eth.Contract(ABI, contractAddress);
+
+    log.push("[SENDER]", account.address);
+    log.push("[CONTRACT]", contractAddress);
+
+    let owner = "unknown";
+    try {
+      owner = await contract.methods.owner().call();
+      log.push("[OWNER]", owner);
+    } catch (e) {
+      log.push("[OWNER READ FAIL]", e.message);
+    }
+
+    if (action === "initialize") {
+      return res.json({
+        ok: false,
+        error: "initialize_disabled_in_this_backend",
+        detail: "Initialize nerob cez withdraw endpoint. Použi Remix/proxy admin iba ak je kontrakt neinitializovaný.",
+        owner_now: owner,
+        logs: log.rows
+      });
+    }
+
+    if (!web3.utils.isAddress(withdrawTo)) {
+      return res.json({
+        ok: false,
+        error: "bad_withdraw_to",
+        withdraw_to: withdrawTo,
+        logs: log.rows
+      });
+    }
+
+    if (!tokenId || tokenId <= 0) {
+      return res.json({
+        ok: false,
+        error: "bad_token_id",
+        logs: log.rows
+      });
+    }
+
+    const amountWei = toWeiSafe(web3, amountEth);
+    if (!amountWei || BigInt(amountWei) <= 0n) {
+      return res.json({
+        ok: false,
+        error: "bad_amount",
+        amount: amountEth,
+        logs: log.rows
+      });
+    }
+
+    log.push("[TOKEN]", tokenId);
+    log.push("[WITHDRAW TO]", withdrawTo);
+    log.push("[AMOUNT ETH]", amountEth);
+    log.push("[AMOUNT WEI]", amountWei);
+
+    const ownerBalance = await web3.eth.getBalance(account.address);
+    const contractBalance = await web3.eth.getBalance(contractAddress);
+
+    log.push("[OWNER NATIVE BALANCE]", ownerBalance);
+    log.push("[CONTRACT NATIVE BALANCE]", contractBalance);
+
+    if (BigInt(contractBalance) < BigInt(amountWei)) {
+      return res.json({
+        ok: false,
+        error: "contract_native_balance_too_low",
+        contract_balance_wei: contractBalance,
+        requested_wei: amountWei,
+        logs: log.rows
+      });
+    }
+
+    const method = contract.methods.backendWithdraw(withdrawTo, amountWei);
+
+    try {
+      await method.call({ from: account.address });
+      log.push("[CALL OK] backendWithdraw");
+    } catch (e) {
+      log.push("[CALL FAIL]", e.message);
+      return res.json({
+        ok: false,
+        error: "backendWithdraw_call_failed",
+        detail: e.message,
+        owner_now: owner,
+        sender: account.address,
+        logs: log.rows
+      });
+    }
+
+    let gas;
+    try {
+      gas = await method.estimateGas({ from: account.address });
+      gas = Math.ceil(Number(gas) * 1.25);
+      log.push("[GAS]", gas);
+    } catch (e) {
+      log.push("[GAS FAIL]", e.message);
+      return res.json({
+        ok: false,
+        error: "estimate_gas_failed",
+        detail: e.message,
+        logs: log.rows
+      });
+    }
+
+    const gasPrice = await web3.eth.getGasPrice();
+    log.push("[GAS PRICE]", gasPrice);
+
+    const nonce = await web3.eth.getTransactionCount(account.address, "pending");
+    log.push("[NONCE]", nonce);
 
     const tx = {
       from: account.address,
-      to: process.env.CONTRACT_ADDRESS,
+      to: contractAddress,
       gas,
+      gasPrice,
+      nonce,
       data: method.encodeABI()
     };
 
-    const signed = await web3.eth.accounts.signTransaction(
-      tx,
-      process.env.PRIVATE_KEY
-    );
-
-    const sent = await web3.eth.sendSignedTransaction(
-      signed.rawTransaction
-    );
+    const signed = await web3.eth.accounts.signTransaction(tx, pk);
+    const sent = await web3.eth.sendSignedTransaction(signed.rawTransaction);
 
     log.push("[TX OK]", sent.transactionHash);
 
     return res.json({
       ok: true,
+      action: "backendWithdraw",
       tx: sent.transactionHash,
+      token_id: tokenId,
+      withdraw_to: withdrawTo,
+      amount_eth: amountEth,
+      amount_wei: amountWei,
       logs: log.rows
     });
 
   } catch (e) {
-    log.push("[ERROR]", e.message);
+    log.push("[HANDLER ERROR]", e.message);
+
     return res.json({
       ok: false,
-      error: e.message,
+      error: "handler_error",
+      detail: e.message,
       logs: log.rows
     });
   }
