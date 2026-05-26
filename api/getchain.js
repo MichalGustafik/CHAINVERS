@@ -24,7 +24,6 @@ export default async function handler(req, res) {
     const authHeader = { Authorization: `Bearer ${PRINTIFY_API_KEY}` };
     const externalId = `chainvers_${crop_id}`;
 
-    // 1) Shop ID
     const shopsResp = await fetch("https://api.printify.com/v1/shops.json", {
       headers: authHeader
     });
@@ -40,7 +39,6 @@ export default async function handler(req, res) {
       });
     }
 
-    // Pomocná funkcia: načítaj produkty a nájdi podľa external_id
     async function findExistingProduct() {
       const prodsResp = await fetch(
         `https://api.printify.com/v1/shops/${shopId}/products.json`,
@@ -53,7 +51,6 @@ export default async function handler(req, res) {
       return products.find((p) => p.external_id === externalId) || null;
     }
 
-    // Pomocná funkcia: detail produktu
     async function loadProductDetail(productId) {
       const detailResp = await fetch(
         `https://api.printify.com/v1/shops/${shopId}/products/${productId}.json`,
@@ -76,22 +73,57 @@ export default async function handler(req, res) {
       };
     }
 
-    // 2) Najprv skús existujúci produkt
+    async function waitForMockup(productId, tries = 10) {
+      let lastProduct = null;
+
+      for (let i = 0; i < tries; i++) {
+        const detail = await loadProductDetail(productId);
+
+        if (detail.ok) {
+          lastProduct = detail.product;
+
+          const mockup =
+            detail.product?.images?.[0]?.src ||
+            detail.product?.images?.[0]?.url ||
+            null;
+
+          if (mockup) {
+            return {
+              ok: true,
+              product: detail.product,
+              mockup
+            };
+          }
+        } else {
+          lastProduct = detail.resp || null;
+        }
+
+        await new Promise(resolve => setTimeout(resolve, 3000));
+      }
+
+      return {
+        ok: false,
+        product: lastProduct,
+        mockup: null
+      };
+    }
+
     let existing = await findExistingProduct();
 
     if (existing) {
-      const detail = await loadProductDetail(existing.id);
+      const mockupWait = await waitForMockup(existing.id, 10);
 
-      if (!detail.ok) {
+      const product = mockupWait.product;
+      const mockup = mockupWait.mockup;
+
+      if (!mockup) {
         return res.status(500).json({
           ok: false,
-          error: "Existing product detail load failed",
-          resp: detail.resp
+          error: "Existing Printify product found, but mockup image is not ready yet.",
+          product_id: existing.id,
+          product
         });
       }
-
-      const product = detail.product;
-      const mockup = product?.images?.[0]?.src || null;
 
       return res.status(200).json({
         ok: true,
@@ -105,7 +137,6 @@ export default async function handler(req, res) {
       });
     }
 
-    // 3) Recovery mód: order existuje, ale musíme nájsť produkt/mockup
     if (recover === true && existing_order?.id) {
       const recoverExisting = await findExistingProduct();
 
@@ -118,18 +149,19 @@ export default async function handler(req, res) {
         });
       }
 
-      const detail = await loadProductDetail(recoverExisting.id);
+      const mockupWait = await waitForMockup(recoverExisting.id, 10);
 
-      if (!detail.ok) {
+      const recoverProduct = mockupWait.product;
+      const mockup = mockupWait.mockup;
+
+      if (!mockup) {
         return res.status(500).json({
           ok: false,
-          error: "Recover product detail failed.",
-          resp: detail.resp
+          error: "Recover product found, but mockup image is not ready yet.",
+          product_id: recoverExisting.id,
+          product: recoverProduct
         });
       }
-
-      const recoverProduct = detail.product;
-      const mockup = recoverProduct?.images?.[0]?.src || null;
 
       return res.status(200).json({
         ok: true,
@@ -143,7 +175,6 @@ export default async function handler(req, res) {
       });
     }
 
-    // 4) Stiahni obrázok a premeň na base64
     const imageResp = await fetch(image_url);
 
     if (!imageResp.ok) {
@@ -161,7 +192,6 @@ export default async function handler(req, res) {
     const imageArrayBuffer = await imageResp.arrayBuffer();
     const imageBase64 = Buffer.from(imageArrayBuffer).toString("base64");
 
-    // 5) Upload obrázka do Printify
     const uploadResp = await fetch(
       `https://api.printify.com/v1/uploads/images.json`,
       {
@@ -184,7 +214,6 @@ export default async function handler(req, res) {
       });
     }
 
-    // 6) Blueprint / provider / variant
     const blueprintId = 9;
 
     const providersResp = await fetch(
@@ -222,7 +251,6 @@ export default async function handler(req, res) {
 
     const variantId = variant.id;
 
-    // 7) Create product
     const productPayload = {
       title: `CHAINVERS Tee ${crop_id}`,
       description: `Unikátne tričko s panelom ${crop_id}`,
@@ -278,7 +306,6 @@ export default async function handler(req, res) {
 
     let product = created;
 
-    // 8) Publish product
     await fetch(
       `https://api.printify.com/v1/shops/${shopId}/products/${product.id}/publish.json`,
       {
@@ -294,16 +321,23 @@ export default async function handler(req, res) {
       }
     );
 
-    // 9) Detail produktu kvôli mockup obrázkom
-    const detail = await loadProductDetail(product.id);
+    const mockupWait = await waitForMockup(product.id, 10);
 
-    if (detail.ok) {
-      product = detail.product;
+    if (mockupWait.product?.id) {
+      product = mockupWait.product;
     }
 
-    const mockup = product?.images?.[0]?.src || null;
+    const mockup = mockupWait.mockup;
 
-    // 10) Create order
+    if (!mockup) {
+      return res.status(500).json({
+        ok: false,
+        error: "Printify product was created, but mockup image is not ready yet.",
+        product_id: product?.id || null,
+        product
+      });
+    }
+
     const orderPayload = {
       external_id: externalId,
       line_items: [
