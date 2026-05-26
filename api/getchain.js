@@ -24,6 +24,7 @@ export default async function handler(req, res) {
     const authHeader = { Authorization: `Bearer ${PRINTIFY_API_KEY}` };
     const externalId = `chainvers_${crop_id}`;
 
+    // 1) Shop ID
     const shopsResp = await fetch("https://api.printify.com/v1/shops.json", {
       headers: authHeader
     });
@@ -32,26 +33,65 @@ export default async function handler(req, res) {
     const shopId = shops[0]?.id;
 
     if (!shopId) {
-      return res.status(500).json({ ok: false, error: "No shop found", resp: shops });
+      return res.status(500).json({
+        ok: false,
+        error: "No shop found",
+        resp: shops
+      });
     }
 
-    const prodsResp = await fetch(
-      `https://api.printify.com/v1/shops/${shopId}/products.json`,
-      { headers: authHeader }
-    );
+    // Pomocná funkcia: načítaj produkty a nájdi podľa external_id
+    async function findExistingProduct() {
+      const prodsResp = await fetch(
+        `https://api.printify.com/v1/shops/${shopId}/products.json`,
+        { headers: authHeader }
+      );
 
-    const productsResp = await prodsResp.json();
-    const products = Array.isArray(productsResp.data) ? productsResp.data : [];
+      const productsResp = await prodsResp.json();
+      const products = Array.isArray(productsResp.data) ? productsResp.data : [];
 
-    let existing = products.find((p) => p.external_id === externalId);
+      return products.find((p) => p.external_id === externalId) || null;
+    }
 
-    if (existing) {
+    // Pomocná funkcia: detail produktu
+    async function loadProductDetail(productId) {
       const detailResp = await fetch(
-        `https://api.printify.com/v1/shops/${shopId}/products/${existing.id}.json`,
+        `https://api.printify.com/v1/shops/${shopId}/products/${productId}.json`,
         { headers: authHeader }
       );
 
       const product = await detailResp.json();
+
+      if (!detailResp.ok || !product?.id) {
+        return {
+          ok: false,
+          error: "Product detail load failed",
+          resp: product
+        };
+      }
+
+      return {
+        ok: true,
+        product
+      };
+    }
+
+    // 2) Najprv skús existujúci produkt
+    let existing = await findExistingProduct();
+
+    if (existing) {
+      const detail = await loadProductDetail(existing.id);
+
+      if (!detail.ok) {
+        return res.status(500).json({
+          ok: false,
+          error: "Existing product detail load failed",
+          resp: detail.resp
+        });
+      }
+
+      const product = detail.product;
+      const mockup = product?.images?.[0]?.src || null;
 
       return res.status(200).json({
         ok: true,
@@ -60,32 +100,50 @@ export default async function handler(req, res) {
         recovered: !!recover,
         product,
         order: existing_order || null,
-        preview: product?.images?.[0]?.src || image_url,
-        preview_url: product?.images?.[0]?.src || image_url
+        preview: mockup,
+        preview_url: mockup
       });
     }
 
+    // 3) Recovery mód: order existuje, ale musíme nájsť produkt/mockup
     if (recover === true && existing_order?.id) {
+      const recoverExisting = await findExistingProduct();
+
+      if (!recoverExisting) {
+        return res.status(500).json({
+          ok: false,
+          error: "Printify order exists, but matching product with external_id was not found. Cannot recover product mockup.",
+          external_id: externalId,
+          order: existing_order
+        });
+      }
+
+      const detail = await loadProductDetail(recoverExisting.id);
+
+      if (!detail.ok) {
+        return res.status(500).json({
+          ok: false,
+          error: "Recover product detail failed.",
+          resp: detail.resp
+        });
+      }
+
+      const recoverProduct = detail.product;
+      const mockup = recoverProduct?.images?.[0]?.src || null;
+
       return res.status(200).json({
         ok: true,
         exists: true,
         duplicate: true,
         recovered: true,
         order: existing_order,
-        product: {
-          id: null,
-          title: `Recovered CHAINVERS ${crop_id}`,
-          images: [
-            {
-              src: image_url
-            }
-          ]
-        },
-        preview: image_url,
-        preview_url: image_url
+        product: recoverProduct,
+        preview: mockup,
+        preview_url: mockup
       });
     }
 
+    // 4) Stiahni obrázok a premeň na base64
     const imageResp = await fetch(image_url);
 
     if (!imageResp.ok) {
@@ -103,6 +161,7 @@ export default async function handler(req, res) {
     const imageArrayBuffer = await imageResp.arrayBuffer();
     const imageBase64 = Buffer.from(imageArrayBuffer).toString("base64");
 
+    // 5) Upload obrázka do Printify
     const uploadResp = await fetch(
       `https://api.printify.com/v1/uploads/images.json`,
       {
@@ -125,6 +184,7 @@ export default async function handler(req, res) {
       });
     }
 
+    // 6) Blueprint / provider / variant
     const blueprintId = 9;
 
     const providersResp = await fetch(
@@ -162,12 +222,19 @@ export default async function handler(req, res) {
 
     const variantId = variant.id;
 
+    // 7) Create product
     const productPayload = {
       title: `CHAINVERS Tee ${crop_id}`,
       description: `Unikátne tričko s panelom ${crop_id}`,
       blueprint_id: blueprintId,
       print_provider_id: providerId,
-      variants: [{ id: variantId, price: 2000, is_enabled: true }],
+      variants: [
+        {
+          id: variantId,
+          price: 2000,
+          is_enabled: true
+        }
+      ],
       print_areas: [
         {
           variant_ids: [variantId],
@@ -211,6 +278,7 @@ export default async function handler(req, res) {
 
     let product = created;
 
+    // 8) Publish product
     await fetch(
       `https://api.printify.com/v1/shops/${shopId}/products/${product.id}/publish.json`,
       {
@@ -226,17 +294,16 @@ export default async function handler(req, res) {
       }
     );
 
-    const detailResp = await fetch(
-      `https://api.printify.com/v1/shops/${shopId}/products/${product.id}.json`,
-      { headers: authHeader }
-    );
+    // 9) Detail produktu kvôli mockup obrázkom
+    const detail = await loadProductDetail(product.id);
 
-    const detailData = await detailResp.json();
-
-    if (detailResp.ok && detailData.id) {
-      product = detailData;
+    if (detail.ok) {
+      product = detail.product;
     }
 
+    const mockup = product?.images?.[0]?.src || null;
+
+    // 10) Create order
     const orderPayload = {
       external_id: externalId,
       line_items: [
@@ -285,8 +352,8 @@ export default async function handler(req, res) {
           duplicate: true,
           order: order?.order || null,
           product,
-          preview: product?.images?.[0]?.src || image_url,
-          preview_url: product?.images?.[0]?.src || image_url,
+          preview: mockup,
+          preview_url: mockup,
           resp: order
         });
       }
@@ -304,8 +371,8 @@ export default async function handler(req, res) {
       duplicate: false,
       product,
       order,
-      preview: product?.images?.[0]?.src || image_url,
-      preview_url: product?.images?.[0]?.src || image_url
+      preview: mockup,
+      preview_url: mockup
     });
 
   } catch (e) {
