@@ -8,7 +8,17 @@ export const config = {
   }
 };
 
-const CONTRACT_ADDRESS = (process.env.CONTRACT_ADDRESS || "").toLowerCase();
+function envList(name) {
+  return String(process.env[name] || "")
+    .split(",")
+    .map(v => v.trim().toLowerCase())
+    .filter(Boolean);
+}
+
+const CHAINVERS_CONTRACTS = [
+  ...envList("CHAINVERS_CONTRACTS"),
+  String(process.env.CONTRACT_ADDRESS || "").trim().toLowerCase()
+].filter(Boolean);
 
 const BASE_RPCS = [
   process.env.PROVIDER_URL,
@@ -53,50 +63,62 @@ const ABI = [
 ];
 
 function json(res, status, data) {
-  res.status(status).json(data);
+  return res.status(status).json(data);
 }
 
-function normalizeAddress(addr) {
-  if (!addr) return "";
-  return String(addr).trim().toLowerCase();
+function norm(v) {
+  return String(v || "").trim().toLowerCase();
 }
 
-function isValidTokenId(tokenId) {
-  return /^\d+$/.test(String(tokenId || ""));
+function isValidTokenId(v) {
+  return /^\d+$/.test(String(v || ""));
 }
 
 function ipfsToHttp(uri) {
   if (!uri) return "";
+
   if (uri.startsWith("ipfs://")) {
-    return "https://ipfs.io/ipfs/" + uri.replace("ipfs://", "").replace(/^ipfs\//, "");
+    return (
+      "https://ipfs.io/ipfs/" +
+      uri.replace("ipfs://", "").replace(/^ipfs\//, "")
+    );
   }
+
   return uri;
 }
 
 async function fetchMetadata(tokenURI) {
   try {
     const url = ipfsToHttp(tokenURI);
-    if (!url || !/^https?:\/\//i.test(url)) return null;
+
+    if (!/^https?:\/\//i.test(url)) {
+      return null;
+    }
 
     const ctrl = new AbortController();
     const timeout = setTimeout(() => ctrl.abort(), 8000);
 
     const r = await fetch(url, {
-      method: "GET",
       signal: ctrl.signal,
-      headers: { Accept: "application/json,text/plain,*/*" }
+      headers: {
+        Accept: "application/json,text/plain,*/*"
+      }
     });
 
     clearTimeout(timeout);
 
-    if (!r.ok) return null;
+    if (!r.ok) {
+      return null;
+    }
 
     const txt = await r.text();
 
     try {
       return JSON.parse(txt);
     } catch {
-      return { raw: txt.slice(0, 500) };
+      return {
+        raw: txt.slice(0, 500)
+      };
     }
   } catch {
     return null;
@@ -110,22 +132,38 @@ async function getProvider() {
     try {
       const provider = new ethers.JsonRpcProvider(rpc);
       await provider.getBlockNumber();
-      return { provider, rpc };
+
+      return {
+        provider,
+        rpc
+      };
     } catch (e) {
       lastErr = e;
     }
   }
 
-  throw new Error("No working Base RPC. Last error: " + (lastErr?.message || "unknown"));
+  throw new Error(
+    "No working Base RPC: " + (lastErr?.message || "unknown")
+  );
 }
 
 export default async function handler(req, res) {
   res.setHeader("Access-Control-Allow-Origin", "*");
-  res.setHeader("Access-Control-Allow-Methods", "POST,OPTIONS");
+  res.setHeader("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type");
 
   if (req.method === "OPTIONS") {
     return res.status(200).end();
+  }
+
+  if (req.method === "GET") {
+    return json(res, 200, {
+      ok: true,
+      endpoint: "/api/chainscan",
+      message: "Use POST with chain, contract, token_id.",
+      contracts_loaded: CHAINVERS_CONTRACTS.length,
+      contracts: CHAINVERS_CONTRACTS
+    });
   }
 
   if (req.method !== "POST") {
@@ -136,20 +174,23 @@ export default async function handler(req, res) {
   }
 
   try {
-    if (!CONTRACT_ADDRESS || !ethers.isAddress(CONTRACT_ADDRESS)) {
+    if (!CHAINVERS_CONTRACTS.length) {
       return json(res, 500, {
         ok: false,
         is_chainvers: false,
-        error: "Missing or invalid CONTRACT_ADDRESS in Vercel Environment Variables"
+        error:
+          "Missing CONTRACT_ADDRESS or CHAINVERS_CONTRACTS in Vercel Environment Variables"
       });
     }
 
     const body = req.body || {};
 
     const chain = String(body.chain || "base").toLowerCase().trim();
-    const contract = normalizeAddress(body.contract);
+    const contract = norm(body.contract);
     const tokenId = String(body.token_id || body.token || "").trim();
-    const wallet = normalizeAddress(body.wallet || body.user || body.user_address || "");
+    const wallet = norm(
+      body.wallet || body.user || body.user_address || ""
+    );
 
     if (chain !== "base") {
       return json(res, 200, {
@@ -178,23 +219,22 @@ export default async function handler(req, res) {
       });
     }
 
-    if (contract !== CONTRACT_ADDRESS) {
+    if (!CHAINVERS_CONTRACTS.includes(contract)) {
       return json(res, 200, {
         ok: false,
         is_chainvers: false,
         error: "Not CHAINVERS contract",
         contract,
-        expected_contract: CONTRACT_ADDRESS,
+        expected_contracts: CHAINVERS_CONTRACTS,
         token_id: tokenId
       });
     }
 
     const { provider, rpc } = await getProvider();
-    const nft = new ethers.Contract(CONTRACT_ADDRESS, ABI, provider);
+
+    const nft = new ethers.Contract(contract, ABI, provider);
 
     let owner = "";
-    let tokenURI = "";
-    let metadata = null;
 
     try {
       owner = await nft.ownerOf(tokenId);
@@ -210,6 +250,9 @@ export default async function handler(req, res) {
       });
     }
 
+    let tokenURI = "";
+    let metadata = null;
+
     try {
       tokenURI = await nft.tokenURI(tokenId);
       metadata = await fetchMetadata(tokenURI);
@@ -223,7 +266,10 @@ export default async function handler(req, res) {
 
     try {
       originalOf = (await nft.copyToOriginal(tokenId)).toString();
-      if (originalOf !== "0") type = "copy";
+
+      if (originalOf !== "0") {
+        type = "copy";
+      }
     } catch {
       originalOf = "0";
       type = "origin";
@@ -241,9 +287,9 @@ export default async function handler(req, res) {
 
     const image = ipfsToHttp(
       metadata?.image ||
-      metadata?.image_url ||
-      metadata?.animation_url ||
-      ""
+        metadata?.image_url ||
+        metadata?.animation_url ||
+        ""
     );
 
     return json(res, 200, {
@@ -263,7 +309,6 @@ export default async function handler(req, res) {
       user_has_copy: userHasCopy,
       rpc_used: rpc
     });
-
   } catch (e) {
     return json(res, 500, {
       ok: false,
