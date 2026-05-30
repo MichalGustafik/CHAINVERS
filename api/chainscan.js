@@ -1,4 +1,4 @@
-console.log("=== BOOT: CHAINVERS /api/chainscan DEBUG ===");
+console.log("=== BOOT: CHAINVERS /api/chainscan DEBUG ETHERS V5 ===");
 
 import { ethers } from "ethers";
 
@@ -83,6 +83,10 @@ function isValidTokenId(v) {
   return /^\d+$/.test(String(v || ""));
 }
 
+function isAddress(addr) {
+  return ethers.utils && ethers.utils.isAddress(addr);
+}
+
 function ipfsToHttp(uri) {
   if (!uri) return "";
   if (uri.startsWith("ipfs://")) {
@@ -131,9 +135,12 @@ async function getProvider(logs) {
   for (const rpc of BASE_RPCS) {
     try {
       logPush(logs, "TRY_RPC", { rpc });
-      const provider = new ethers.JsonRpcProvider(rpc);
+
+      const provider = new ethers.providers.JsonRpcProvider(rpc);
       const block = await provider.getBlockNumber();
+
       logPush(logs, "RPC_OK", { rpc, block });
+
       return { provider, rpc };
     } catch (e) {
       lastErr = e;
@@ -228,7 +235,7 @@ export default async function handler(req, res) {
       }, logs);
     }
 
-    if (!ethers.isAddress(contract)) {
+    if (!isAddress(contract)) {
       return response(res, 200, {
         ok: false,
         is_chainvers: false,
@@ -304,15 +311,21 @@ export default async function handler(req, res) {
     try {
       logPush(logs, "CALL_COPY_TO_ORIGINAL", { tokenId });
       originalOf = (await nft.copyToOriginal(tokenId)).toString();
-      if (originalOf !== "0") type = "copy";
+
+      if (originalOf !== "0") {
+        type = "copy";
+      }
+
       logPush(logs, "COPY_TO_ORIGINAL_OK", { originalOf, type });
     } catch (e) {
-      logPush(logs, "COPY_TO_ORIGINAL_FAIL_ASSUME_ORIGIN", { error: e.message });
+      logPush(logs, "COPY_TO_ORIGINAL_FAIL_ASSUME_ORIGIN", {
+        error: e.message
+      });
     }
 
     let userHasCopy = false;
 
-    if (wallet && ethers.isAddress(wallet)) {
+    if (wallet && isAddress(wallet)) {
       try {
         logPush(logs, "CALL_HAS_COPY", { tokenId, wallet });
         userHasCopy = await nft.hasCopy(tokenId, wallet);
