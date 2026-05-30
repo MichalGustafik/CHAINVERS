@@ -43,6 +43,17 @@ export default async function handler(req, res) {
       };
     }
 
+    function emptyTracking(status = "pending") {
+      return {
+        printify_order_id: null,
+        printify_status: status,
+        tracking_number: null,
+        tracking_url: null,
+        tracking_carrier: null,
+        tracking_status: "pending"
+      };
+    }
+
     function extractTracking(order = null) {
       const shipments = Array.isArray(order?.shipments) ? order.shipments : [];
       const firstShipment = shipments[0] || {};
@@ -71,11 +82,20 @@ export default async function handler(req, res) {
       };
     }
 
+    async function safeJson(resp) {
+      const txt = await resp.text();
+      try {
+        return JSON.parse(txt);
+      } catch {
+        return { raw: txt };
+      }
+    }
+
     const shopsResp = await fetch("https://api.printify.com/v1/shops.json", {
       headers: authHeader
     });
 
-    const shops = await shopsResp.json();
+    const shops = await safeJson(shopsResp);
     const shopId = shops[0]?.id;
 
     if (!shopId) {
@@ -92,7 +112,7 @@ export default async function handler(req, res) {
         { headers: authHeader }
       );
 
-      const productsResp = await prodsResp.json();
+      const productsResp = await safeJson(prodsResp);
       const products = Array.isArray(productsResp.data) ? productsResp.data : [];
 
       return products.find((p) => p.external_id === externalId) || null;
@@ -104,7 +124,7 @@ export default async function handler(req, res) {
         { headers: authHeader }
       );
 
-      const product = await detailResp.json();
+      const product = await safeJson(detailResp);
 
       if (!detailResp.ok || !product?.id) {
         return {
@@ -129,7 +149,7 @@ export default async function handler(req, res) {
           { headers: authHeader }
         );
 
-        const order = await orderResp.json();
+        const order = await safeJson(orderResp);
 
         if (!orderResp.ok) return null;
         return order;
@@ -138,7 +158,7 @@ export default async function handler(req, res) {
       }
     }
 
-    async function waitForMockup(productId, tries = 10) {
+    async function waitForMockup(productId, tries = 4) {
       let lastProduct = null;
 
       for (let i = 0; i < tries; i++) {
@@ -156,50 +176,44 @@ export default async function handler(req, res) {
             return {
               ok: true,
               product: detail.product,
-              mockup
+              mockup,
+              mockup_pending: false
             };
           }
         } else {
           lastProduct = detail.resp || null;
         }
 
-        await new Promise(resolve => setTimeout(resolve, 3000));
+        await new Promise(resolve => setTimeout(resolve, 1200));
       }
 
       return {
-        ok: false,
+        ok: true,
         product: lastProduct,
-        mockup: null
+        mockup: null,
+        mockup_pending: true
       };
     }
 
     let existing = await findExistingProduct();
 
     if (existing) {
-      const mockupWait = await waitForMockup(existing.id, 10);
+      const mockupWait = await waitForMockup(existing.id, 4);
 
-      const product = mockupWait.product;
+      const product = mockupWait.product || existing;
       const mockup = mockupWait.mockup;
-
-      if (!mockup) {
-        return res.status(500).json({
-          ok: false,
-          error: "Existing Printify product found, but mockup image is not ready yet.",
-          product_id: existing.id,
-          product
-        });
-      }
 
       const existingOrderId = existing_order?.id || existing_order?.order_id || null;
       const orderDetail = await loadOrderDetail(existingOrderId);
       const finalOrder = orderDetail || existing_order || null;
-      const tracking = extractTracking(finalOrder);
+      const tracking = finalOrder ? extractTracking(finalOrder) : emptyTracking("product_exists");
 
       return res.status(200).json({
         ok: true,
         exists: true,
         duplicate: true,
         recovered: !!recover,
+        mockup_pending: !mockup,
         product,
         order: finalOrder,
         tracking,
@@ -226,19 +240,10 @@ export default async function handler(req, res) {
         });
       }
 
-      const mockupWait = await waitForMockup(recoverExisting.id, 10);
+      const mockupWait = await waitForMockup(recoverExisting.id, 4);
 
-      const recoverProduct = mockupWait.product;
+      const recoverProduct = mockupWait.product || recoverExisting;
       const mockup = mockupWait.mockup;
-
-      if (!mockup) {
-        return res.status(500).json({
-          ok: false,
-          error: "Recover product found, but mockup image is not ready yet.",
-          product_id: recoverExisting.id,
-          product: recoverProduct
-        });
-      }
 
       const orderDetail = await loadOrderDetail(existing_order.id);
       const finalOrder = orderDetail || existing_order;
@@ -249,6 +254,7 @@ export default async function handler(req, res) {
         exists: true,
         duplicate: true,
         recovered: true,
+        mockup_pending: !mockup,
         order: finalOrder,
         tracking,
         printify_order_id: tracking.printify_order_id,
@@ -292,9 +298,9 @@ export default async function handler(req, res) {
       }
     );
 
-    const uploadData = await uploadResp.json();
+    const uploadData = await safeJson(uploadResp);
 
-    if (!uploadData.id) {
+    if (!uploadResp.ok || !uploadData.id) {
       return res.status(500).json({
         ok: false,
         error: "Upload failed",
@@ -309,7 +315,7 @@ export default async function handler(req, res) {
       { headers: authHeader }
     );
 
-    const providers = await providersResp.json();
+    const providers = await safeJson(providersResp);
     const providerId = providers[0]?.id;
 
     if (!providerId) {
@@ -325,7 +331,7 @@ export default async function handler(req, res) {
       { headers: authHeader }
     );
 
-    const variantsData = await variantsResp.json();
+    const variantsData = await safeJson(variantsResp);
     const variants = Array.isArray(variantsData.variants) ? variantsData.variants : [];
     const variant = variants[0];
 
@@ -382,7 +388,7 @@ export default async function handler(req, res) {
       }
     );
 
-    const created = await createProdResp.json();
+    const created = await safeJson(createProdResp);
 
     if (!createProdResp.ok || !created.id) {
       return res.status(500).json({
@@ -409,7 +415,7 @@ export default async function handler(req, res) {
       }
     );
 
-    const mockupWait = await waitForMockup(product.id, 10);
+    const mockupWait = await waitForMockup(product.id, 4);
 
     if (mockupWait.product?.id) {
       product = mockupWait.product;
@@ -418,11 +424,24 @@ export default async function handler(req, res) {
     const mockup = mockupWait.mockup;
 
     if (!mockup) {
-      return res.status(500).json({
-        ok: false,
-        error: "Printify product was created, but mockup image is not ready yet.",
+      return res.status(200).json({
+        ok: true,
+        exists: false,
+        duplicate: false,
+        mockup_pending: true,
+        message: "Printify product created, mockup is still generating.",
         product_id: product?.id || null,
-        product
+        product,
+        order: null,
+        tracking: emptyTracking("mockup_pending"),
+        printify_order_id: null,
+        printify_status: "mockup_pending",
+        tracking_number: null,
+        tracking_url: null,
+        tracking_carrier: null,
+        tracking_status: "pending",
+        preview: null,
+        preview_url: null
       });
     }
 
@@ -447,7 +466,7 @@ export default async function handler(req, res) {
       }
     );
 
-    const order = await orderResp.json();
+    const order = await safeJson(orderResp);
 
     if (!orderResp.ok) {
       const code = Number(order?.code || order?.errors?.code || 0);
@@ -499,6 +518,7 @@ export default async function handler(req, res) {
       ok: true,
       exists: false,
       duplicate: false,
+      mockup_pending: false,
       product,
       order: finalOrder,
       tracking,
