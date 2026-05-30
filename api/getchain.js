@@ -54,11 +54,32 @@ export default async function handler(req, res) {
       };
     }
 
+    function mockupPendingTracking(status = "mockup_pending") {
+      return {
+        printify_order_id: null,
+        printify_status: status,
+        tracking_number: null,
+        tracking_url: null,
+        tracking_carrier: null,
+        tracking_status: "pending"
+      };
+    }
+
+    async function safeJson(resp) {
+      const text = await resp.text();
+
+      try {
+        return JSON.parse(text);
+      } catch {
+        return { raw: text };
+      }
+    }
+
     const shopsResp = await fetch("https://api.printify.com/v1/shops.json", {
       headers: authHeader
     });
 
-    const shops = await shopsResp.json();
+    const shops = await safeJson(shopsResp);
     const shopId = shops[0]?.id;
 
     if (!shopId) {
@@ -75,7 +96,7 @@ export default async function handler(req, res) {
         { headers: authHeader }
       );
 
-      const productsResp = await prodsResp.json();
+      const productsResp = await safeJson(prodsResp);
       const products = Array.isArray(productsResp.data) ? productsResp.data : [];
 
       return products.find((p) => p.external_id === externalId) || null;
@@ -87,7 +108,7 @@ export default async function handler(req, res) {
         { headers: authHeader }
       );
 
-      const product = await detailResp.json();
+      const product = await safeJson(detailResp);
 
       if (!detailResp.ok || !product?.id) {
         return {
@@ -103,57 +124,20 @@ export default async function handler(req, res) {
       };
     }
 
-    async function waitForMockup(productId, tries = 6) {
-      let lastProduct = null;
-
-      for (let i = 0; i < tries; i++) {
-        const detail = await loadProductDetail(productId);
-
-        if (detail.ok) {
-          lastProduct = detail.product;
-
-          const mockup =
-            detail.product?.images?.[0]?.src ||
-            detail.product?.images?.[0]?.url ||
-            null;
-
-          if (mockup) {
-            return {
-              ok: true,
-              product: detail.product,
-              mockup
-            };
-          }
-        } else {
-          lastProduct = detail.resp || null;
-        }
-
-        await new Promise(resolve => setTimeout(resolve, 1500));
-      }
-
-      return {
-        ok: false,
-        product: lastProduct,
-        mockup: null
-      };
+    function getMockup(product) {
+      return (
+        product?.images?.[0]?.src ||
+        product?.images?.[0]?.url ||
+        null
+      );
     }
 
     let existing = await findExistingProduct();
 
     if (existing) {
-      const mockupWait = await waitForMockup(existing.id, 6);
-
-      const product = mockupWait.product;
-      const mockup = mockupWait.mockup;
-
-      if (!mockup) {
-        return res.status(500).json({
-          ok: false,
-          error: "Existing Printify product found, but mockup image is not ready yet.",
-          product_id: existing.id,
-          product
-        });
-      }
+      const detail = await loadProductDetail(existing.id);
+      const product = detail.ok ? detail.product : existing;
+      const mockup = getMockup(product);
 
       const tracking = extractTracking(existing_order || null);
 
@@ -162,6 +146,7 @@ export default async function handler(req, res) {
         exists: true,
         duplicate: true,
         recovered: !!recover,
+        mockup_pending: !mockup,
         product,
         order: existing_order || null,
         tracking,
@@ -188,20 +173,9 @@ export default async function handler(req, res) {
         });
       }
 
-      const mockupWait = await waitForMockup(recoverExisting.id, 6);
-
-      const recoverProduct = mockupWait.product;
-      const mockup = mockupWait.mockup;
-
-      if (!mockup) {
-        return res.status(500).json({
-          ok: false,
-          error: "Recover product found, but mockup image is not ready yet.",
-          product_id: recoverExisting.id,
-          product: recoverProduct
-        });
-      }
-
+      const detail = await loadProductDetail(recoverExisting.id);
+      const product = detail.ok ? detail.product : recoverExisting;
+      const mockup = getMockup(product);
       const tracking = extractTracking(existing_order);
 
       return res.status(200).json({
@@ -209,6 +183,7 @@ export default async function handler(req, res) {
         exists: true,
         duplicate: true,
         recovered: true,
+        mockup_pending: !mockup,
         order: existing_order,
         tracking,
         printify_order_id: tracking.printify_order_id,
@@ -217,7 +192,7 @@ export default async function handler(req, res) {
         tracking_url: tracking.tracking_url,
         tracking_carrier: tracking.tracking_carrier,
         tracking_status: tracking.tracking_status,
-        product: recoverProduct,
+        product,
         preview: mockup,
         preview_url: mockup
       });
@@ -252,9 +227,9 @@ export default async function handler(req, res) {
       }
     );
 
-    const uploadData = await uploadResp.json();
+    const uploadData = await safeJson(uploadResp);
 
-    if (!uploadData.id) {
+    if (!uploadResp.ok || !uploadData.id) {
       return res.status(500).json({
         ok: false,
         error: "Upload failed",
@@ -269,7 +244,7 @@ export default async function handler(req, res) {
       { headers: authHeader }
     );
 
-    const providers = await providersResp.json();
+    const providers = await safeJson(providersResp);
     const providerId = providers[0]?.id;
 
     if (!providerId) {
@@ -285,7 +260,7 @@ export default async function handler(req, res) {
       { headers: authHeader }
     );
 
-    const variantsData = await variantsResp.json();
+    const variantsData = await safeJson(variantsResp);
     const variants = Array.isArray(variantsData.variants) ? variantsData.variants : [];
     const variant = variants[0];
 
@@ -342,7 +317,7 @@ export default async function handler(req, res) {
       }
     );
 
-    const created = await createProdResp.json();
+    const created = await safeJson(createProdResp);
 
     if (!createProdResp.ok || !created.id) {
       return res.status(500).json({
@@ -369,22 +344,10 @@ export default async function handler(req, res) {
       }
     );
 
-    const mockupWait = await waitForMockup(product.id, 6);
+    const detail = await loadProductDetail(product.id);
+    if (detail.ok) product = detail.product;
 
-    if (mockupWait.product?.id) {
-      product = mockupWait.product;
-    }
-
-    const mockup = mockupWait.mockup;
-
-    if (!mockup) {
-      return res.status(500).json({
-        ok: false,
-        error: "Printify product was created, but mockup image is not ready yet.",
-        product_id: product?.id || null,
-        product
-      });
-    }
+    const mockup = getMockup(product);
 
     const orderPayload = {
       external_id: externalId,
@@ -407,7 +370,7 @@ export default async function handler(req, res) {
       }
     );
 
-    const order = await orderResp.json();
+    const order = await safeJson(orderResp);
 
     if (!orderResp.ok) {
       const code = Number(order?.code || order?.errors?.code || 0);
@@ -426,6 +389,7 @@ export default async function handler(req, res) {
           ok: true,
           exists: true,
           duplicate: true,
+          mockup_pending: !mockup,
           order: existingOrder,
           tracking,
           printify_order_id: tracking.printify_order_id,
@@ -454,6 +418,7 @@ export default async function handler(req, res) {
       ok: true,
       exists: false,
       duplicate: false,
+      mockup_pending: !mockup,
       product,
       order,
       tracking,
