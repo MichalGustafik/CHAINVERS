@@ -12,7 +12,7 @@ export default async function handler(req, res) {
   }
 
   try {
-    const { crop_id, image_url, recover, existing_order } = req.body || {};
+    const { crop_id, image_url, recover, existing_order, shipping } = req.body || {};
 
     if (!crop_id || !image_url) {
       return res.status(400).json({
@@ -23,6 +23,53 @@ export default async function handler(req, res) {
 
     const authHeader = { Authorization: `Bearer ${PRINTIFY_API_KEY}` };
     const externalId = `chainvers_${crop_id}`;
+
+    function normalizeShipping(s = {}) {
+      const name = String(s.name || "CHAIN User").trim();
+      const parts = name.split(" ").filter(Boolean);
+      const firstName = parts.shift() || "CHAIN";
+      const lastName = parts.join(" ") || "User";
+
+      return {
+        first_name: firstName,
+        last_name: lastName,
+        email: String(s.email || "test@example.com").trim(),
+        phone: String(s.phone || "421900000000").trim(),
+        country: String(s.country || "SK").trim().toUpperCase(),
+        address1: String(s.address1 || "Test Street 1").trim(),
+        address2: String(s.address2 || "").trim(),
+        city: String(s.city || "Bratislava").trim(),
+        zip: String(s.zip || "81101").trim()
+      };
+    }
+
+    function extractTracking(order = null) {
+      const shipments = Array.isArray(order?.shipments) ? order.shipments : [];
+      const firstShipment = shipments[0] || {};
+
+      return {
+        printify_order_id: order?.id || order?.order_id || null,
+        printify_status: order?.status || "pending",
+        tracking_number:
+          firstShipment.tracking_number ||
+          firstShipment.number ||
+          order?.tracking_number ||
+          null,
+        tracking_url:
+          firstShipment.tracking_url ||
+          firstShipment.url ||
+          order?.tracking_url ||
+          null,
+        tracking_carrier:
+          firstShipment.carrier ||
+          order?.tracking_carrier ||
+          null,
+        tracking_status:
+          firstShipment.status ||
+          order?.tracking_status ||
+          "pending"
+      };
+    }
 
     const shopsResp = await fetch("https://api.printify.com/v1/shops.json", {
       headers: authHeader
@@ -71,6 +118,24 @@ export default async function handler(req, res) {
         ok: true,
         product
       };
+    }
+
+    async function loadOrderDetail(orderId) {
+      if (!orderId) return null;
+
+      try {
+        const orderResp = await fetch(
+          `https://api.printify.com/v1/shops/${shopId}/orders/${orderId}.json`,
+          { headers: authHeader }
+        );
+
+        const order = await orderResp.json();
+
+        if (!orderResp.ok) return null;
+        return order;
+      } catch {
+        return null;
+      }
     }
 
     async function waitForMockup(productId, tries = 10) {
@@ -125,13 +190,25 @@ export default async function handler(req, res) {
         });
       }
 
+      const existingOrderId = existing_order?.id || existing_order?.order_id || null;
+      const orderDetail = await loadOrderDetail(existingOrderId);
+      const finalOrder = orderDetail || existing_order || null;
+      const tracking = extractTracking(finalOrder);
+
       return res.status(200).json({
         ok: true,
         exists: true,
         duplicate: true,
         recovered: !!recover,
         product,
-        order: existing_order || null,
+        order: finalOrder,
+        tracking,
+        printify_order_id: tracking.printify_order_id,
+        printify_status: tracking.printify_status,
+        tracking_number: tracking.tracking_number,
+        tracking_url: tracking.tracking_url,
+        tracking_carrier: tracking.tracking_carrier,
+        tracking_status: tracking.tracking_status,
         preview: mockup,
         preview_url: mockup
       });
@@ -163,12 +240,23 @@ export default async function handler(req, res) {
         });
       }
 
+      const orderDetail = await loadOrderDetail(existing_order.id);
+      const finalOrder = orderDetail || existing_order;
+      const tracking = extractTracking(finalOrder);
+
       return res.status(200).json({
         ok: true,
         exists: true,
         duplicate: true,
         recovered: true,
-        order: existing_order,
+        order: finalOrder,
+        tracking,
+        printify_order_id: tracking.printify_order_id,
+        printify_status: tracking.printify_status,
+        tracking_number: tracking.tracking_number,
+        tracking_url: tracking.tracking_url,
+        tracking_carrier: tracking.tracking_carrier,
+        tracking_status: tracking.tracking_status,
         product: recoverProduct,
         preview: mockup,
         preview_url: mockup
@@ -347,16 +435,7 @@ export default async function handler(req, res) {
           quantity: 1
         }
       ],
-      address_to: {
-        first_name: "CHAIN",
-        last_name: "User",
-        email: "test@example.com",
-        phone: "421900000000",
-        country: "SK",
-        address1: "Test Street 1",
-        city: "Bratislava",
-        zip: "81101"
-      }
+      address_to: normalizeShipping(shipping)
     };
 
     const orderResp = await fetch(
@@ -380,11 +459,23 @@ export default async function handler(req, res) {
         reason.toLowerCase().includes("already exists");
 
       if (duplicateOrder) {
+        const duplicateOrderId = order?.order?.id || order?.id || null;
+        const orderDetail = await loadOrderDetail(duplicateOrderId);
+        const finalOrder = orderDetail || order?.order || order || null;
+        const tracking = extractTracking(finalOrder);
+
         return res.status(200).json({
           ok: true,
           exists: true,
           duplicate: true,
-          order: order?.order || null,
+          order: finalOrder,
+          tracking,
+          printify_order_id: tracking.printify_order_id,
+          printify_status: tracking.printify_status,
+          tracking_number: tracking.tracking_number,
+          tracking_url: tracking.tracking_url,
+          tracking_carrier: tracking.tracking_carrier,
+          tracking_status: tracking.tracking_status,
           product,
           preview: mockup,
           preview_url: mockup,
@@ -399,12 +490,24 @@ export default async function handler(req, res) {
       });
     }
 
+    const orderId = order?.id || order?.order_id || null;
+    const orderDetail = await loadOrderDetail(orderId);
+    const finalOrder = orderDetail || order;
+    const tracking = extractTracking(finalOrder);
+
     return res.status(200).json({
       ok: true,
       exists: false,
       duplicate: false,
       product,
-      order,
+      order: finalOrder,
+      tracking,
+      printify_order_id: tracking.printify_order_id,
+      printify_status: tracking.printify_status,
+      tracking_number: tracking.tracking_number,
+      tracking_url: tracking.tracking_url,
+      tracking_carrier: tracking.tracking_carrier,
+      tracking_status: tracking.tracking_status,
       preview: mockup,
       preview_url: mockup
     });
