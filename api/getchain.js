@@ -50,7 +50,7 @@ export default async function handler(req, res) {
         tracking_number: s?.tracking_number || s?.number || null,
         tracking_url: s?.tracking_url || s?.url || null,
         tracking_carrier: s?.carrier || null,
-        tracking_status: s?.status || "pending"
+        tracking_status: s?.status || order?.status || "pending"
       };
     }
 
@@ -103,7 +103,7 @@ export default async function handler(req, res) {
       };
     }
 
-    async function waitForMockup(productId, tries = 10) {
+    async function waitForMockup(productId, tries = 6) {
       let lastProduct = null;
 
       for (let i = 0; i < tries; i++) {
