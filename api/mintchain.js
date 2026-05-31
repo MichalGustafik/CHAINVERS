@@ -229,6 +229,42 @@ export default async function handler(req,res){
       });
     }
 
+    /* =========================================================
+       DEBUG CALL
+    ========================================================= */
+
+    try{
+
+      const testCall =
+        await contract.methods
+          .mintCopy(original_id)
+          .call({
+            from:account.address,
+            value:mintFee
+          });
+
+      log(logs,"CALL_OK",{
+        testCall
+      });
+
+    }catch(e){
+
+      log(logs,"CALL_REVERT_REASON",{
+        error:e.message,
+        stack:e.stack
+      });
+
+      return res.status(500).json({
+        ok:false,
+        error:e.message,
+        debug_log:logs
+      });
+    }
+
+    /* =========================================================
+       ESTIMATE GAS
+    ========================================================= */
+
     let gas = 0;
 
     try{
@@ -248,7 +284,8 @@ export default async function handler(req,res){
     }catch(e){
 
       log(logs,"GAS_ESTIMATE_FAIL",{
-        error:e.message
+        error:e.message,
+        stack:e.stack
       });
 
       return res.status(500).json({
@@ -258,6 +295,10 @@ export default async function handler(req,res){
         debug_log:logs
       });
     }
+
+    /* =========================================================
+       SEND TX
+    ========================================================= */
 
     let tx;
 
