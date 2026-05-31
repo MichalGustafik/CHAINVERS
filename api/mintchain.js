@@ -1,144 +1,319 @@
-import Web3 from 'web3';
-import fetch from 'node-fetch';
+console.log("=== BOOT: CHAINVERS /api/copymint DEBUG ===");
 
-const web3 = new Web3(process.env.PROVIDER_URL);
-const log = (...args) => console.log(`[${new Date().toISOString()}]`, ...args);
+import Web3 from "web3";
 
-function isValidAddress(addr) {
-  return web3.utils.isAddress(addr);
-}
+export const maxDuration = 60;
 
-function encodeFunctionCall(metadataURI) {
-  const data = web3.eth.abi.encodeFunctionCall(
-    {
-      type: 'function',
-      name: 'createOriginal',
-      inputs: [
-        { type: 'string', name: 'privateURI' },
-        { type: 'string', name: 'publicURI' },
-        { type: 'uint96', name: 'royaltyFeeNumerator' },
-        { type: 'uint256', name: 'maxCopies' }
-      ]
-    },
-    [metadataURI, metadataURI, '0', '1000000']
-  );
+const ABI = [
 
-  log(`📎 metadataURI to send in contract: ${metadataURI}`);
-  return data;
-}
-
-async function getMintFee(TO) {
-  const data = web3.eth.abi.encodeFunctionSignature('mintFee()');
-  const result = await web3.eth.call({ to: TO, data });
-  return web3.eth.abi.decodeParameter('uint256', result);
-}
-
-// ✅ Čaká, kým budú metadáta dostupné na ipfs.io gateway
-async function waitForMetadataAvailability(ipfsUri, attempts = 5, delayMs = 3000) {
-  const url = ipfsUri.replace('ipfs://', 'https://ipfs.io/ipfs/');
-  for (let i = 1; i <= attempts; i++) {
-    try {
-      const res = await fetch(url, { method: 'HEAD' });
-      if (res.ok) {
-        log(`✅ Metadata dostupné po ${i} pokuse.`);
-        return true;
+  {
+    "inputs":[
+      {
+        "internalType":"uint256",
+        "name":"originalId",
+        "type":"uint256"
       }
-    } catch (e) {
-      log(`⚠️ Pokus ${i}: metadata ešte nie sú dostupné.`);
-    }
-    await new Promise(r => setTimeout(r, delayMs));
+    ],
+    "name":"mintCopy",
+    "outputs":[],
+    "stateMutability":"payable",
+    "type":"function"
+  },
+
+  {
+    "inputs":[],
+    "name":"mintFee",
+    "outputs":[
+      {
+        "internalType":"uint256",
+        "name":"",
+        "type":"uint256"
+      }
+    ],
+    "stateMutability":"view",
+    "type":"function"
+  },
+
+  {
+    "inputs":[
+      {
+        "internalType":"uint256",
+        "name":"tokenId",
+        "type":"uint256"
+      }
+    ],
+    "name":"ownerOf",
+    "outputs":[
+      {
+        "internalType":"address",
+        "name":"",
+        "type":"address"
+      }
+    ],
+    "stateMutability":"view",
+    "type":"function"
   }
-  return false;
+
+];
+
+function log(logs,msg,data=null){
+
+  const line =
+    `[${new Date().toISOString()}] ${msg}`;
+
+  console.log(line,data || '');
+
+  logs.push(
+    data
+      ? `${line} ${JSON.stringify(data)}`
+      : line
+  );
 }
 
-async function getGasPrice() {
-  try {
-    const gasPrice = await web3.eth.getGasPrice();
-    log(`⛽ Gas price: ${web3.utils.fromWei(gasPrice, 'gwei')} GWEI`);
-    return gasPrice;
-  } catch (err) {
-    log('❌ Failed to get gas price:', err.message);
-    throw err;
-  }
-}
+export default async function handler(req,res){
 
-export default async function handler(req, res) {
-  log('===== MINTCHAIN START =====');
+  const logs = [];
 
-  if (req.method !== 'POST') {
-    return res.status(405).json({ error: 'Only POST method allowed' });
-  }
+  try{
 
-  const { metadataURI, crop_id, walletAddress } = req.body;
-
-  if (!metadataURI || !metadataURI.startsWith('ipfs://')) {
-    return res.status(400).json({ error: 'Invalid metadataURI. Should start with ipfs://' });
-  }
-  if (!crop_id || !walletAddress || !isValidAddress(walletAddress)) {
-    return res.status(400).json({ error: 'Missing or invalid crop_id/walletAddress' });
-  }
-
-  const PRIVATE_KEY = process.env.PRIVATE_KEY;
-  const FROM = process.env.FROM_ADDRESS;
-  const TO = process.env.CONTRACT_ADDRESS;
-
-  if (!PRIVATE_KEY || !FROM || !TO) {
-    return res.status(500).json({ error: 'Missing env vars PRIVATE_KEY, FROM_ADDRESS or CONTRACT_ADDRESS' });
-  }
-
-  // 1) Čakanie na metadata dostupnosť
-  log(`🔍 Checking metadata availability for ${metadataURI}`);
-  const ok = await waitForMetadataAvailability(metadataURI);
-  if (!ok) {
-    return res.status(500).json({ error: 'Metadata not yet available on IPFS gateway' });
-  }
-
-  try {
-    const chainId = await web3.eth.getChainId();
-    const balance = await web3.eth.getBalance(FROM);
-    log(`🔗 Chain ID: ${chainId}, balance: ${web3.utils.fromWei(balance)} ETH`);
-
-    const mintFee = await getMintFee(TO);
-    log(`💰 Mint fee: ${web3.utils.fromWei(mintFee)} ETH`);
-
-    const gasPrice = await getGasPrice();
-    const data = encodeFunctionCall(metadataURI);
-
-    const gasLimit = await web3.eth.estimateGas({
-      from: FROM,
-      to: TO,
-      data,
-      value: mintFee
+    log(logs,"REQUEST_START",{
+      method:req.method
     });
 
-    const gasCost = web3.utils.toBN(gasPrice).mul(web3.utils.toBN(gasLimit));
-    const totalCost = gasCost.add(web3.utils.toBN(mintFee));
+    if(req.method !== 'POST'){
 
-    if (web3.utils.toBN(balance).lt(totalCost)) {
-      return res.status(400).json({
-        error: 'Insufficient ETH for mintFee + gas',
-        required: web3.utils.fromWei(totalCost),
-        have: web3.utils.fromWei(balance)
+      return res.status(405).json({
+        ok:false,
+        error:'Method not allowed',
+        debug_log:logs
       });
     }
 
-    const tx = {
-      from: FROM,
-      to: TO,
-      nonce: await web3.eth.getTransactionCount(FROM),
-      gasPrice: web3.utils.toHex(gasPrice),
-      gas: web3.utils.toHex(gasLimit),
-      value: web3.utils.toHex(mintFee),
-      data,
-    };
+    const {
+      action,
+      original_id,
+      user_address,
+      amount_eth,
+      internal_payment_id
+    } = req.body || {};
 
-    const signed = await web3.eth.accounts.signTransaction(tx, PRIVATE_KEY);
-    const receipt = await web3.eth.sendSignedTransaction(signed.rawTransaction);
+    log(logs,"BODY",req.body);
 
-    log(`✅ Mint successful: ${receipt.transactionHash}`);
-    return res.status(200).json({ success: true, txHash: receipt.transactionHash });
-  } catch (err) {
-    log('❌ ERROR:', err.message);
-    return res.status(500).json({ error: err.message });
+    if(action !== 'mint_from_balance'){
+
+      return res.status(400).json({
+        ok:false,
+        error:'Invalid action',
+        debug_log:logs
+      });
+    }
+
+    if(!original_id){
+
+      return res.status(400).json({
+        ok:false,
+        error:'Missing original_id',
+        debug_log:logs
+      });
+    }
+
+    if(!user_address){
+
+      return res.status(400).json({
+        ok:false,
+        error:'Missing user_address',
+        debug_log:logs
+      });
+    }
+
+    const rpc =
+      process.env.PROVIDER_URL;
+
+    const pk =
+      process.env.PRIVATE_KEY;
+
+    const contractAddress =
+      process.env.CONTRACT_ADDRESS;
+
+    log(logs,"ENV_CHECK",{
+      rpc_exists:!!rpc,
+      pk_exists:!!pk,
+      contract_exists:!!contractAddress
+    });
+
+    const web3 =
+      new Web3(rpc);
+
+    const account =
+      web3.eth.accounts.privateKeyToAccount(pk);
+
+    web3.eth.accounts.wallet.add(account);
+
+    log(logs,"BACKEND_ACCOUNT",{
+      address:account.address
+    });
+
+    const backendBalance =
+      await web3.eth.getBalance(
+        account.address
+      );
+
+    log(logs,"BACKEND_BALANCE",{
+      wei:backendBalance,
+      eth:web3.utils.fromWei(
+        backendBalance,
+        'ether'
+      )
+    });
+
+    const contract =
+      new web3.eth.Contract(
+        ABI,
+        contractAddress
+      );
+
+    let mintFee = '0';
+
+    try{
+
+      mintFee =
+        await contract.methods
+          .mintFee()
+          .call();
+
+      log(logs,"MINT_FEE",{
+        wei:mintFee,
+        eth:web3.utils.fromWei(
+          mintFee,
+          'ether'
+        )
+      });
+
+    }catch(e){
+
+      log(logs,"MINT_FEE_FAIL",{
+        error:e.message
+      });
+
+      mintFee =
+        web3.utils.toWei(
+          '0.0002',
+          'ether'
+        );
+    }
+
+    let originalOwner = null;
+
+    try{
+
+      originalOwner =
+        await contract.methods
+          .ownerOf(original_id)
+          .call();
+
+      log(logs,"ORIGINAL_OWNER",{
+        original_id,
+        owner:originalOwner
+      });
+
+    }catch(e){
+
+      log(logs,"OWNER_OF_FAIL",{
+        error:e.message
+      });
+
+      return res.status(500).json({
+        ok:false,
+        error:'Original NFT does not exist',
+        debug_log:logs
+      });
+    }
+
+    let gas = 0;
+
+    try{
+
+      gas =
+        await contract.methods
+          .mintCopy(original_id)
+          .estimateGas({
+            from:account.address,
+            value:mintFee
+          });
+
+      log(logs,"GAS_ESTIMATE_OK",{
+        gas
+      });
+
+    }catch(e){
+
+      log(logs,"GAS_ESTIMATE_FAIL",{
+        error:e.message
+      });
+
+      return res.status(500).json({
+        ok:false,
+        error:'Gas estimation failed',
+        details:e.message,
+        debug_log:logs
+      });
+    }
+
+    let tx;
+
+    try{
+
+      tx =
+        await contract.methods
+          .mintCopy(original_id)
+          .send({
+            from:account.address,
+            gas:Math.ceil(gas * 1.2),
+            value:mintFee
+          });
+
+      log(logs,"MINT_OK",{
+        tx:tx.transactionHash
+      });
+
+    }catch(e){
+
+      log(logs,"MINT_FAIL",{
+        error:e.message,
+        stack:e.stack
+      });
+
+      return res.status(500).json({
+        ok:false,
+        error:e.message,
+        debug_log:logs
+      });
+    }
+
+    return res.json({
+      ok:true,
+      tx:tx.transactionHash,
+      original_id,
+      user_address,
+      internal_payment_id,
+      backend_wallet:account.address,
+      note:
+        'Current contract mints copy to msg.sender/backend wallet.',
+      debug_log:logs
+    });
+
+  }catch(e){
+
+    log(logs,"HANDLER_FATAL",{
+      error:e.message,
+      stack:e.stack
+    });
+
+    return res.status(500).json({
+      ok:false,
+      error:e.message,
+      stack:e.stack,
+      debug_log:logs
+    });
   }
 }
