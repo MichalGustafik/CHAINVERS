@@ -56,6 +56,16 @@ const ABI = [
 
 ];
 
+function parseErr(e){
+
+  return (
+    e?.data?.message ||
+    e?.reason ||
+    e?.message ||
+    'Unknown revert'
+  );
+}
+
 function log(logs,msg,data=null){
 
   const line =
@@ -192,7 +202,7 @@ export default async function handler(req,res){
     }catch(e){
 
       log(logs,"MINT_FEE_FAIL",{
-        error:e.message
+        error:parseErr(e)
       });
 
       mintFee =
@@ -219,12 +229,12 @@ export default async function handler(req,res){
     }catch(e){
 
       log(logs,"OWNER_OF_FAIL",{
-        error:e.message
+        error:parseErr(e)
       });
 
       return res.status(500).json({
         ok:false,
-        error:'Original NFT does not exist',
+        error:parseErr(e),
         debug_log:logs
       });
     }
@@ -250,13 +260,13 @@ export default async function handler(req,res){
     }catch(e){
 
       log(logs,"CALL_REVERT_REASON",{
-        error:e.message,
-        stack:e.stack
+        error:parseErr(e),
+        raw:e
       });
 
       return res.status(500).json({
         ok:false,
-        error:e.message,
+        error:parseErr(e),
         debug_log:logs
       });
     }
@@ -284,14 +294,13 @@ export default async function handler(req,res){
     }catch(e){
 
       log(logs,"GAS_ESTIMATE_FAIL",{
-        error:e.message,
-        stack:e.stack
+        error:parseErr(e),
+        raw:e
       });
 
       return res.status(500).json({
         ok:false,
-        error:'Gas estimation failed',
-        details:e.message,
+        error:parseErr(e),
         debug_log:logs
       });
     }
@@ -320,13 +329,13 @@ export default async function handler(req,res){
     }catch(e){
 
       log(logs,"MINT_FAIL",{
-        error:e.message,
-        stack:e.stack
+        error:parseErr(e),
+        raw:e
       });
 
       return res.status(500).json({
         ok:false,
-        error:e.message,
+        error:parseErr(e),
         debug_log:logs
       });
     }
@@ -346,14 +355,13 @@ export default async function handler(req,res){
   }catch(e){
 
     log(logs,"HANDLER_FATAL",{
-      error:e.message,
-      stack:e.stack
+      error:parseErr(e),
+      raw:e
     });
 
     return res.status(500).json({
       ok:false,
-      error:e.message,
-      stack:e.stack,
+      error:parseErr(e),
       debug_log:logs
     });
   }
