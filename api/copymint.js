@@ -65,8 +65,12 @@ function ipfsToHttp(url) {
 
   url = String(url).trim();
 
+  if (url.startsWith("ipfs://ipfs/")) {
+    return "https://gateway.pinata.cloud/ipfs/" + url.replace("ipfs://ipfs/", "");
+  }
+
   if (url.startsWith("ipfs://")) {
-    return "https://ipfs.io/ipfs/" + url.replace("ipfs://", "");
+    return "https://gateway.pinata.cloud/ipfs/" + url.replace("ipfs://", "");
   }
 
   return url;
@@ -75,7 +79,7 @@ function ipfsToHttp(url) {
 async function fetchJson(url) {
   const r = await fetch(url, {
     headers: {
-      "Accept": "application/json"
+      Accept: "application/json"
     }
   });
 
@@ -84,14 +88,14 @@ async function fetchJson(url) {
   try {
     return JSON.parse(text);
   } catch {
-    return null;
+    return {
+      raw: text
+    };
   }
 }
 
 export default async function handler(req, res) {
-
   try {
-
     if (req.method !== "POST") {
       return res.status(405).json({
         ok: false,
@@ -115,14 +119,9 @@ export default async function handler(req, res) {
       });
     }
 
-    const rpc =
-      process.env.PROVIDER_URL;
-
-    const pk =
-      cleanPrivateKey(process.env.PRIVATE_KEY);
-
-    const contractAddress =
-      process.env.CONTRACT_ADDRESS;
+    const rpc = process.env.PROVIDER_URL;
+    const pk = cleanPrivateKey(process.env.PRIVATE_KEY);
+    const contractAddress = process.env.CONTRACT_ADDRESS;
 
     if (!rpc) {
       return res.status(500).json({
@@ -138,26 +137,19 @@ export default async function handler(req, res) {
       });
     }
 
-    const web3 =
-      new Web3(rpc);
+    const web3 = new Web3(rpc);
 
-    const contract =
-      new web3.eth.Contract(
-        ABI,
-        contractAddress
-      );
+    const contract = new web3.eth.Contract(
+      ABI,
+      contractAddress
+    );
 
-    /*
-    ===========================================
-    SCAN PREVIEW
-    ===========================================
-    */
+    // ============================================
+    // ACTION: scan_preview
+    // ============================================
 
     if (action === "scan_preview") {
-
-      const id =
-        token_id ||
-        original_id;
+      const id = token_id || original_id;
 
       if (!id) {
         return res.status(400).json({
@@ -166,24 +158,31 @@ export default async function handler(req, res) {
         });
       }
 
-      const tokenUri =
-        await contract.methods
+      let tokenUri = "";
+
+      try {
+        tokenUri = await contract.methods
           .tokenURI(id)
           .call();
+      } catch (e) {
+        return res.status(500).json({
+          ok: false,
+          error: "tokenURI failed: " + e.message,
+          token_id: String(id)
+        });
+      }
 
-      const metadataUrl =
-        ipfsToHttp(tokenUri);
+      const metadataUrl = ipfsToHttp(tokenUri);
+      const metadata = await fetchJson(metadataUrl);
 
-      const metadata =
-        await fetchJson(metadataUrl);
+      let image =
+        metadata?.image ||
+        metadata?.image_url ||
+        metadata?.animation_url ||
+        metadata?.properties?.image ||
+        "";
 
-      const image =
-        ipfsToHttp(
-          metadata?.image ||
-          metadata?.image_url ||
-          metadata?.animation_url ||
-          ""
-        );
+      image = ipfsToHttp(image);
 
       return res.json({
         ok: true,
@@ -192,32 +191,29 @@ export default async function handler(req, res) {
         contract: contractAddress,
         token_uri: tokenUri,
         metadata_url: metadataUrl,
-        metadata,
-        image
+        image,
+        metadata
       });
     }
 
-    let mintFeeWei =
-      "0";
+    let mintFeeWei = "0";
 
     try {
-
-      mintFeeWei =
-        await contract.methods
-          .mintFee()
-          .call();
-
+      mintFeeWei = await contract.methods
+        .mintFee()
+        .call();
     } catch (e) {
-
-      mintFeeWei =
-        web3.utils.toWei(
-          "0.0002",
-          "ether"
-        );
+      mintFeeWei = web3.utils.toWei(
+        "0.0002",
+        "ether"
+      );
     }
 
-    if (action === "wallet_prepare") {
+    // ============================================
+    // ACTION: wallet_prepare
+    // ============================================
 
+    if (action === "wallet_prepare") {
       if (!original_id || !user_address) {
         return res.status(400).json({
           ok: false,
@@ -242,11 +238,13 @@ export default async function handler(req, res) {
       });
     }
 
-    const account =
-      web3.eth.accounts.privateKeyToAccount(pk);
+    const account = web3.eth.accounts.privateKeyToAccount(pk);
+
+    // ============================================
+    // ACTION: mint_from_balance
+    // ============================================
 
     if (action === "mint_from_balance") {
-
       if (!original_id || !user_address) {
         return res.status(400).json({
           ok: false,
@@ -254,48 +252,38 @@ export default async function handler(req, res) {
         });
       }
 
-      const txCall =
-        contract.methods
-          .mintCopy(original_id);
+      const txCall = contract.methods.mintCopy(original_id);
 
-      const gas =
-        await txCall
-          .estimateGas({
-            from: account.address,
-            value: mintFeeWei
-          });
+      const gas = await txCall.estimateGas({
+        from: account.address,
+        value: mintFeeWei
+      });
 
-      const gasLimit =
-        Math.ceil(Number(gas) * 1.25);
+      const gasLimit = Math.ceil(Number(gas) * 1.25);
+      const gasPrice = await web3.eth.getGasPrice();
 
-      const gasPrice =
-        await web3.eth.getGasPrice();
+      const nonce = await web3.eth.getTransactionCount(
+        account.address,
+        "pending"
+      );
 
-      const nonce =
-        await web3.eth.getTransactionCount(
-          account.address,
-          "pending"
-        );
+      const signed = await web3.eth.accounts.signTransaction(
+        {
+          from: account.address,
+          to: contractAddress,
+          data: txCall.encodeABI(),
+          value: mintFeeWei,
+          gas: gasLimit,
+          gasPrice: gasPrice,
+          nonce: nonce,
+          chainId: 8453
+        },
+        pk
+      );
 
-      const signed =
-        await web3.eth.accounts.signTransaction(
-          {
-            from: account.address,
-            to: contractAddress,
-            data: txCall.encodeABI(),
-            value: mintFeeWei,
-            gas: gasLimit,
-            gasPrice: gasPrice,
-            nonce: nonce,
-            chainId: 8453
-          },
-          pk
-        );
-
-      const tx =
-        await web3.eth.sendSignedTransaction(
-          signed.rawTransaction
-        );
+      const tx = await web3.eth.sendSignedTransaction(
+        signed.rawTransaction
+      );
 
       return res.json({
         ok: true,
@@ -308,8 +296,11 @@ export default async function handler(req, res) {
       });
     }
 
-    if (action === "copy_withdraw") {
+    // ============================================
+    // ACTION: copy_withdraw
+    // ============================================
 
+    if (action === "copy_withdraw") {
       if (!user_address || !withdraw_to || !amount_eth) {
         return res.status(400).json({
           ok: false,
@@ -324,16 +315,14 @@ export default async function handler(req, res) {
         });
       }
 
-      const amountEth =
-        String(amount_eth)
-          .replace(",", ".")
-          .trim();
+      const amountEth = String(amount_eth)
+        .replace(",", ".")
+        .trim();
 
-      const amountWei =
-        web3.utils.toWei(
-          amountEth,
-          "ether"
-        );
+      const amountWei = web3.utils.toWei(
+        amountEth,
+        "ether"
+      );
 
       if (BigInt(amountWei) <= 0n) {
         return res.status(400).json({
@@ -342,33 +331,46 @@ export default async function handler(req, res) {
         });
       }
 
-      const gasPrice =
-        await web3.eth.getGasPrice();
+      const balanceWei = await web3.eth.getBalance(
+        account.address
+      );
 
-      const nonce =
-        await web3.eth.getTransactionCount(
-          account.address,
-          "pending"
-        );
+      const gasPrice = await web3.eth.getGasPrice();
+      const gasCostWei = BigInt(gasPrice) * 21000n;
+      const totalNeededWei = BigInt(amountWei) + gasCostWei;
 
-      const signed =
-        await web3.eth.accounts.signTransaction(
-          {
-            from: account.address,
-            to: withdraw_to,
-            value: amountWei,
-            gas: 21000,
-            gasPrice: gasPrice,
-            nonce: nonce,
-            chainId: 8453
-          },
-          pk
-        );
+      if (BigInt(balanceWei) < totalNeededWei) {
+        return res.status(400).json({
+          ok: false,
+          error: "Backend wallet has insufficient balance",
+          backend_balance_wei: balanceWei,
+          amount_wei: amountWei,
+          gas_cost_wei: gasCostWei.toString(),
+          total_needed_wei: totalNeededWei.toString()
+        });
+      }
 
-      const tx =
-        await web3.eth.sendSignedTransaction(
-          signed.rawTransaction
-        );
+      const nonce = await web3.eth.getTransactionCount(
+        account.address,
+        "pending"
+      );
+
+      const signed = await web3.eth.accounts.signTransaction(
+        {
+          from: account.address,
+          to: withdraw_to,
+          value: amountWei,
+          gas: 21000,
+          gasPrice: gasPrice,
+          nonce: nonce,
+          chainId: 8453
+        },
+        pk
+      );
+
+      const tx = await web3.eth.sendSignedTransaction(
+        signed.rawTransaction
+      );
 
       return res.json({
         ok: true,
@@ -387,7 +389,6 @@ export default async function handler(req, res) {
     });
 
   } catch (e) {
-
     return res.status(500).json({
       ok: false,
       error: e.message,
