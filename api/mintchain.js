@@ -30,6 +30,33 @@ function loadAbi() {
   return JSON.parse(raw);
 }
 
+function extractTokenIdFromReceipt(web3, receipt, contractAddress) {
+  const transferTopic = web3.utils.sha3("Transfer(address,address,uint256)");
+  const zeroTopic = "0x" + "0".repeat(64);
+
+  const logs = receipt?.logs || [];
+
+  for (const l of logs) {
+    const sameContract =
+      String(l.address || "").toLowerCase() === String(contractAddress || "").toLowerCase();
+
+    if (!sameContract) continue;
+    if (!l.topics || l.topics[0] !== transferTopic) continue;
+
+    const fromTopic = l.topics[1];
+
+    if (String(fromTopic).toLowerCase() !== zeroTopic.toLowerCase()) continue;
+
+    const tokenTopic = l.topics[3];
+
+    if (!tokenTopic) continue;
+
+    return web3.utils.hexToNumberString(tokenTopic);
+  }
+
+  return null;
+}
+
 export default async function handler(req, res) {
   const logs = [];
 
@@ -154,10 +181,25 @@ export default async function handler(req, res) {
       signed.rawTransaction
     );
 
+    const tokenId = extractTokenIdFromReceipt(web3, receipt, contractAddress);
+
     log("MINT_OK", {
       txHash: receipt.transactionHash,
-      blockNumber: receipt.blockNumber
+      blockNumber: receipt.blockNumber,
+      tokenId
     });
+
+    if (!tokenId) {
+      return res.status(500).json({
+        ok: false,
+        success: false,
+        error: "Mint OK, but tokenId was not found in Transfer event",
+        txHash: receipt.transactionHash,
+        contractAddress,
+        cropId: crop_id,
+        metadataURI
+      });
+    }
 
     return res.status(200).json({
       ok: true,
@@ -165,8 +207,12 @@ export default async function handler(req, res) {
       message: "Mint OK",
       txHash: receipt.transactionHash,
       contractAddress,
+      tokenId,
+      token_id: tokenId,
       cropId: crop_id,
-      metadataURI
+      crop_id,
+      metadataURI,
+      openseaUrl: `https://opensea.io/assets/base/${contractAddress}/${tokenId}`
     });
 
   } catch (e) {
