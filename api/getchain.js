@@ -13,7 +13,7 @@ export default async function handler(req, res) {
   }
 
   try {
-    const { crop_id, image_url, recover, existing_order, shipping } = req.body || {};
+    const { crop_id, image_url, recover, existing_order } = req.body || {};
 
     if (!crop_id || !image_url) {
       return res.status(400).json({
@@ -25,47 +25,6 @@ export default async function handler(req, res) {
     const authHeader = { Authorization: `Bearer ${PRINTIFY_API_KEY}` };
     const externalId = `chainvers_${crop_id}`;
 
-    function normalizeShipping(s = {}) {
-      const name = String(s.name || "CHAIN User").trim();
-      const parts = name.split(" ").filter(Boolean);
-
-      return {
-        first_name: parts.shift() || "CHAIN",
-        last_name: parts.join(" ") || "User",
-        email: String(s.email || "test@example.com").trim(),
-        phone: String(s.phone || "421900000000").trim(),
-        country: String(s.country || "SK").trim().toUpperCase(),
-        address1: String(s.address1 || "Test Street 1").trim(),
-        address2: String(s.address2 || "").trim(),
-        city: String(s.city || "Bratislava").trim(),
-        zip: String(s.zip || "81101").trim()
-      };
-    }
-
-    function extractTracking(order = null) {
-      const s = order?.shipments?.[0] || {};
-
-      return {
-        printify_order_id: order?.id || order?.order_id || null,
-        printify_status: order?.status || "pending",
-        tracking_number: s?.tracking_number || s?.number || null,
-        tracking_url: s?.tracking_url || s?.url || null,
-        tracking_carrier: s?.carrier || null,
-        tracking_status: s?.status || order?.status || "pending"
-      };
-    }
-
-    function pendingTracking(status = "mockup_pending") {
-      return {
-        printify_order_id: null,
-        printify_status: status,
-        tracking_number: null,
-        tracking_url: null,
-        tracking_carrier: null,
-        tracking_status: "pending"
-      };
-    }
-
     async function safeJson(resp) {
       const text = await resp.text();
       try {
@@ -75,7 +34,7 @@ export default async function handler(req, res) {
       }
     }
 
-    async function fetchWithTimeout(url, options = {}, timeoutMs = 18000) {
+    async function fetchWithTimeout(url, options = {}, timeoutMs = 12000) {
       const controller = new AbortController();
       const timer = setTimeout(() => controller.abort(), timeoutMs);
 
@@ -92,9 +51,30 @@ export default async function handler(req, res) {
       }
     }
 
+    function getMockup(product) {
+      return (
+        product?.images?.[0]?.src ||
+        product?.images?.[0]?.url ||
+        product?.mockups?.[0]?.src ||
+        product?.mockups?.[0]?.url ||
+        null
+      );
+    }
+
+    function pendingTracking(status = "mockup_pending") {
+      return {
+        printify_order_id: null,
+        printify_status: status,
+        tracking_number: null,
+        tracking_url: null,
+        tracking_carrier: null,
+        tracking_status: "pending"
+      };
+    }
+
     const shopsResp = await fetchWithTimeout("https://api.printify.com/v1/shops.json", {
       headers: authHeader
-    });
+    }, 10000);
 
     const shops = await safeJson(shopsResp);
     const shopId = shops[0]?.id;
@@ -110,7 +90,8 @@ export default async function handler(req, res) {
     async function findExistingProduct() {
       const prodsResp = await fetchWithTimeout(
         `https://api.printify.com/v1/shops/${shopId}/products.json`,
-        { headers: authHeader }
+        { headers: authHeader },
+        10000
       );
 
       const productsResp = await safeJson(prodsResp);
@@ -124,49 +105,28 @@ export default async function handler(req, res) {
         const detailResp = await fetchWithTimeout(
           `https://api.printify.com/v1/shops/${shopId}/products/${productId}.json`,
           { headers: authHeader },
-          12000
+          10000
         );
 
         const product = await safeJson(detailResp);
 
         if (!detailResp.ok || !product?.id) {
-          return {
-            ok: false,
-            error: "Product detail load failed",
-            resp: product
-          };
+          return { ok: false, product: null };
         }
 
-        return {
-          ok: true,
-          product
-        };
-      } catch (e) {
-        return {
-          ok: false,
-          error: "Product detail timeout",
-          resp: String(e.message || e)
-        };
+        return { ok: true, product };
+      } catch {
+        return { ok: false, product: null };
       }
     }
 
-    function getMockup(product) {
-      return (
-        product?.images?.[0]?.src ||
-        product?.images?.[0]?.url ||
-        product?.mockups?.[0]?.src ||
-        product?.mockups?.[0]?.url ||
-        null
-      );
-    }
-
-    let existing = await findExistingProduct();
+    const existing = await findExistingProduct();
 
     if (existing) {
       const detail = await loadProductDetail(existing.id);
       const product = detail.ok ? detail.product : existing;
       const mockup = getMockup(product);
-      const tracking = extractTracking(existing_order || null);
+      const tracking = pendingTracking(mockup ? "product_exists" : "mockup_pending");
 
       return res.status(200).json({
         ok: true,
@@ -177,18 +137,18 @@ export default async function handler(req, res) {
         product,
         order: existing_order || null,
         tracking,
-        printify_order_id: tracking.printify_order_id,
+        printify_order_id: null,
         printify_status: tracking.printify_status,
-        tracking_number: tracking.tracking_number,
-        tracking_url: tracking.tracking_url,
-        tracking_carrier: tracking.tracking_carrier,
-        tracking_status: tracking.tracking_status,
+        tracking_number: null,
+        tracking_url: null,
+        tracking_carrier: null,
+        tracking_status: "pending",
         preview: mockup,
         preview_url: mockup
       });
     }
 
-    const imageResp = await fetchWithTimeout(image_url, {}, 18000);
+    const imageResp = await fetchWithTimeout(image_url, {}, 12000);
 
     if (!imageResp.ok) {
       return res.status(500).json({
@@ -211,11 +171,11 @@ export default async function handler(req, res) {
         method: "POST",
         headers: { ...authHeader, "Content-Type": "application/json" },
         body: JSON.stringify({
-          file_name: `${crop_id}.png`,
+          file_name: `${crop_id}.jpg`,
           contents: imageBase64
         })
       },
-      22000
+      18000
     );
 
     const uploadData = await safeJson(uploadResp);
@@ -232,7 +192,8 @@ export default async function handler(req, res) {
 
     const providersResp = await fetchWithTimeout(
       `https://api.printify.com/v1/catalog/blueprints/${blueprintId}/print_providers.json`,
-      { headers: authHeader }
+      { headers: authHeader },
+      10000
     );
 
     const providers = await safeJson(providersResp);
@@ -248,7 +209,8 @@ export default async function handler(req, res) {
 
     const variantsResp = await fetchWithTimeout(
       `https://api.printify.com/v1/catalog/blueprints/${blueprintId}/print_providers/${providerId}/variants.json`,
-      { headers: authHeader }
+      { headers: authHeader },
+      10000
     );
 
     const variantsData = await safeJson(variantsResp);
@@ -306,170 +268,39 @@ export default async function handler(req, res) {
         headers: { ...authHeader, "Content-Type": "application/json" },
         body: JSON.stringify(productPayload)
       },
-      22000
+      18000
     );
 
-    const created = await safeJson(createProdResp);
+    const product = await safeJson(createProdResp);
 
-    if (!createProdResp.ok || !created.id) {
+    if (!createProdResp.ok || !product.id) {
       return res.status(500).json({
         ok: false,
         error: "Product creation failed",
-        resp: created
+        resp: product
       });
     }
 
-    let product = created;
-
-    try {
-      await fetchWithTimeout(
-        `https://api.printify.com/v1/shops/${shopId}/products/${product.id}/publish.json`,
-        {
-          method: "POST",
-          headers: { ...authHeader, "Content-Type": "application/json" },
-          body: JSON.stringify({
-            title: true,
-            description: true,
-            images: true,
-            variants: true,
-            tags: true
-          })
-        },
-        8000
-      );
-    } catch (e) {
-      // Nezhadzuj celý request. Produkt už existuje.
-    }
-
-    const detail = await loadProductDetail(product.id);
-    if (detail.ok) product = detail.product;
-
-    const mockup = getMockup(product);
-
-    const orderPayload = {
-      external_id: externalId,
-      line_items: [
-        {
-          product_id: product.id,
-          variant_id: variantId,
-          quantity: 1
-        }
-      ],
-      address_to: normalizeShipping(shipping)
-    };
-
-    let order = null;
-    let tracking = pendingTracking(mockup ? "product_created" : "mockup_pending");
-
-    try {
-      const orderResp = await fetchWithTimeout(
-        `https://api.printify.com/v1/shops/${shopId}/orders.json`,
-        {
-          method: "POST",
-          headers: { ...authHeader, "Content-Type": "application/json" },
-          body: JSON.stringify(orderPayload)
-        },
-        10000
-      );
-
-      order = await safeJson(orderResp);
-
-      if (!orderResp.ok) {
-        const code = Number(order?.code || order?.errors?.code || 0);
-        const reason = String(order?.errors?.reason || order?.message || "");
-
-        const duplicateOrder =
-          code === 8503 ||
-          code === 8100 ||
-          reason.toLowerCase().includes("already exists");
-
-        if (duplicateOrder) {
-          const existingOrder = order?.order || order || null;
-          tracking = extractTracking(existingOrder);
-
-          return res.status(200).json({
-            ok: true,
-            exists: true,
-            duplicate: true,
-            mockup_pending: !mockup,
-            order: existingOrder,
-            tracking,
-            printify_order_id: tracking.printify_order_id,
-            printify_status: tracking.printify_status,
-            tracking_number: tracking.tracking_number,
-            tracking_url: tracking.tracking_url,
-            tracking_carrier: tracking.tracking_carrier,
-            tracking_status: tracking.tracking_status,
-            product,
-            preview: mockup,
-            preview_url: mockup,
-            resp: order
-          });
-        }
-
-        return res.status(200).json({
-          ok: true,
-          exists: false,
-          duplicate: false,
-          order_pending: true,
-          mockup_pending: !mockup,
-          product,
-          order: null,
-          tracking,
-          printify_order_id: null,
-          printify_status: tracking.printify_status,
-          tracking_number: null,
-          tracking_url: null,
-          tracking_carrier: null,
-          tracking_status: "pending",
-          preview: mockup,
-          preview_url: mockup,
-          warning: "Product was created, but order creation failed or timed out.",
-          resp: order
-        });
-      }
-
-      tracking = extractTracking(order);
-    } catch (e) {
-      return res.status(200).json({
-        ok: true,
-        exists: false,
-        duplicate: false,
-        order_pending: true,
-        mockup_pending: !mockup,
-        product,
-        order: null,
-        tracking,
-        printify_order_id: null,
-        printify_status: tracking.printify_status,
-        tracking_number: null,
-        tracking_url: null,
-        tracking_carrier: null,
-        tracking_status: "pending",
-        preview: mockup,
-        preview_url: mockup,
-        warning: "Product was created, but order creation timed out.",
-        error_soft: String(e.message || e)
-      });
-    }
+    const tracking = pendingTracking("product_created");
 
     return res.status(200).json({
       ok: true,
       exists: false,
       duplicate: false,
-      order_pending: false,
-      mockup_pending: !mockup,
+      order_pending: true,
+      mockup_pending: true,
       product,
-      order,
+      order: null,
       tracking,
-      printify_order_id: tracking.printify_order_id,
-      printify_status: tracking.printify_status,
-      tracking_number: tracking.tracking_number,
-      tracking_url: tracking.tracking_url,
-      tracking_carrier: tracking.tracking_carrier,
-      tracking_status: tracking.tracking_status,
-      preview: mockup,
-      preview_url: mockup
+      printify_order_id: null,
+      printify_status: "product_created",
+      tracking_number: null,
+      tracking_url: null,
+      tracking_carrier: null,
+      tracking_status: "pending",
+      preview: null,
+      preview_url: null,
+      warning: "Product was created. Mockup/order can be loaded later."
     });
 
   } catch (e) {
