@@ -6,7 +6,13 @@ import Web3 from "web3";
 
 export const maxDuration = 60;
 
+/* ============================================
+   ABI
+============================================ */
+
 const ABI = [
+
+  // mintCopy
   {
     inputs: [
       {
@@ -20,6 +26,8 @@ const ABI = [
     stateMutability: "payable",
     type: "function"
   },
+
+  // mintFee
   {
     inputs: [],
     name: "mintFee",
@@ -33,6 +41,8 @@ const ABI = [
     stateMutability: "view",
     type: "function"
   },
+
+  // tokenURI
   {
     inputs: [
       {
@@ -51,56 +61,123 @@ const ABI = [
     ],
     stateMutability: "view",
     type: "function"
+  },
+
+  // backendWithdraw
+  {
+    inputs: [
+      {
+        internalType: "address",
+        name: "to",
+        type: "address"
+      },
+      {
+        internalType: "uint256",
+        name: "amount",
+        type: "uint256"
+      }
+    ],
+    name: "backendWithdraw",
+    outputs: [],
+    stateMutability: "nonpayable",
+    type: "function"
   }
 ];
 
-function setCors(res) {
-  res.setHeader("Access-Control-Allow-Origin", "*");
-  res.setHeader("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
+/* ============================================
+   HELPERS
+============================================ */
+
+function setCors(res){
+
+  res.setHeader(
+    "Access-Control-Allow-Origin",
+    "*"
+  );
+
+  res.setHeader(
+    "Access-Control-Allow-Methods",
+    "GET,POST,OPTIONS"
+  );
+
+  res.setHeader(
+    "Access-Control-Allow-Headers",
+    "Content-Type, Authorization"
+  );
 }
 
-function cleanPrivateKey(pk) {
-  if (!pk) return "";
-  pk = String(pk).trim();
-  return pk.startsWith("0x") ? pk : "0x" + pk;
+function cleanPrivateKey(pk){
+
+  if (!pk) {
+    return "";
+  }
+
+  pk =
+    String(pk).trim();
+
+  return pk.startsWith("0x")
+    ? pk
+    : "0x" + pk;
 }
 
-function ipfsToHttp(url) {
-  if (!url) return "";
+function ipfsToHttp(url){
 
-  url = String(url).trim();
+  if (!url) {
+    return "";
+  }
+
+  url =
+    String(url).trim();
 
   if (url.startsWith("ipfs://ipfs/")) {
-    return "https://gateway.pinata.cloud/ipfs/" + url.replace("ipfs://ipfs/", "");
+
+    return (
+      "https://gateway.pinata.cloud/ipfs/" +
+      url.replace("ipfs://ipfs/", "")
+    );
   }
 
   if (url.startsWith("ipfs://")) {
-    return "https://gateway.pinata.cloud/ipfs/" + url.replace("ipfs://", "");
+
+    return (
+      "https://gateway.pinata.cloud/ipfs/" +
+      url.replace("ipfs://", "")
+    );
   }
 
   return url;
 }
 
-async function fetchJson(url) {
-  const r = await fetch(url, {
-    headers: {
-      Accept: "application/json"
-    }
-  });
+async function fetchJson(url){
 
-  const text = await r.text();
+  const r =
+    await fetch(url, {
+      headers: {
+        Accept: "application/json"
+      }
+    });
+
+  const text =
+    await r.text();
 
   try {
+
     return JSON.parse(text);
+
   } catch {
+
     return {
       raw: text
     };
   }
 }
 
-export default async function handler(req, res) {
+/* ============================================
+   HANDLER
+============================================ */
+
+export default async function handler(req, res){
+
   setCors(res);
 
   console.log("=== COPYMINT API START ===");
@@ -112,6 +189,7 @@ export default async function handler(req, res) {
   }
 
   if (req.method === "GET") {
+
     return res.status(200).json({
       ok: true,
       endpoint: "copymint",
@@ -120,7 +198,9 @@ export default async function handler(req, res) {
   }
 
   try {
+
     if (req.method !== "POST") {
+
       return res.status(405).json({
         ok: false,
         error: "Method not allowed"
@@ -137,17 +217,30 @@ export default async function handler(req, res) {
     } = req.body || {};
 
     if (!action) {
+
       return res.status(400).json({
         ok: false,
         error: "Missing action"
       });
     }
 
-    const rpc = process.env.PROVIDER_URL;
-    const pk = cleanPrivateKey(process.env.PRIVATE_KEY);
-    const contractAddress = process.env.CONTRACT_ADDRESS;
+    /* ============================================
+       ENV
+    ============================================ */
+
+    const rpc =
+      process.env.PROVIDER_URL;
+
+    const pk =
+      cleanPrivateKey(
+        process.env.PRIVATE_KEY
+      );
+
+    const contractAddress =
+      process.env.CONTRACT_ADDRESS;
 
     if (!rpc) {
+
       return res.status(500).json({
         ok: false,
         error: "Missing PROVIDER_URL"
@@ -155,68 +248,103 @@ export default async function handler(req, res) {
     }
 
     if (!contractAddress) {
+
       return res.status(500).json({
         ok: false,
         error: "Missing CONTRACT_ADDRESS"
       });
     }
 
-    const web3 = new Web3(rpc);
+    if (!pk) {
 
-    const contract = new web3.eth.Contract(
-      ABI,
-      contractAddress
+      return res.status(500).json({
+        ok: false,
+        error: "Missing PRIVATE_KEY"
+      });
+    }
+
+    const web3 =
+      new Web3(rpc);
+
+    const contract =
+      new web3.eth.Contract(
+        ABI,
+        contractAddress
+      );
+
+    const account =
+      web3.eth.accounts.privateKeyToAccount(pk);
+
+    web3.eth.accounts.wallet.add(account);
+
+    console.log(
+      "BACKEND ADDRESS =",
+      account.address
     );
 
-    // ============================================
-    // ACTION: scan_preview
-    // ============================================
+    /* ============================================
+       ACTION: scan_preview
+    ============================================ */
 
     if (action === "scan_preview") {
-      const id = token_id || original_id;
+
+      const id =
+        token_id || original_id;
 
       if (!id) {
+
         return res.status(400).json({
           ok: false,
           error: "Missing token_id"
         });
       }
 
-      console.log("SCAN PREVIEW TOKEN =", id);
+      console.log(
+        "SCAN PREVIEW TOKEN =",
+        id
+      );
 
       let tokenUri = "";
 
       try {
-        tokenUri = await contract.methods
-          .tokenURI(id)
-          .call();
 
-        console.log("TOKEN URI =", tokenUri);
+        tokenUri =
+          await contract.methods
+            .tokenURI(id)
+            .call();
+
       } catch (e) {
-        console.error("TOKEN URI ERROR =", e);
+
+        console.error(
+          "TOKEN URI ERROR =",
+          e
+        );
 
         return res.status(500).json({
           ok: false,
-          error: "tokenURI failed: " + e.message,
-          token_id: String(id)
+          error:
+            "tokenURI failed: " +
+            e.message
         });
       }
 
-      const metadataUrl = ipfsToHttp(tokenUri);
+      const metadataUrl =
+        ipfsToHttp(tokenUri);
 
       let metadata = null;
 
       try {
-        metadata = await fetchJson(metadataUrl);
+
+        metadata =
+          await fetchJson(metadataUrl);
+
       } catch (e) {
-        console.error("METADATA FETCH ERROR =", e);
 
         return res.status(500).json({
           ok: false,
-          error: "metadata fetch failed: " + e.message,
-          token_id: String(id),
-          token_uri: tokenUri,
-          metadata_url: metadataUrl
+          error:
+            "metadata fetch failed: " +
+            e.message
         });
       }
 
@@ -227,7 +355,8 @@ export default async function handler(req, res) {
         metadata?.properties?.image ||
         "";
 
-      image = ipfsToHttp(image);
+      image =
+        ipfsToHttp(image);
 
       return res.status(200).json({
         ok: true,
@@ -240,28 +369,43 @@ export default async function handler(req, res) {
       });
     }
 
+    /* ============================================
+       MINT FEE
+    ============================================ */
+
     let mintFeeWei = "0";
 
     try {
-      mintFeeWei = await contract.methods
-        .mintFee()
-        .call();
-    } catch (e) {
-      mintFeeWei = web3.utils.toWei(
-        "0.0002",
-        "ether"
-      );
+
+      mintFeeWei =
+        await contract.methods
+          .mintFee()
+          .call();
+
+    } catch {
+
+      mintFeeWei =
+        web3.utils.toWei(
+          "0.0002",
+          "ether"
+        );
     }
 
-    // ============================================
-    // ACTION: wallet_prepare
-    // ============================================
+    /* ============================================
+       ACTION: wallet_prepare
+    ============================================ */
 
     if (action === "wallet_prepare") {
-      if (!original_id || !user_address) {
+
+      if (
+        !original_id ||
+        !user_address
+      ) {
+
         return res.status(400).json({
           ok: false,
-          error: "Missing original_id or user_address"
+          error:
+            "Missing original_id or user_address"
         });
       }
 
@@ -275,76 +419,105 @@ export default async function handler(req, res) {
       });
     }
 
-    if (!pk) {
-      return res.status(500).json({
-        ok: false,
-        error: "Missing PRIVATE_KEY"
-      });
-    }
-
-    const account = web3.eth.accounts.privateKeyToAccount(pk);
-
-    // ============================================
-    // ACTION: mint_from_balance
-    // ============================================
+    /* ============================================
+       ACTION: mint_from_balance
+    ============================================ */
 
     if (action === "mint_from_balance") {
-      if (!original_id || !user_address) {
+
+      if (
+        !original_id ||
+        !user_address
+      ) {
+
         return res.status(400).json({
           ok: false,
-          error: "Missing original_id or user_address"
+          error:
+            "Missing original_id or user_address"
         });
       }
 
-      const txCall = contract.methods.mintCopy(original_id);
+      console.log(
+        "MINT COPY START"
+      );
 
-      const balanceWei = await web3.eth.getBalance(account.address);
-      const gasPrice = await web3.eth.getGasPrice();
+      const txCall =
+        contract.methods
+          .mintCopy(original_id);
 
-      const estimatedGasCostWei = BigInt(gasPrice) * 300000n;
-      const totalNeededWei = BigInt(mintFeeWei) + estimatedGasCostWei;
+      const balanceWei =
+        await web3.eth.getBalance(
+          account.address
+        );
 
-      if (BigInt(balanceWei) < totalNeededWei) {
+      const gasPrice =
+        await web3.eth.getGasPrice();
+
+      const estimatedGasCostWei =
+        BigInt(gasPrice) * 300000n;
+
+      const totalNeededWei =
+        BigInt(mintFeeWei) +
+        estimatedGasCostWei;
+
+      if (
+        BigInt(balanceWei)
+        <
+        totalNeededWei
+      ) {
+
         return res.status(400).json({
           ok: false,
-          error: "Backend wallet nemá dosť ETH na CopyMint.",
-          backend_address: account.address,
-          backend_balance_wei: balanceWei,
-          mint_fee_wei: mintFeeWei,
-          estimated_gas_cost_wei: estimatedGasCostWei.toString(),
-          total_needed_wei: totalNeededWei.toString(),
-          hint: "Dobij backend wallet na Base alebo zníž mintFee v kontrakte."
+          error:
+            "Backend wallet nemá dosť ETH.",
+          backend_balance_wei:
+            balanceWei,
+          total_needed_wei:
+            totalNeededWei.toString()
         });
       }
 
-      const gas = await txCall.estimateGas({
-        from: account.address,
-        value: mintFeeWei
-      });
+      const gas =
+        await txCall
+          .estimateGas({
+            from: account.address,
+            value: mintFeeWei
+          });
 
-      const gasLimit = Math.ceil(Number(gas) * 1.25);
+      const gasLimit =
+        Math.ceil(
+          Number(gas) * 1.25
+        );
 
-      const nonce = await web3.eth.getTransactionCount(
-        account.address,
-        "pending"
-      );
+      const nonce =
+        await web3.eth.getTransactionCount(
+          account.address,
+          "pending"
+        );
 
-      const signed = await web3.eth.accounts.signTransaction(
-        {
-          from: account.address,
-          to: contractAddress,
-          data: txCall.encodeABI(),
-          value: mintFeeWei,
-          gas: gasLimit,
-          gasPrice: gasPrice,
-          nonce: nonce,
-          chainId: 8453
-        },
-        pk
-      );
+      const signed =
+        await web3.eth.accounts.signTransaction(
+          {
+            from: account.address,
+            to: contractAddress,
+            data: txCall.encodeABI(),
+            value: mintFeeWei,
+            gas: gasLimit,
+            gasPrice,
+            nonce,
+            chainId: 8453
+          },
+          pk
+        );
 
-      const tx = await web3.eth.sendSignedTransaction(
-        signed.rawTransaction
+      const tx =
+        await web3.eth.sendSignedTransaction(
+          signed.rawTransaction
+        );
+
+      console.log(
+        "MINT OK TX =",
+        tx.transactionHash
       );
 
       return res.json({
@@ -353,86 +526,121 @@ export default async function handler(req, res) {
         tx: tx.transactionHash,
         original_id,
         user_address,
-        contract_address: contractAddress,
-        mint_fee_wei: mintFeeWei,
-        backend_address: account.address
+        backend_address:
+          account.address,
+        mint_fee_wei:
+          mintFeeWei
       });
     }
 
-    // ============================================
-    // ACTION: copy_withdraw
-    // ============================================
+    /* ============================================
+       ACTION: copy_withdraw
+       VÝBER PRIAMO Z KONTRAKTU
+    ============================================ */
 
     if (action === "copy_withdraw") {
-      if (!user_address || !withdraw_to || !amount_eth) {
+
+      if (
+        !user_address ||
+        !withdraw_to ||
+        !amount_eth
+      ) {
+
         return res.status(400).json({
           ok: false,
-          error: "Missing user_address, withdraw_to or amount_eth"
+          error:
+            "Missing user_address, withdraw_to or amount_eth"
         });
       }
 
-      if (!web3.utils.isAddress(withdraw_to)) {
+      if (
+        !web3.utils.isAddress(
+          withdraw_to
+        )
+      ) {
+
         return res.status(400).json({
           ok: false,
-          error: "Invalid withdraw_to address"
+          error:
+            "Invalid withdraw_to"
         });
       }
 
-      const amountEth = String(amount_eth)
-        .replace(",", ".")
-        .trim();
+      const amountEth =
+        String(amount_eth)
+          .replace(",", ".")
+          .trim();
 
-      const amountWei = web3.utils.toWei(
-        amountEth,
-        "ether"
-      );
+      const amountWei =
+        web3.utils.toWei(
+          amountEth,
+          "ether"
+        );
 
-      if (BigInt(amountWei) <= 0n) {
+      if (
+        BigInt(amountWei) <= 0n
+      ) {
+
         return res.status(400).json({
           ok: false,
-          error: "Invalid withdraw amount"
+          error:
+            "Invalid withdraw amount"
         });
       }
 
-      const balanceWei = await web3.eth.getBalance(
-        account.address
+      console.log(
+        "BACKEND WITHDRAW START"
       );
 
-      const gasPrice = await web3.eth.getGasPrice();
-      const gasCostWei = BigInt(gasPrice) * 21000n;
-      const totalNeededWei = BigInt(amountWei) + gasCostWei;
+      const txCall =
+        contract.methods
+          .backendWithdraw(
+            withdraw_to,
+            amountWei
+          );
 
-      if (BigInt(balanceWei) < totalNeededWei) {
-        return res.status(400).json({
-          ok: false,
-          error: "Backend wallet has insufficient balance",
-          backend_balance_wei: balanceWei,
-          amount_wei: amountWei,
-          gas_cost_wei: gasCostWei.toString(),
-          total_needed_wei: totalNeededWei.toString()
-        });
-      }
+      const gas =
+        await txCall
+          .estimateGas({
+            from: account.address
+          });
 
-      const nonce = await web3.eth.getTransactionCount(
-        account.address,
-        "pending"
-      );
+      const gasPrice =
+        await web3.eth.getGasPrice();
 
-      const signed = await web3.eth.accounts.signTransaction(
-        {
-          from: account.address,
-          to: withdraw_to,
-          value: amountWei,
-          gas: 21000,
-          gasPrice: gasPrice,
-          nonce: nonce,
-          chainId: 8453
-        },
-        pk
-      );
+      const gasLimit =
+        Math.ceil(
+          Number(gas) * 1.25
+        );
 
-      const tx = await web3.eth.sendSignedTransaction(
-        signed.rawTransaction
+      const nonce =
+        await web3.eth.getTransactionCount(
+          account.address,
+          "pending"
+        );
+
+      const signed =
+        await web3.eth.accounts.signTransaction(
+          {
+            from: account.address,
+            to: contractAddress,
+            data: txCall.encodeABI(),
+            gas: gasLimit,
+            gasPrice,
+            nonce,
+            chainId: 8453
+          },
+          pk
+        );
+
+      const tx =
+        await web3.eth.sendSignedTransaction(
+          signed.rawTransaction
+        );
+
+      console.log(
+        "WITHDRAW OK TX =",
+        tx.transactionHash
       );
 
       return res.json({
@@ -446,13 +654,21 @@ export default async function handler(req, res) {
       });
     }
 
+    /* ============================================
+       INVALID ACTION
+    ============================================ */
+
     return res.status(400).json({
       ok: false,
       error: "Invalid action"
     });
 
   } catch (e) {
-    console.error("COPYMINT API ERROR =", e);
+
+    console.error(
+      "COPYMINT API ERROR =",
+      e
+    );
 
     return res.status(500).json({
       ok: false,
