@@ -54,6 +54,12 @@ const ABI = [
   }
 ];
 
+function setCors(res) {
+  res.setHeader("Access-Control-Allow-Origin", "*");
+  res.setHeader("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
+}
+
 function cleanPrivateKey(pk) {
   if (!pk) return "";
   pk = String(pk).trim();
@@ -95,6 +101,24 @@ async function fetchJson(url) {
 }
 
 export default async function handler(req, res) {
+  setCors(res);
+
+  console.log("=== COPYMINT API START ===");
+  console.log("METHOD =", req.method);
+  console.log("BODY =", req.body);
+
+  if (req.method === "OPTIONS") {
+    return res.status(200).end();
+  }
+
+  if (req.method === "GET") {
+    return res.status(200).json({
+      ok: true,
+      endpoint: "copymint",
+      status: "alive"
+    });
+  }
+
   try {
     if (req.method !== "POST") {
       return res.status(405).json({
@@ -158,13 +182,19 @@ export default async function handler(req, res) {
         });
       }
 
+      console.log("SCAN PREVIEW TOKEN =", id);
+
       let tokenUri = "";
 
       try {
         tokenUri = await contract.methods
           .tokenURI(id)
           .call();
+
+        console.log("TOKEN URI =", tokenUri);
       } catch (e) {
+        console.error("TOKEN URI ERROR =", e);
+
         return res.status(500).json({
           ok: false,
           error: "tokenURI failed: " + e.message,
@@ -173,7 +203,22 @@ export default async function handler(req, res) {
       }
 
       const metadataUrl = ipfsToHttp(tokenUri);
-      const metadata = await fetchJson(metadataUrl);
+
+      let metadata = null;
+
+      try {
+        metadata = await fetchJson(metadataUrl);
+      } catch (e) {
+        console.error("METADATA FETCH ERROR =", e);
+
+        return res.status(500).json({
+          ok: false,
+          error: "metadata fetch failed: " + e.message,
+          token_id: String(id),
+          token_uri: tokenUri,
+          metadata_url: metadataUrl
+        });
+      }
 
       let image =
         metadata?.image ||
@@ -184,11 +229,10 @@ export default async function handler(req, res) {
 
       image = ipfsToHttp(image);
 
-      return res.json({
+      return res.status(200).json({
         ok: true,
         action: "scan_preview",
         token_id: String(id),
-        contract: contractAddress,
         token_uri: tokenUri,
         metadata_url: metadataUrl,
         image,
@@ -389,6 +433,8 @@ export default async function handler(req, res) {
     });
 
   } catch (e) {
+    console.error("COPYMINT API ERROR =", e);
+
     return res.status(500).json({
       ok: false,
       error: e.message,
