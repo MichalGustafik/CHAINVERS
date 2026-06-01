@@ -120,6 +120,13 @@ function cleanPrivateKey(pk){
     : "0x" + pk;
 }
 
+function cleanAddress(addr){
+
+  return String(addr || "")
+    .trim()
+    .toLowerCase();
+}
+
 function ipfsToHttp(url){
 
   if (!url) {
@@ -169,6 +176,108 @@ async function fetchJson(url){
     return {
       raw: text
     };
+  }
+}
+
+async function fetchText(url){
+
+  const r =
+    await fetch(url);
+
+  return await r.text();
+}
+
+async function userAlreadyHasCopy(
+  userAddress,
+  originalId
+){
+
+  const cleanUser =
+    cleanAddress(userAddress);
+
+  const url =
+    "https://chainvers.free.nf/chainuserdata/" +
+    cleanUser +
+    "/copymint.json?_=" +
+    Date.now();
+
+  console.log(
+    "CHECK COPY URL =",
+    url
+  );
+
+  try {
+
+    const text =
+      await fetchText(url);
+
+    let json = [];
+
+    try {
+
+      json =
+        JSON.parse(text);
+
+    } catch {
+
+      console.log(
+        "COPY JSON PARSE FAILED"
+      );
+
+      return false;
+    }
+
+    if (!Array.isArray(json)) {
+      return false;
+    }
+
+    for (const copy of json){
+
+      const copyUser =
+        cleanAddress(
+          copy?.user_address || ""
+        );
+
+      const copyOriginal =
+        String(
+          copy?.original_id || ""
+        );
+
+      const status =
+        String(
+          copy?.status || ""
+        ).toLowerCase();
+
+      if (
+        copyUser === cleanUser
+        &&
+        copyOriginal === String(originalId)
+        &&
+        !status.includes("failed")
+        &&
+        !status.includes("rollback")
+        &&
+        !status.includes("cancel")
+      ){
+
+        console.log(
+          "COPY ALREADY EXISTS"
+        );
+
+        return true;
+      }
+    }
+
+    return false;
+
+  } catch (e){
+
+    console.error(
+      "COPY CHECK ERROR =",
+      e
+    );
+
+    return false;
   }
 }
 
@@ -409,6 +518,22 @@ export default async function handler(req, res){
         });
       }
 
+      const alreadyHasCopy =
+        await userAlreadyHasCopy(
+          user_address,
+          original_id
+        );
+
+      if (alreadyHasCopy){
+
+        return res.status(409).json({
+          ok: false,
+          error: "already_has_copy",
+          message:
+            "Tento používateľ už má CopyMint z tohto origin NFT."
+        });
+      }
+
       return res.json({
         ok: true,
         action: "wallet_prepare",
@@ -434,6 +559,22 @@ export default async function handler(req, res){
           ok: false,
           error:
             "Missing original_id or user_address"
+        });
+      }
+
+      const alreadyHasCopy =
+        await userAlreadyHasCopy(
+          user_address,
+          original_id
+        );
+
+      if (alreadyHasCopy){
+
+        return res.status(409).json({
+          ok: false,
+          error: "already_has_copy",
+          message:
+            "Tento používateľ už má CopyMint z tohto origin NFT."
         });
       }
 
