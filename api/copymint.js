@@ -32,6 +32,25 @@ const ABI = [
     ],
     stateMutability: "view",
     type: "function"
+  },
+  {
+    inputs: [
+      {
+        internalType: "uint256",
+        name: "tokenId",
+        type: "uint256"
+      }
+    ],
+    name: "tokenURI",
+    outputs: [
+      {
+        internalType: "string",
+        name: "",
+        type: "string"
+      }
+    ],
+    stateMutability: "view",
+    type: "function"
   }
 ];
 
@@ -39,6 +58,34 @@ function cleanPrivateKey(pk) {
   if (!pk) return "";
   pk = String(pk).trim();
   return pk.startsWith("0x") ? pk : "0x" + pk;
+}
+
+function ipfsToHttp(url) {
+  if (!url) return "";
+
+  url = String(url).trim();
+
+  if (url.startsWith("ipfs://")) {
+    return "https://ipfs.io/ipfs/" + url.replace("ipfs://", "");
+  }
+
+  return url;
+}
+
+async function fetchJson(url) {
+  const r = await fetch(url, {
+    headers: {
+      "Accept": "application/json"
+    }
+  });
+
+  const text = await r.text();
+
+  try {
+    return JSON.parse(text);
+  } catch {
+    return null;
+  }
 }
 
 export default async function handler(req, res) {
@@ -57,7 +104,8 @@ export default async function handler(req, res) {
       original_id,
       user_address,
       withdraw_to,
-      amount_eth
+      amount_eth,
+      token_id
     } = req.body || {};
 
     if (!action) {
@@ -83,13 +131,6 @@ export default async function handler(req, res) {
       });
     }
 
-    if (!pk) {
-      return res.status(500).json({
-        ok: false,
-        error: "Missing PRIVATE_KEY"
-      });
-    }
-
     if (!contractAddress) {
       return res.status(500).json({
         ok: false,
@@ -105,6 +146,56 @@ export default async function handler(req, res) {
         ABI,
         contractAddress
       );
+
+    /*
+    ===========================================
+    SCAN PREVIEW
+    ===========================================
+    */
+
+    if (action === "scan_preview") {
+
+      const id =
+        token_id ||
+        original_id;
+
+      if (!id) {
+        return res.status(400).json({
+          ok: false,
+          error: "Missing token_id"
+        });
+      }
+
+      const tokenUri =
+        await contract.methods
+          .tokenURI(id)
+          .call();
+
+      const metadataUrl =
+        ipfsToHttp(tokenUri);
+
+      const metadata =
+        await fetchJson(metadataUrl);
+
+      const image =
+        ipfsToHttp(
+          metadata?.image ||
+          metadata?.image_url ||
+          metadata?.animation_url ||
+          ""
+        );
+
+      return res.json({
+        ok: true,
+        action: "scan_preview",
+        token_id: String(id),
+        contract: contractAddress,
+        token_uri: tokenUri,
+        metadata_url: metadataUrl,
+        metadata,
+        image
+      });
+    }
 
     let mintFeeWei =
       "0";
@@ -141,6 +232,13 @@ export default async function handler(req, res) {
         original_id,
         user_address,
         mint_fee_wei: mintFeeWei
+      });
+    }
+
+    if (!pk) {
+      return res.status(500).json({
+        ok: false,
+        error: "Missing PRIVATE_KEY"
       });
     }
 
