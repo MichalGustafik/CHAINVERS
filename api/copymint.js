@@ -298,13 +298,31 @@ export default async function handler(req, res) {
 
       const txCall = contract.methods.mintCopy(original_id);
 
+      const balanceWei = await web3.eth.getBalance(account.address);
+      const gasPrice = await web3.eth.getGasPrice();
+
+      const estimatedGasCostWei = BigInt(gasPrice) * 300000n;
+      const totalNeededWei = BigInt(mintFeeWei) + estimatedGasCostWei;
+
+      if (BigInt(balanceWei) < totalNeededWei) {
+        return res.status(400).json({
+          ok: false,
+          error: "Backend wallet nemá dosť ETH na CopyMint.",
+          backend_address: account.address,
+          backend_balance_wei: balanceWei,
+          mint_fee_wei: mintFeeWei,
+          estimated_gas_cost_wei: estimatedGasCostWei.toString(),
+          total_needed_wei: totalNeededWei.toString(),
+          hint: "Dobij backend wallet na Base alebo zníž mintFee v kontrakte."
+        });
+      }
+
       const gas = await txCall.estimateGas({
         from: account.address,
         value: mintFeeWei
       });
 
       const gasLimit = Math.ceil(Number(gas) * 1.25);
-      const gasPrice = await web3.eth.getGasPrice();
 
       const nonce = await web3.eth.getTransactionCount(
         account.address,
@@ -336,7 +354,8 @@ export default async function handler(req, res) {
         original_id,
         user_address,
         contract_address: contractAddress,
-        mint_fee_wei: mintFeeWei
+        mint_fee_wei: mintFeeWei,
+        backend_address: account.address
       });
     }
 
