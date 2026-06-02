@@ -2,9 +2,10 @@
 // FILE: /api/create-wallet.js
 // ============================================
 
-import { CdpClient } from "@coinbase/cdp-sdk";
+import { Coinbase, Wallet } from "@coinbase/coinbase-sdk";
 
 export default async function handler(req, res) {
+
   if (req.method !== "POST") {
     return res.status(405).json({
       ok: false,
@@ -13,26 +14,30 @@ export default async function handler(req, res) {
   }
 
   try {
-    const cdp = new CdpClient({
-      apiKeyId: process.env.COINBASE_API_KEY,
-      apiKeySecret: process.env.COINBASE_API_SECRET,
-      walletSecret: process.env.CDP_WALLET_SECRET
+
+    Coinbase.configure({
+      apiKeyName: process.env.COINBASE_API_KEY,
+      privateKey: process.env.COINBASE_API_SECRET,
     });
 
-    const account = await cdp.evm.createServerAccount({
-      network: "base-mainnet"
+    const wallet = await Wallet.create({
+      networkId: "base-mainnet"
     });
+
+    const address = await wallet.createAddress();
 
     return res.status(200).json({
       ok: true,
-      address: account.address,
-      network: "base-mainnet"
+      address: address.getId()
     });
 
-  } catch (err) {
+  } catch (e) {
+
     return res.status(500).json({
       ok: false,
-      error: err?.message || String(err)
+      error: String(e)
     });
+
   }
+
 }
