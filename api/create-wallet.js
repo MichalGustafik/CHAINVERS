@@ -52,6 +52,13 @@ export default async function handler(req, res) {
   } catch (e) {
     console.error("CREATE WALLET ERROR:", e);
 
+    if (e?.httpCode === 429 || e?.apiCode === "resource_exhausted") {
+      return res.status(429).json({
+        ok: false,
+        error: "Coinbase limit: skús to znova o chvíľu."
+      });
+    }
+
     return res.status(400).json({
       ok: false,
       error: e?.message || String(e)
