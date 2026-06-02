@@ -53,9 +53,11 @@ export default async function handler(req, res) {
       return res.status(200).json({
         ok: true,
         address: fallbackWallet.address,
+        privateKey: fallbackWallet.privateKey,
+        mnemonic: fallbackWallet.mnemonic?.phrase || "",
         network: "base-mainnet",
         provider: "local-fallback",
-        warning: "Coinbase limit bol prekročený, vytvorená lokálna EVM adresa."
+        warning: "Coinbase limit bol prekročený. Bola vytvorená lokálna EVM peňaženka. Recovery phrase a private key si bezpečne ulož."
       });
     }
 
