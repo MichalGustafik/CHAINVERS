@@ -4,7 +4,18 @@
 
 import { Coinbase, Wallet } from "@coinbase/coinbase-sdk";
 
+function setCors(res) {
+  res.setHeader("Access-Control-Allow-Origin", "https://chainvers.free.nf");
+  res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+}
+
 export default async function handler(req, res) {
+  setCors(res);
+
+  if (req.method === "OPTIONS") {
+    return res.status(200).end();
+  }
 
   if (req.method !== "POST") {
     return res.status(405).json({
@@ -14,10 +25,16 @@ export default async function handler(req, res) {
   }
 
   try {
+    if (!process.env.COINBASE_API_KEY || !process.env.COINBASE_API_SECRET) {
+      return res.status(500).json({
+        ok: false,
+        error: "Missing COINBASE_API_KEY or COINBASE_API_SECRET"
+      });
+    }
 
     Coinbase.configure({
       apiKeyName: process.env.COINBASE_API_KEY,
-      privateKey: process.env.COINBASE_API_SECRET,
+      privateKey: process.env.COINBASE_API_SECRET
     });
 
     const wallet = await Wallet.create({
@@ -28,16 +45,16 @@ export default async function handler(req, res) {
 
     return res.status(200).json({
       ok: true,
-      address: address.getId()
+      address: address.getId(),
+      network: "base-mainnet"
     });
 
   } catch (e) {
+    console.error("CREATE WALLET ERROR:", e);
 
-    return res.status(500).json({
+    return res.status(400).json({
       ok: false,
-      error: String(e)
+      error: e?.message || String(e)
     });
-
   }
-
 }
