@@ -247,17 +247,29 @@ export default async function handler(req, res) {
       mintJson.tokenId ??
       mintJson.token_id ??
       mintJson.id ??
-      crop_id;
+      null;
+
+    if (!tokenId) {
+      return res.status(500).json({
+        ok: false,
+        success: false,
+        error: "Mint prebehol, ale chýba tokenId",
+        detail: mintJson
+      });
+    }
 
     const tokenIdStr = String(tokenId);
 
     const openseaUrl = `https://opensea.io/assets/base/${CONTRACT}/${tokenIdStr}`;
-    const copyMintUrl = `https://chainvers.free.nf/copymint.php?original=${encodeURIComponent(tokenIdStr)}&contract=${encodeURIComponent(CONTRACT)}`;
+
+    const copyMintUrl =
+      `https://chainvers.free.nf/copymint.php?original=${encodeURIComponent(tokenIdStr)}&contract=${encodeURIComponent(CONTRACT)}`;
 
     log("SUCCESS_FAST_RESPONSE", {
       txHash,
       tokenId: tokenIdStr,
-      contractAddress: CONTRACT
+      contractAddress: CONTRACT,
+      copyMintUrl
     });
 
     return res.status(200).json({
