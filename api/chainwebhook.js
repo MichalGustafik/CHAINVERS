@@ -260,15 +260,17 @@ export default async function handler(req, res) {
 
     const tokenIdStr = String(tokenId);
 
-    const openseaUrl = `https://opensea.io/assets/base/${CONTRACT}/${tokenIdStr}`;
+    const openseaUrl =
+      `https://opensea.io/assets/base/${CONTRACT}/${tokenIdStr}`;
 
     const copyMintUrl =
-      `https://chainvers.free.nf/copymint.php?original=${encodeURIComponent(tokenIdStr)}&contract=${encodeURIComponent(CONTRACT)}`;
+      `https://chainvers.free.nf/copymint.php?original_id=${encodeURIComponent(tokenIdStr)}&contract=${encodeURIComponent(CONTRACT)}`;
 
     log("SUCCESS_FAST_RESPONSE", {
       txHash,
       tokenId: tokenIdStr,
       contractAddress: CONTRACT,
+      openseaUrl,
       copyMintUrl
     });
 
