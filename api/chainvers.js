@@ -36,22 +36,60 @@ export default async function handler(req, res) {
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "POST, GET, OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type, Stripe-Signature");
-  if (req.method === "OPTIONS") return res.status(200).end();
+
+  if (req.method === "OPTIONS") {
+    return res.status(200).end();
+  }
 
   const action = String(req.query?.action || "").toLowerCase();
-  console.log("[CHAINVERS] Incoming", { method: req.method, action });
+
+  console.log("[CHAINVERS] Incoming", {
+    method: req.method,
+    action,
+  });
 
   try {
-    if (action === "create_payment_proxy") return createPaymentProxy(req, res);
-    if (action === "stripe_session_status") return stripeSessionStatus(req, res);
-    if (action === "stripe_webhook") return stripeWebhook(req, res);
-    if (action === "coinbase_auto_buy") return coinbaseAutoBuy(req, res);
-    if (action === "ping") return res.status(200).json({ ok: true, now: new Date().toISOString() });
-    if (action === "env") return debugEnv(req, res);
-    return res.status(404).json({ error: "Unknown ?action=" });
+    if (action === "create_payment_proxy") {
+      return createPaymentProxy(req, res);
+    }
+
+    if (action === "stripe_session_status") {
+      return stripeSessionStatus(req, res);
+    }
+
+    if (action === "stripe_refund") {
+      return stripeRefund(req, res);
+    }
+
+    if (action === "stripe_webhook") {
+      return stripeWebhook(req, res);
+    }
+
+    if (action === "coinbase_auto_buy") {
+      return coinbaseAutoBuy(req, res);
+    }
+
+    if (action === "ping") {
+      return res.status(200).json({
+        ok: true,
+        now: new Date().toISOString(),
+      });
+    }
+
+    if (action === "env") {
+      return debugEnv(req, res);
+    }
+
+    return res.status(404).json({
+      error: "Unknown ?action=",
+    });
+
   } catch (e) {
     console.error("[CHAINVERS] ERROR", e);
-    return res.status(500).json({ error: e?.message || String(e) });
+
+    return res.status(500).json({
+      error: e?.message || String(e),
+    });
   }
 }
 
@@ -60,15 +98,19 @@ export default async function handler(req, res) {
 // ======================================================
 async function debugEnv(req, res) {
   const E = readEnv();
+
   const out = {
     STRIPE_SECRET_KEY: mask(E.STRIPE_SECRET_KEY),
     STRIPE_WEBHOOK_SECRET: mask(E.STRIPE_WEBHOOK_SECRET),
     INF_FREE_URL: E.INF_FREE_URL,
+
     COINBASE_API_KEY: mask(E.COINBASE_API_KEY),
     COINBASE_API_SECRET: E.COINBASE_API_SECRET ? "🔒 present" : null,
     COINBASE_BASE_URL: E.COINBASE_BASE_URL,
+
     CONTRACT_ADDRESS: mask(E.CONTRACT_ADDRESS),
   };
+
   return res.status(200).json(out);
 }
 
@@ -77,38 +119,84 @@ async function debugEnv(req, res) {
 // ======================================================
 async function createPaymentProxy(req, res) {
   const E = readEnv();
-  if (!E.STRIPE_SECRET_KEY) return res.status(500).json({ error: "Missing STRIPE_SECRET_KEY" });
+
+  if (!E.STRIPE_SECRET_KEY) {
+    return res.status(500).json({
+      error: "Missing STRIPE_SECRET_KEY",
+    });
+  }
 
   try {
     const body = await readJson(req);
-    const { amount, currency, description, crop_data, user_address } = body || {};
-    if (!amount || !currency) return res.status(400).json({ error: "Missing amount or currency" });
 
-    const stripe = new Stripe(E.STRIPE_SECRET_KEY, { apiVersion: "2024-06-20" });
+    const {
+      amount,
+      currency,
+      description,
+      crop_data,
+      user_address,
+    } = body || {};
+
+    if (!amount || !currency) {
+      return res.status(400).json({
+        error: "Missing amount or currency",
+      });
+    }
+
+    const stripe = new Stripe(E.STRIPE_SECRET_KEY, {
+      apiVersion: "2024-06-20",
+    });
+
     const session = await stripe.checkout.sessions.create({
       mode: "payment",
-      payment_method_types: ["card"],
-      line_items: [{
-        price_data: {
-          currency: String(currency).toLowerCase(),
-          product_data: { name: description || "CHAINVERS objednávka" },
-          unit_amount: Math.round(Number(amount) * 100),
+
+      payment_method_types: [
+        "card",
+      ],
+
+      line_items: [
+        {
+          price_data: {
+            currency: String(currency).toLowerCase(),
+
+            product_data: {
+              name: description || "CHAINVERS objednávka",
+            },
+
+            unit_amount: Math.round(Number(amount) * 100),
+          },
+
+          quantity: 1,
         },
-        quantity: 1,
-      }],
+      ],
+
       metadata: {
         crop_data: JSON.stringify(crop_data || {}),
         user_address: user_address || "unknown",
       },
-      success_url: `${E.INF_FREE_URL}/thankyou.php?session_id={CHECKOUT_SESSION_ID}`,
-      cancel_url: `${E.INF_FREE_URL}/index.php`,
+
+      success_url:
+        `${E.INF_FREE_URL}/thankyou.php?session_id={CHECKOUT_SESSION_ID}`,
+
+      cancel_url:
+        `${E.INF_FREE_URL}/index.php`,
     });
 
     console.log("[createPaymentProxy] session created", session.id);
-    return res.status(200).json({ checkout_url: session.url });
+
+    return res.status(200).json({
+      checkout_url: session.url,
+    });
+
   } catch (err) {
-    console.error("[createPaymentProxy] error", err?.message || err);
-    return res.status(500).json({ error: err?.message || String(err) });
+    console.error(
+      "[createPaymentProxy] error",
+      err?.message || err
+    );
+
+    return res.status(500).json({
+      error: err?.message || String(err),
+    });
   }
 }
 
@@ -117,21 +205,163 @@ async function createPaymentProxy(req, res) {
 // ======================================================
 async function stripeSessionStatus(req, res) {
   const E = readEnv();
+
   const sessionId = req.query?.session_id;
-  if (!sessionId) return res.status(400).json({ error: "Missing session_id" });
+
+  if (!sessionId) {
+    return res.status(400).json({
+      error: "Missing session_id",
+    });
+  }
 
   try {
-    const stripe = new Stripe(E.STRIPE_SECRET_KEY, { apiVersion: "2024-06-20" });
-    const session = await stripe.checkout.sessions.retrieve(sessionId, { expand: ["payment_intent"] });
+    const stripe = new Stripe(E.STRIPE_SECRET_KEY, {
+      apiVersion: "2024-06-20",
+    });
+
+    const session =
+      await stripe.checkout.sessions.retrieve(
+        sessionId,
+        {
+          expand: [
+            "payment_intent",
+          ],
+        }
+      );
+
     return res.status(200).json({
       id: session.id,
       payment_status: session.payment_status,
       payment_intent: session.payment_intent?.id,
       metadata: session.metadata || {},
     });
+
   } catch (e) {
-    console.error("[stripeSessionStatus] error", e?.message || e);
-    return res.status(500).json({ error: e?.message || String(e) });
+    console.error(
+      "[stripeSessionStatus] error",
+      e?.message || e
+    );
+
+    return res.status(500).json({
+      error: e?.message || String(e),
+    });
+  }
+}
+
+// ======================================================
+//  STRIPE: Refund payment
+// ======================================================
+async function stripeRefund(req, res) {
+  const E = readEnv();
+
+  if (!E.STRIPE_SECRET_KEY) {
+    return res.status(500).json({
+      ok: false,
+      error: "Missing STRIPE_SECRET_KEY",
+    });
+  }
+
+  try {
+    const input =
+      req.method === "POST"
+        ? await readJson(req)
+        : req.query;
+
+    const paymentIntent =
+      input.payment_intent ||
+      input.paymentIntent ||
+      input.paymentIntentId ||
+      "";
+
+    const sessionId =
+      input.session_id ||
+      input.sessionId ||
+      "";
+
+    const reason =
+      input.reason ||
+      "requested_by_customer";
+
+    if (!paymentIntent && !sessionId) {
+      return res.status(400).json({
+        ok: false,
+        error: "Missing payment_intent or session_id",
+      });
+    }
+
+    const stripe = new Stripe(E.STRIPE_SECRET_KEY, {
+      apiVersion: "2024-06-20",
+    });
+
+    let finalPaymentIntent = paymentIntent;
+
+    if (!finalPaymentIntent && sessionId) {
+      const session =
+        await stripe.checkout.sessions.retrieve(
+          sessionId,
+          {
+            expand: [
+              "payment_intent",
+            ],
+          }
+        );
+
+      finalPaymentIntent =
+        session.payment_intent?.id ||
+        session.payment_intent ||
+        "";
+    }
+
+    if (!finalPaymentIntent) {
+      return res.status(400).json({
+        ok: false,
+        error: "Payment intent not found",
+      });
+    }
+
+    const refund =
+      await stripe.refunds.create({
+        payment_intent: finalPaymentIntent,
+        reason:
+          [
+            "duplicate",
+            "fraudulent",
+            "requested_by_customer",
+          ].includes(reason)
+            ? reason
+            : "requested_by_customer",
+
+        metadata: {
+          source: "CHAINVERS",
+          reason_detail:
+            input.reason_detail ||
+            "Dielo bolo medzičasom zakúpené iným používateľom.",
+        },
+      });
+
+    console.log("[stripeRefund] refund created", {
+      refund: refund.id,
+      payment_intent: finalPaymentIntent,
+      status: refund.status,
+    });
+
+    return res.status(200).json({
+      ok: true,
+      refund_id: refund.id,
+      payment_intent: finalPaymentIntent,
+      status: refund.status,
+    });
+
+  } catch (err) {
+    console.error(
+      "[stripeRefund] error",
+      err?.message || err
+    );
+
+    return res.status(500).json({
+      ok: false,
+      error: err?.message || String(err),
+    });
   }
 }
 
@@ -140,22 +370,44 @@ async function stripeSessionStatus(req, res) {
 // ======================================================
 async function stripeWebhook(req, res) {
   const E = readEnv();
-  const stripe = new Stripe(E.STRIPE_SECRET_KEY, { apiVersion: "2024-06-20" });
+
+  const stripe = new Stripe(E.STRIPE_SECRET_KEY, {
+    apiVersion: "2024-06-20",
+  });
+
   const rawBody = await readRaw(req);
 
   let event;
+
   try {
-    event = stripe.webhooks.constructEvent(rawBody, req.headers["stripe-signature"], E.STRIPE_WEBHOOK_SECRET);
+    event =
+      stripe.webhooks.constructEvent(
+        rawBody,
+        req.headers["stripe-signature"],
+        E.STRIPE_WEBHOOK_SECRET
+      );
+
   } catch (err) {
-    console.error("[stripeWebhook] bad signature", err?.message);
-    return res.status(400).send(`Webhook Error: ${err.message}`);
+    console.error(
+      "[stripeWebhook] bad signature",
+      err?.message
+    );
+
+    return res
+      .status(400)
+      .send(`Webhook Error: ${err.message}`);
   }
 
-  res.status(200).json({ received: true });
+  res.status(200).json({
+    received: true,
+  });
 
   if (event.type === "checkout.session.completed") {
     const s = event.data.object;
-    const meta = s.metadata || {};
+
+    const meta =
+      s.metadata || {};
+
     const payload = {
       paymentIntentId: s.payment_intent,
       amount: (s.amount_total ?? 0) / 100,
@@ -167,14 +419,29 @@ async function stripeWebhook(req, res) {
     };
 
     try {
-      await fetch(`${E.INF_FREE_URL}/accptpay.php`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload),
-      });
-      console.log("[Webhook → accptpay] Data sent", payload);
+      await fetch(
+        `${E.INF_FREE_URL}/accptpay.php`,
+        {
+          method: "POST",
+
+          headers: {
+            "Content-Type": "application/json",
+          },
+
+          body: JSON.stringify(payload),
+        }
+      );
+
+      console.log(
+        "[Webhook → accptpay] Data sent",
+        payload
+      );
+
     } catch (err) {
-      console.error("[Webhook → accptpay] failed:", err.message);
+      console.error(
+        "[Webhook → accptpay] failed:",
+        err.message
+      );
     }
   }
 }
@@ -184,29 +451,66 @@ async function stripeWebhook(req, res) {
 // ======================================================
 async function coinbaseAutoBuy(req, res) {
   try {
-    const q = req.method === "POST" ? await readJson(req) : req.query;
-    const amountEur = Number(q.amount || 0);
-    const product = String(q.product || "ETH-EUR");
+    const q =
+      req.method === "POST"
+        ? await readJson(req)
+        : req.query;
 
-    if (!amountEur || amountEur <= 0)
-      return res.status(400).json({ error: "Missing or invalid amount" });
+    const amountEur =
+      Number(q.amount || 0);
 
-    console.log(`[coinbaseAutoBuy] Spúšťam automatizovaný nákup ${amountEur} € → ${product}`);
+    const product =
+      String(q.product || "ETH-EUR");
+
+    if (!amountEur || amountEur <= 0) {
+      return res.status(400).json({
+        error: "Missing or invalid amount",
+      });
+    }
+
+    console.log(
+      `[coinbaseAutoBuy] Spúšťam automatizovaný nákup ${amountEur} € → ${product}`
+    );
 
     const E = readEnv();
-    const timestamp = Math.floor(Date.now() / 1000);
-    const path = "/api/v3/brokerage/orders";
+
+    const timestamp =
+      Math.floor(Date.now() / 1000);
+
+    const path =
+      "/api/v3/brokerage/orders";
+
     const body = {
       client_order_id: crypto.randomUUID(),
+
       product_id: product,
+
       side: "BUY",
-      order_configuration: { market_market_ioc: { quote_size: String(amountEur) } },
+
+      order_configuration: {
+        market_market_ioc: {
+          quote_size: String(amountEur),
+        },
+      },
     };
-    const bodyStr = JSON.stringify(body);
-    const prehash = timestamp + "POST" + path + bodyStr;
-    const signature = crypto.createHmac("sha256", E.COINBASE_API_SECRET)
-      .update(prehash)
-      .digest("base64");
+
+    const bodyStr =
+      JSON.stringify(body);
+
+    const prehash =
+      timestamp +
+      "POST" +
+      path +
+      bodyStr;
+
+    const signature =
+      crypto
+        .createHmac(
+          "sha256",
+          E.COINBASE_API_SECRET
+        )
+        .update(prehash)
+        .digest("base64");
 
     const headers = {
       "CB-ACCESS-KEY": E.COINBASE_API_KEY,
@@ -215,19 +519,53 @@ async function coinbaseAutoBuy(req, res) {
       "Content-Type": "application/json",
     };
 
-    const url = `${E.COINBASE_BASE_URL}${path}`;
-    const r = await fetch(url, { method: "POST", headers, body: bodyStr });
-    const text = await r.text();
-    let json = {}; try { json = JSON.parse(text); } catch {}
+    const url =
+      `${E.COINBASE_BASE_URL}${path}`;
 
-    console.log("[coinbaseAutoBuy] Výsledok:", json);
+    const r =
+      await fetch(
+        url,
+        {
+          method: "POST",
+          headers,
+          body: bodyStr,
+        }
+      );
 
-    if (!r.ok) return res.status(500).json({ error: json || text });
+    const text =
+      await r.text();
 
-    return res.status(200).json({ ok: true, data: json });
+    let json = {};
+
+    try {
+      json = JSON.parse(text);
+    } catch {}
+
+    console.log(
+      "[coinbaseAutoBuy] Výsledok:",
+      json
+    );
+
+    if (!r.ok) {
+      return res.status(500).json({
+        error: json || text,
+      });
+    }
+
+    return res.status(200).json({
+      ok: true,
+      data: json,
+    });
+
   } catch (err) {
-    console.error("[coinbaseAutoBuy] error:", err);
-    return res.status(500).json({ error: err.message });
+    console.error(
+      "[coinbaseAutoBuy] error:",
+      err
+    );
+
+    return res.status(500).json({
+      error: err.message,
+    });
   }
 }
 
@@ -235,18 +573,44 @@ async function coinbaseAutoBuy(req, res) {
 //  UTIL
 // ======================================================
 async function readJson(req) {
-  if (req.body && typeof req.body === "object") return req.body;
-  const raw = await readRaw(req);
-  try { return JSON.parse(raw.toString("utf8")); } catch { return {}; }
+  if (
+    req.body &&
+    typeof req.body === "object"
+  ) {
+    return req.body;
+  }
+
+  const raw =
+    await readRaw(req);
+
+  try {
+    return JSON.parse(
+      raw.toString("utf8")
+    );
+
+  } catch {
+    return {};
+  }
 }
 
 async function readRaw(req) {
   const chunks = [];
-  for await (const ch of req) chunks.push(ch);
+
+  for await (const ch of req) {
+    chunks.push(ch);
+  }
+
   return Buffer.concat(chunks);
 }
 
 function safeParseJSON(x) {
-  if (!x || typeof x !== "string") return null;
-  try { return JSON.parse(x); } catch { return null; }
+  if (!x || typeof x !== "string") {
+    return null;
+  }
+
+  try {
+    return JSON.parse(x);
+  } catch {
+    return null;
+  }
 }
