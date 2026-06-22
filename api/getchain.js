@@ -140,6 +140,20 @@ export default async function handler(req, res) {
       };
     }
 
+    function isBadBlueprint(bp) {
+      const t = String(bp.title || "").toLowerCase();
+
+      return (
+        t.includes("kid") ||
+        t.includes("kids") ||
+        t.includes("youth") ||
+        t.includes("baby") ||
+        t.includes("toddler") ||
+        t.includes("pet") ||
+        t.includes("dog")
+      );
+    }
+
     function placementToPosition(placement, printAreas = []) {
       const wanted = String(placement || "front_center").toLowerCase();
       const positions = [];
@@ -168,29 +182,50 @@ export default async function handler(req, res) {
 
     function findBestBlueprint(blueprints, type) {
       const wanted = String(type || "").toLowerCase();
+      const cleanBlueprints = blueprints.filter(bp => !isBadBlueprint(bp));
 
       let rules = [];
 
       if (wanted === "tricko" || wanted === "tričko") {
-        rules = ["unisex garment-dyed t-shirt", "unisex t-shirt", "jersey short sleeve", "cotton t-shirt", "t-shirt"];
+        rules = [
+          "unisex garment-dyed t-shirt",
+          "unisex t-shirt",
+          "jersey short sleeve",
+          "cotton t-shirt",
+          "t-shirt"
+        ];
       }
 
       if (wanted === "mikina") {
-        rules = ["unisex heavy blend hooded sweatshirt", "hoodie", "hooded sweatshirt", "sweatshirt"];
+        rules = [
+          "unisex heavy blend hooded sweatshirt",
+          "unisex heavy blend crewneck sweatshirt",
+          "unisex hoodie",
+          "hooded sweatshirt",
+          "hoodie",
+          "sweatshirt"
+        ];
       }
 
       if (wanted === "tielko") {
-        rules = ["tank top", "unisex tank", "jersey tank", "women's ideal racerback"];
+        rules = [
+          "tank top",
+          "unisex tank",
+          "jersey tank",
+          "men's softstyle tank top",
+          "women's ideal racerback"
+        ];
       }
 
       for (const rule of rules) {
-        const found = blueprints.find(bp =>
+        const found = cleanBlueprints.find(bp =>
           String(bp.title || "").toLowerCase().includes(rule)
         );
+
         if (found) return found;
       }
 
-      return blueprints.find(bp => {
+      return cleanBlueprints.find(bp => {
         const t = String(bp.title || "").toLowerCase();
 
         if (wanted === "mikina") {
@@ -202,7 +237,7 @@ export default async function handler(req, res) {
         }
 
         return t.includes("t-shirt") || t.includes("shirt");
-      }) || blueprints[0] || null;
+      }) || cleanBlueprints[0] || blueprints[0] || null;
     }
 
     async function loadBlueprints() {
@@ -298,7 +333,7 @@ export default async function handler(req, res) {
     if (action === "ping") {
       return res.status(200).json({
         ok: true,
-        version: "chainvers-getchain-3products-thumbs-v1"
+        version: "chainvers-getchain-3products-thumbs-v2"
       });
     }
 
@@ -352,7 +387,7 @@ export default async function handler(req, res) {
       const blueprints = await loadBlueprints();
 
       const defs = [
-        { label: "Tričko", type: "triško" },
+        { label: "Tričko", type: "tričko" },
         { label: "Mikina", type: "mikina" },
         { label: "Tielko", type: "tielko" }
       ];
@@ -361,7 +396,7 @@ export default async function handler(req, res) {
 
       for (const def of defs) {
         try {
-          const bp = findBestBlueprint(blueprints, def.label);
+          const bp = findBestBlueprint(blueprints, def.type);
           if (!bp?.id) continue;
 
           const product = await normalizeProduct(bp, def.label);
