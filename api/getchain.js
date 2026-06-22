@@ -1,11 +1,25 @@
-// FILE: /api/getchain.js
-
 export const maxDuration = 60;
 
 export default async function handler(req, res) {
-  res.setHeader("Access-Control-Allow-Origin", "https://chainvers.free.nf");
+
+  const origin = req.headers.origin || "";
+
+  const allowedOrigins = [
+    "https://chainvers.free.nf",
+    "http://chainvers.free.nf",
+    "https://www.chainvers.free.nf",
+    "http://www.chainvers.free.nf"
+  ];
+
+  if (allowedOrigins.includes(origin)) {
+    res.setHeader("Access-Control-Allow-Origin", origin);
+  } else {
+    res.setHeader("Access-Control-Allow-Origin", "*");
+  }
+
   res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
+  res.setHeader("Access-Control-Max-Age", "86400");
 
   if (req.method === "OPTIONS") {
     return res.status(204).end();
