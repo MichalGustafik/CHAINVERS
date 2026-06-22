@@ -39,7 +39,7 @@ export default async function handler(req, res) {
     return res.status(200).json({
       ok: true,
       message: "CHAINVERS getchain endpoint is running",
-      version: "chainvers-printify-universal-catalog-v1"
+      version: "chainvers-printify-shirts-tanks-v1"
     });
   }
 
@@ -193,13 +193,13 @@ export default async function handler(req, res) {
         t.includes("toddler") ||
         t.includes("pet") ||
         t.includes("dog") ||
+        t.includes("hoodie") ||
+        t.includes("hooded") ||
+        t.includes("sweatshirt") ||
         t.includes("zip") ||
         t.includes("zipper") ||
         t.includes("full zip") ||
-        t.includes("full-zip") ||
-        t.includes("hoodie") ||
-        t.includes("hooded") ||
-        t.includes("sweatshirt")
+        t.includes("full-zip")
       );
     }
 
@@ -214,10 +214,7 @@ export default async function handler(req, res) {
         t.includes("t-shirt") ||
         t.includes("shirt") ||
         t.includes("tee") ||
-        t.includes("tank") ||
-        t.includes("top") ||
-        t.includes("long sleeve") ||
-        t.includes("sleeveless")
+        t.includes("tank")
       );
     }
 
@@ -350,7 +347,7 @@ export default async function handler(req, res) {
         ok: true,
         cors: true,
         timestamp: Date.now(),
-        version: "chainvers-printify-universal-catalog-v1"
+        version: "chainvers-printify-shirts-tanks-v1"
       });
     }
 
@@ -405,7 +402,7 @@ export default async function handler(req, res) {
 
       const wanted = blueprints
         .filter(bp => isAllowedProduct(bp))
-        .slice(0, 24);
+        .slice(0, 6);
 
       const products = [];
 
@@ -542,7 +539,10 @@ export default async function handler(req, res) {
     const finalBlueprintId = Number(blueprint_id || 9);
 
     const providers = await loadProviders(finalBlueprintId);
-    const providerId = Number(print_provider_id || providers?.[0]?.id);
+    const providerId = Number(
+      print_provider_id ||
+      providers?.[0]?.id
+    );
 
     if (!providerId) {
       return res.status(500).json({
@@ -552,28 +552,54 @@ export default async function handler(req, res) {
       });
     }
 
-    const variantsData = await loadVariants(finalBlueprintId, providerId);
+    const variantsData = await loadVariants(
+      finalBlueprintId,
+      providerId
+    );
 
-    const variants = Array.isArray(variantsData.variants)
+    const variants = Array.isArray(
+      variantsData.variants
+    )
       ? variantsData.variants
       : [];
 
     let variant = null;
 
     if (variant_id) {
-      variant = variants.find(v => String(v.id) === String(variant_id));
+      variant = variants.find(
+        v =>
+          String(v.id) ===
+          String(variant_id)
+      );
     }
 
-    const wantedSize = String(size || variant_size || "").toLowerCase();
-    const wantedColor = String(color || variant_color || "").toLowerCase();
+    const wantedSize =
+      String(
+        size ||
+        variant_size ||
+        ""
+      ).toLowerCase();
+
+    const wantedColor =
+      String(
+        color ||
+        variant_color ||
+        ""
+      ).toLowerCase();
 
     if (!variant && (wantedSize || wantedColor)) {
+
       variant = variants.find(v => {
-        const title = String(v.title || "").toLowerCase();
+
+        const title =
+          String(v.title || "")
+          .toLowerCase();
 
         return (
-          (!wantedSize || title.includes(wantedSize)) &&
-          (!wantedColor || title.includes(wantedColor))
+          (!wantedSize ||
+            title.includes(wantedSize)) &&
+          (!wantedColor ||
+            title.includes(wantedColor))
         );
       });
     }
@@ -591,31 +617,50 @@ export default async function handler(req, res) {
     }
 
     const variantId = Number(variant.id);
-    const placeholderPosition = placementToPosition(
-      "front",
-      variantsData.print_areas || []
-    );
+
+    const placeholderPosition =
+      placementToPosition(
+        "front",
+        variantsData.print_areas || []
+      );
 
     const selectedType =
       product_type ||
       body.blueprint_title ||
       "CHAINVERS Printify produkt";
 
-    const selectedSize = size || variant_size || "";
-    const selectedColor = color || variant_color || "";
-    const selectedNote = note || customer_note || "";
+    const selectedSize =
+      size ||
+      variant_size ||
+      "";
+
+    const selectedColor =
+      color ||
+      variant_color ||
+      "";
+
+    const selectedNote =
+      note ||
+      customer_note ||
+      "";
 
     const productPayload = {
-      title: `CHAINVERS ${selectedType} ${crop_id}`,
+      title:
+        `CHAINVERS ${selectedType} ${crop_id}`,
+
       description:
         `Unikátny CHAINVERS produkt s panelom ${crop_id}\n\n` +
         `Printify produkt: ${selectedType}\n` +
         `Veľkosť: ${selectedSize}\n` +
         `Farba: ${selectedColor}\n` +
-        `Umiestnenie: Predok stred\n` +
         `Poznámka: ${selectedNote}`,
-      blueprint_id: finalBlueprintId,
-      print_provider_id: providerId,
+
+      blueprint_id:
+        finalBlueprintId,
+
+      print_provider_id:
+        providerId,
+
       variants: [
         {
           id: variantId,
@@ -623,15 +668,21 @@ export default async function handler(req, res) {
           is_enabled: true
         }
       ],
+
       print_areas: [
         {
           variant_ids: [variantId],
+
           placeholders: [
             {
-              position: placeholderPosition,
+              position:
+                placeholderPosition,
+
               images: [
                 {
-                  id: uploadData.id,
+                  id:
+                    uploadData.id,
+
                   x: 0.5,
                   y: 0.5,
                   scale: 1,
@@ -642,59 +693,101 @@ export default async function handler(req, res) {
           ]
         }
       ],
-      external_id: externalId
+
+      external_id:
+        externalId
     };
 
-    const createResp = await fetchWithTimeout(
-      `https://api.printify.com/v1/shops/${shopId}/products.json`,
-      {
-        method: "POST",
-        headers: {
-          ...authHeader,
-          "Content-Type": "application/json"
+    const createResp =
+      await fetchWithTimeout(
+        `https://api.printify.com/v1/shops/${shopId}/products.json`,
+        {
+          method: "POST",
+
+          headers: {
+            ...authHeader,
+            "Content-Type":
+              "application/json"
+          },
+
+          body: JSON.stringify(
+            productPayload
+          )
         },
-        body: JSON.stringify(productPayload)
-      },
-      22000
-    );
+        22000
+      );
 
-    const product = await safeJson(createResp);
+    const product =
+      await safeJson(createResp);
 
-    if (!createResp.ok || !product.id) {
+    if (
+      !createResp.ok ||
+      !product.id
+    ) {
       return res.status(500).json({
         ok: false,
-        error: "Product creation failed",
+        error:
+          "Product creation failed",
         resp: product
       });
     }
 
-    const preview = extractPreview(product);
+    const preview =
+      extractPreview(product);
 
     return res.status(200).json({
       ok: true,
+
       product,
-      product_id: product.id,
+
+      product_id:
+        product.id,
+
       preview,
-      preview_url: preview,
-      printify_product_id: product.id,
-      printify_status: "product_created",
-      shipping_received: !!shipping,
+
+      preview_url:
+        preview,
+
+      printify_product_id:
+        product.id,
+
+      printify_status:
+        "product_created",
+
+      shipping_received:
+        !!shipping,
+
       selected: {
-        blueprint_id: finalBlueprintId,
-        print_provider_id: providerId,
-        variant_id: variantId,
-        variant_title: variant.title || null,
-        placeholder: placeholderPosition
+        blueprint_id:
+          finalBlueprintId,
+
+        print_provider_id:
+          providerId,
+
+        variant_id:
+          variantId,
+
+        variant_title:
+          variant.title || null,
+
+        placeholder:
+          placeholderPosition
       },
-      warning: preview
-        ? null
-        : "Product created. Mockup may need a few seconds to become available."
+
+      warning:
+        preview
+          ? null
+          : "Product created. Mockup may need a few seconds to become available."
     });
 
   } catch (e) {
+
     return res.status(500).json({
       ok: false,
-      error: e.message || String(e)
+      error:
+        e.message ||
+        String(e)
     });
+
   }
 }
