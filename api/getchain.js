@@ -3,6 +3,14 @@
 export const maxDuration = 60;
 
 export default async function handler(req, res) {
+  res.setHeader("Access-Control-Allow-Origin", "https://chainvers.free.nf");
+  res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+
+  if (req.method === "OPTIONS") {
+    return res.status(204).end();
+  }
+
   const { PRINTIFY_API_KEY } = process.env;
 
   if (!PRINTIFY_API_KEY) {
@@ -333,53 +341,7 @@ export default async function handler(req, res) {
     if (action === "ping") {
       return res.status(200).json({
         ok: true,
-        version: "chainvers-getchain-3products-thumbs-v2"
-      });
-    }
-
-    if (action === "catalog") {
-      const blueprints = await loadBlueprints();
-
-      return res.status(200).json({
-        ok: true,
-        blueprints
-      });
-    }
-
-    if (action === "providers") {
-      const { blueprint_id } = body;
-
-      if (!blueprint_id) {
-        return res.status(400).json({
-          ok: false,
-          error: "Missing blueprint_id"
-        });
-      }
-
-      const providers = await loadProviders(blueprint_id);
-
-      return res.status(200).json({
-        ok: true,
-        providers
-      });
-    }
-
-    if (action === "variants") {
-      const { blueprint_id, print_provider_id } = body;
-
-      if (!blueprint_id || !print_provider_id) {
-        return res.status(400).json({
-          ok: false,
-          error: "Missing blueprint_id or print_provider_id"
-        });
-      }
-
-      const variantsData = await loadVariants(blueprint_id, print_provider_id);
-
-      return res.status(200).json({
-        ok: true,
-        variants: variantsData.variants || [],
-        print_areas: variantsData.print_areas || []
+        version: "chainvers-getchain-3products-thumbs-v3-cors"
       });
     }
 
@@ -413,47 +375,6 @@ export default async function handler(req, res) {
       });
     }
 
-    if (action === "preview_status") {
-      const { product_id } = body;
-
-      if (!product_id) {
-        return res.status(400).json({
-          ok: false,
-          error: "Missing product_id"
-        });
-      }
-
-      const shopId = await getShopId();
-
-      const productResp = await fetchWithTimeout(
-        `https://api.printify.com/v1/shops/${shopId}/products/${product_id}.json`,
-        { headers: authHeader },
-        12000
-      );
-
-      const product = await safeJson(productResp);
-
-      if (!productResp.ok || !product?.id) {
-        return res.status(500).json({
-          ok: false,
-          error: "Product fetch failed",
-          resp: product
-        });
-      }
-
-      const preview = extractPreview(product);
-
-      return res.status(200).json({
-        ok: true,
-        product,
-        product_id: product.id,
-        preview,
-        preview_url: preview,
-        mockup_pending: !preview,
-        printify_status: preview ? "mockup_ready" : "mockup_pending"
-      });
-    }
-
     const {
       crop_id,
       image_url,
@@ -480,11 +401,7 @@ export default async function handler(req, res) {
     const externalId = `chainvers_${crop_id}_${Date.now()}`;
     const shopId = await getShopId();
 
-    const imageResp = await fetchWithTimeout(
-      image_url,
-      {},
-      8000
-    );
+    const imageResp = await fetchWithTimeout(image_url, {}, 8000);
 
     if (!imageResp.ok) {
       return res.status(500).json({
@@ -575,10 +492,7 @@ export default async function handler(req, res) {
     }
 
     const variantId = Number(variant.id);
-    const placeholderPosition = placementToPosition(
-      "front",
-      variantsData.print_areas || []
-    );
+    const placeholderPosition = placementToPosition("front", variantsData.print_areas || []);
 
     const selectedType = product_type || "Product";
     const selectedSize = size || variant_size || "";
@@ -641,30 +555,6 @@ export default async function handler(req, res) {
     const product = await safeJson(createResp);
 
     if (!createResp.ok || !product.id) {
-      const rawText = JSON.stringify(product);
-
-      const duplicate =
-        rawText.toLowerCase().includes("already exists") ||
-        rawText.includes("8100") ||
-        rawText.includes("8503");
-
-      if (duplicate) {
-        return res.status(200).json({
-          ok: true,
-          exists: true,
-          duplicate: true,
-          mockup_pending: true,
-          product: null,
-          product_id: null,
-          order: null,
-          preview: null,
-          preview_url: null,
-          printify_status: "product_exists",
-          tracking_status: "pending",
-          resp: product
-        });
-      }
-
       return res.status(500).json({
         ok: false,
         error: "Product creation failed",
@@ -676,22 +566,12 @@ export default async function handler(req, res) {
 
     return res.status(200).json({
       ok: true,
-      exists: false,
-      duplicate: false,
-      order_pending: true,
-      mockup_pending: !preview,
       product,
       product_id: product.id,
-      order: null,
       preview,
       preview_url: preview,
       printify_product_id: product.id,
-      printify_order_id: null,
       printify_status: "product_created",
-      tracking_number: null,
-      tracking_url: null,
-      tracking_carrier: null,
-      tracking_status: "pending",
       shipping_received: !!shipping,
       selected: {
         blueprint_id: finalBlueprintId,
@@ -699,14 +579,7 @@ export default async function handler(req, res) {
         variant_id: variantId,
         variant_title: variant.title || null,
         placeholder: placeholderPosition
-      },
-      selected_variant: {
-        id: variantId,
-        title: variant.title || null
-      },
-      warning: preview
-        ? null
-        : "Product created. Mockup/order will be available later."
+      }
     });
 
   } catch (e) {
