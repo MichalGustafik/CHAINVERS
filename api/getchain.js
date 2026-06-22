@@ -1,3 +1,5 @@
+// FILE: /api/getchain.js
+
 export const maxDuration = 60;
 
 export default async function handler(req, res) {
@@ -172,7 +174,12 @@ export default async function handler(req, res) {
         t.includes("baby") ||
         t.includes("toddler") ||
         t.includes("pet") ||
-        t.includes("dog")
+        t.includes("dog") ||
+        t.includes("zip") ||
+        t.includes("zipper") ||
+        t.includes("full zip") ||
+        t.includes("full-zip") ||
+        t.includes("zip hoodie")
       );
     }
 
@@ -221,9 +228,9 @@ export default async function handler(req, res) {
       if (wanted === "mikina") {
         rules = [
           "unisex heavy blend hooded sweatshirt",
-          "unisex heavy blend crewneck sweatshirt",
           "unisex hoodie",
           "hooded sweatshirt",
+          "heavy blend hooded sweatshirt",
           "hoodie",
           "sweatshirt"
         ];
@@ -355,7 +362,7 @@ export default async function handler(req, res) {
     if (action === "ping") {
       return res.status(200).json({
         ok: true,
-        version: "chainvers-getchain-3products-thumbs-v3-cors"
+        version: "chainvers-getchain-hoodie-no-zip-v1"
       });
     }
 
