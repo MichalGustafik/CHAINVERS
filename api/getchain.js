@@ -88,6 +88,18 @@ export default async function handler(req, res) {
       return null;
     }
 
+    function extractBlueprintThumb(bp) {
+      if (Array.isArray(bp?.images) && bp.images.length) {
+        return bp.images[0]?.src || bp.images[0]?.url || null;
+      }
+
+      if (bp?.image) return bp.image;
+      if (bp?.thumbnail) return bp.thumbnail;
+      if (bp?.display_image) return bp.display_image;
+
+      return null;
+    }
+
     function uniqueClean(arr) {
       return [...new Set(
         (arr || [])
@@ -128,51 +140,6 @@ export default async function handler(req, res) {
       };
     }
 
-    function detectMode(title = "") {
-      const t = String(title).toLowerCase();
-
-      if (
-        t.includes("all over") ||
-        t.includes("aop") ||
-        t.includes("cut & sew") ||
-        t.includes("premium")
-      ) {
-        return "premium";
-      }
-
-      return "simple";
-    }
-
-    function detectFit(title = "") {
-      const t = String(title).toLowerCase();
-
-      if (t.includes("women")) return "Women";
-      if (t.includes("men")) return "Men";
-      if (t.includes("unisex")) return "Unisex";
-
-      return "Regular";
-    }
-
-    function detectPlacements(printAreas = []) {
-      const positions = [];
-
-      for (const area of printAreas || []) {
-        for (const p of area?.placeholders || []) {
-          if (p?.position) positions.push(String(p.position));
-        }
-      }
-
-      const out = [];
-
-      if (positions.some(p => p.includes("front"))) out.push("Predok stred");
-      if (positions.some(p => p.includes("back"))) out.push("Zadná strana");
-      if (positions.some(p => p.includes("all") || p.includes("front") || p.includes("back"))) {
-        out.push("All-over / Premium");
-      }
-
-      return uniqueClean(out.length ? out : ["Predok stred"]);
-    }
-
     function placementToPosition(placement, printAreas = []) {
       const wanted = String(placement || "front_center").toLowerCase();
       const positions = [];
@@ -191,20 +158,51 @@ export default async function handler(req, res) {
         );
       }
 
-      if (wanted.includes("all")) {
-        return (
-          positions.find(p => p.includes("front")) ||
-          positions[0] ||
-          "front"
-        );
-      }
-
       return (
         positions.find(p => p === "front") ||
         positions.find(p => p.includes("front")) ||
         positions[0] ||
         "front"
       );
+    }
+
+    function findBestBlueprint(blueprints, type) {
+      const wanted = String(type || "").toLowerCase();
+
+      let rules = [];
+
+      if (wanted === "tricko" || wanted === "tričko") {
+        rules = ["unisex garment-dyed t-shirt", "unisex t-shirt", "jersey short sleeve", "cotton t-shirt", "t-shirt"];
+      }
+
+      if (wanted === "mikina") {
+        rules = ["unisex heavy blend hooded sweatshirt", "hoodie", "hooded sweatshirt", "sweatshirt"];
+      }
+
+      if (wanted === "tielko") {
+        rules = ["tank top", "unisex tank", "jersey tank", "women's ideal racerback"];
+      }
+
+      for (const rule of rules) {
+        const found = blueprints.find(bp =>
+          String(bp.title || "").toLowerCase().includes(rule)
+        );
+        if (found) return found;
+      }
+
+      return blueprints.find(bp => {
+        const t = String(bp.title || "").toLowerCase();
+
+        if (wanted === "mikina") {
+          return t.includes("hoodie") || t.includes("sweatshirt");
+        }
+
+        if (wanted === "tielko") {
+          return t.includes("tank");
+        }
+
+        return t.includes("t-shirt") || t.includes("shirt");
+      }) || blueprints[0] || null;
     }
 
     async function loadBlueprints() {
@@ -255,10 +253,52 @@ export default async function handler(req, res) {
       return data || {};
     }
 
+    async function normalizeProduct(blueprint, forcedLabel) {
+      const providers = await loadProviders(blueprint.id);
+      const provider = providers?.[0];
+
+      if (!provider?.id) return null;
+
+      const variantsData = await loadVariants(blueprint.id, provider.id);
+      const variants = Array.isArray(variantsData.variants)
+        ? variantsData.variants
+        : [];
+
+      if (!variants.length) return null;
+
+      const normalizedVariants = variants.slice(0, 250).map(v => {
+        const sp = splitVariantTitle(v.title || "");
+
+        return {
+          id: v.id,
+          title: v.title || `Variant ${v.id}`,
+          size: sp.size,
+          color: sp.color,
+          is_enabled: v.is_enabled !== false
+        };
+      });
+
+      return {
+        key: `${blueprint.id}_${provider.id}`,
+        label: forcedLabel,
+        blueprint_id: blueprint.id,
+        blueprint_title: blueprint.title || `Blueprint ${blueprint.id}`,
+        print_provider_id: provider.id,
+        print_provider_title:
+          provider.title ||
+          provider.name ||
+          `Provider ${provider.id}`,
+        thumbnail: extractBlueprintThumb(blueprint),
+        variants: normalizedVariants,
+        sizes: uniqueClean(normalizedVariants.map(v => v.size)),
+        colors: uniqueClean(normalizedVariants.map(v => v.color))
+      };
+    }
+
     if (action === "ping") {
       return res.status(200).json({
         ok: true,
-        version: "chainvers-getchain-mockchain-catalog-v4"
+        version: "chainvers-getchain-3products-thumbs-v1"
       });
     }
 
@@ -311,69 +351,21 @@ export default async function handler(req, res) {
     if (action === "mockchain_catalog") {
       const blueprints = await loadBlueprints();
 
-      const wanted = blueprints
-        .filter(bp => {
-          const t = String(bp.title || "").toLowerCase();
-
-          return (
-            t.includes("t-shirt") ||
-            t.includes("shirt") ||
-            t.includes("hoodie") ||
-            t.includes("sweatshirt") ||
-            t.includes("poster") ||
-            t.includes("canvas") ||
-            t.includes("mug") ||
-            t.includes("all over") ||
-            t.includes("aop")
-          );
-        })
-        .slice(0, 14);
+      const defs = [
+        { label: "Tričko", type: "triško" },
+        { label: "Mikina", type: "mikina" },
+        { label: "Tielko", type: "tielko" }
+      ];
 
       const products = [];
 
-      for (const bp of wanted) {
+      for (const def of defs) {
         try {
-          const providers = await loadProviders(bp.id);
-          const provider = providers?.[0];
+          const bp = findBestBlueprint(blueprints, def.label);
+          if (!bp?.id) continue;
 
-          if (!provider?.id) continue;
-
-          const variantsData = await loadVariants(bp.id, provider.id);
-          const variants = Array.isArray(variantsData.variants)
-            ? variantsData.variants
-            : [];
-
-          if (!variants.length) continue;
-
-          const normalizedVariants = variants.slice(0, 250).map(v => {
-            const sp = splitVariantTitle(v.title || "");
-
-            return {
-              id: v.id,
-              title: v.title || `Variant ${v.id}`,
-              size: sp.size,
-              color: sp.color,
-              is_enabled: v.is_enabled !== false
-            };
-          });
-
-          products.push({
-            key: `${bp.id}_${provider.id}`,
-            mode: detectMode(bp.title),
-            label: bp.title || `Blueprint ${bp.id}`,
-            blueprint_id: bp.id,
-            blueprint_title: bp.title || `Blueprint ${bp.id}`,
-            print_provider_id: provider.id,
-            print_provider_title:
-              provider.title ||
-              provider.name ||
-              `Provider ${provider.id}`,
-            variants: normalizedVariants,
-            sizes: uniqueClean(normalizedVariants.map(v => v.size)),
-            colors: uniqueClean(normalizedVariants.map(v => v.color)),
-            fits: uniqueClean([detectFit(bp.title), "Regular"]),
-            placements: detectPlacements(variantsData.print_areas || [])
-          });
+          const product = await normalizeProduct(bp, def.label);
+          if (product) products.push(product);
         } catch (e) {
           continue;
         }
@@ -434,14 +426,11 @@ export default async function handler(req, res) {
       blueprint_id,
       print_provider_id,
       variant_id,
-      product_mode,
       product_type,
       variant_size,
       variant_color,
       size,
       color,
-      fit,
-      placement,
       customer_note,
       note
     } = body;
@@ -552,7 +541,7 @@ export default async function handler(req, res) {
 
     const variantId = Number(variant.id);
     const placeholderPosition = placementToPosition(
-      placement,
+      "front",
       variantsData.print_areas || []
     );
 
@@ -565,12 +554,10 @@ export default async function handler(req, res) {
       title: `CHAINVERS ${selectedType} ${crop_id}`,
       description:
         `Unikátny CHAINVERS produkt s panelom ${crop_id}\n\n` +
-        `Mode: ${product_mode || ""}\n` +
         `Typ produktu: ${selectedType}\n` +
         `Veľkosť: ${selectedSize}\n` +
         `Farba: ${selectedColor}\n` +
-        `Fit: ${fit || ""}\n` +
-        `Umiestnenie: ${placement || "front"}\n` +
+        `Umiestnenie: Predok stred\n` +
         `Poznámka: ${selectedNote}`,
       blueprint_id: finalBlueprintId,
       print_provider_id: providerId,
