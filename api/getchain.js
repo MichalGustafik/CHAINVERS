@@ -17,11 +17,7 @@ export default async function handler(req, res) {
     let body = req.body || {};
 
     if (typeof body === "string") {
-      try {
-        body = JSON.parse(body);
-      } catch {
-        body = {};
-      }
+      try { body = JSON.parse(body); } catch { body = {}; }
     }
 
     const action = body.action || "create_product";
@@ -44,11 +40,7 @@ export default async function handler(req, res) {
       const timer = setTimeout(() => controller.abort(), timeoutMs);
 
       try {
-        const resp = await fetch(url, {
-          ...options,
-          signal: controller.signal
-        });
-
+        const resp = await fetch(url, { ...options, signal: controller.signal });
         clearTimeout(timer);
         return resp;
       } catch (e) {
@@ -86,33 +78,156 @@ export default async function handler(req, res) {
       return null;
     }
 
-    if (action === "ping") {
-      return res.status(200).json({
-        ok: true,
-        version: "chainvers-getchain-catalog-v2"
-      });
+    function uniqueClean(arr) {
+      return [...new Set((arr || []).map(v => String(v || "").trim()).filter(Boolean))];
     }
 
-    if (action === "catalog") {
-      const blueprintsResp = await fetchWithTimeout(
+    function splitVariantTitle(title = "") {
+      const parts = String(title)
+        .split(/[\/|,]/g)
+        .map(v => v.trim())
+        .filter(Boolean);
+
+      let size = "";
+      let color = "";
+
+      const sizeRe = /^(XS|S|M|L|XL|2XL|3XL|4XL|5XL|6XL|7XL|8XL|9XL|10XL|One size|11oz|12oz|15oz|16x24|18x24|24x36)$/i;
+
+      for (const p of parts) {
+        if (!size && sizeRe.test(p)) size = p;
+      }
+
+      for (const p of parts) {
+        if (p !== size) {
+          color = p;
+          break;
+        }
+      }
+
+      if (!size && parts.length) size = parts[parts.length - 1];
+      if (!color && parts.length > 1) color = parts[0];
+
+      return {
+        size: size || "Default",
+        color: color || "Default"
+      };
+    }
+
+    function detectMode(title = "") {
+      const t = String(title).toLowerCase();
+      if (t.includes("all over") || t.includes("aop") || t.includes("cut & sew") || t.includes("premium")) {
+        return "premium";
+      }
+      return "simple";
+    }
+
+    function detectFit(title = "") {
+      const t = String(title).toLowerCase();
+      if (t.includes("women")) return "Women";
+      if (t.includes("men")) return "Men";
+      if (t.includes("unisex")) return "Unisex";
+      return "Regular";
+    }
+
+    function detectPlacements(printAreas = []) {
+      const positions = [];
+
+      for (const area of printAreas || []) {
+        for (const p of area?.placeholders || []) {
+          if (p?.position) positions.push(String(p.position));
+        }
+      }
+
+      const out = [];
+      if (positions.some(p => p.includes("front"))) out.push("Predok stred");
+      if (positions.some(p => p.includes("back"))) out.push("Zadná strana");
+      if (positions.some(p => p.includes("all") || p.includes("front") || p.includes("back"))) out.push("All-over / Premium");
+
+      return uniqueClean(out.length ? out : ["Predok stred"]);
+    }
+
+    function placementToPosition(placement, printAreas = []) {
+      const wanted = String(placement || "front_center").toLowerCase();
+      const positions = [];
+
+      for (const area of printAreas || []) {
+        for (const p of area?.placeholders || []) {
+          if (p?.position) positions.push(String(p.position));
+        }
+      }
+
+      if (wanted.includes("back")) {
+        return positions.find(p => p === "back") || positions.find(p => p.includes("back")) || "back";
+      }
+
+      if (wanted.includes("all")) {
+        return positions.find(p => p.includes("front")) || positions[0] || "front";
+      }
+
+      return positions.find(p => p === "front") || positions.find(p => p.includes("front")) || positions[0] || "front";
+    }
+
+    async function loadBlueprints() {
+      const resp = await fetchWithTimeout(
         "https://api.printify.com/v1/catalog/blueprints.json",
         { headers: authHeader },
         12000
       );
 
-      const blueprints = await safeJson(blueprintsResp);
+      const data = await safeJson(resp);
 
-      if (!blueprintsResp.ok) {
-        return res.status(500).json({
-          ok: false,
-          error: "Catalog blueprints failed",
-          resp: blueprints
-        });
+      if (!resp.ok) {
+        throw new Error(`Catalog blueprints failed: ${JSON.stringify(data)}`);
       }
+
+      return Array.isArray(data) ? data : [];
+    }
+
+    async function loadProviders(blueprintId) {
+      const resp = await fetchWithTimeout(
+        `https://api.printify.com/v1/catalog/blueprints/${blueprintId}/print_providers.json`,
+        { headers: authHeader },
+        12000
+      );
+
+      const data = await safeJson(resp);
+
+      if (!resp.ok) {
+        throw new Error(`Providers failed: ${JSON.stringify(data)}`);
+      }
+
+      return Array.isArray(data) ? data : [];
+    }
+
+    async function loadVariants(blueprintId, providerId) {
+      const resp = await fetchWithTimeout(
+        `https://api.printify.com/v1/catalog/blueprints/${blueprintId}/print_providers/${providerId}/variants.json`,
+        { headers: authHeader },
+        12000
+      );
+
+      const data = await safeJson(resp);
+
+      if (!resp.ok) {
+        throw new Error(`Variants failed: ${JSON.stringify(data)}`);
+      }
+
+      return data || {};
+    }
+
+    if (action === "ping") {
+      return res.status(200).json({
+        ok: true,
+        version: "chainvers-getchain-mockchain-catalog-v3"
+      });
+    }
+
+    if (action === "catalog") {
+      const blueprints = await loadBlueprints();
 
       return res.status(200).json({
         ok: true,
-        blueprints: Array.isArray(blueprints) ? blueprints : []
+        blueprints
       });
     }
 
@@ -120,59 +235,22 @@ export default async function handler(req, res) {
       const { blueprint_id } = body;
 
       if (!blueprint_id) {
-        return res.status(400).json({
-          ok: false,
-          error: "Missing blueprint_id"
-        });
+        return res.status(400).json({ ok: false, error: "Missing blueprint_id" });
       }
 
-      const providersResp = await fetchWithTimeout(
-        `https://api.printify.com/v1/catalog/blueprints/${blueprint_id}/print_providers.json`,
-        { headers: authHeader },
-        12000
-      );
+      const providers = await loadProviders(blueprint_id);
 
-      const providers = await safeJson(providersResp);
-
-      if (!providersResp.ok) {
-        return res.status(500).json({
-          ok: false,
-          error: "Providers failed",
-          resp: providers
-        });
-      }
-
-      return res.status(200).json({
-        ok: true,
-        providers: Array.isArray(providers) ? providers : []
-      });
+      return res.status(200).json({ ok: true, providers });
     }
 
     if (action === "variants") {
       const { blueprint_id, print_provider_id } = body;
 
       if (!blueprint_id || !print_provider_id) {
-        return res.status(400).json({
-          ok: false,
-          error: "Missing blueprint_id or print_provider_id"
-        });
+        return res.status(400).json({ ok: false, error: "Missing blueprint_id or print_provider_id" });
       }
 
-      const variantsResp = await fetchWithTimeout(
-        `https://api.printify.com/v1/catalog/blueprints/${blueprint_id}/print_providers/${print_provider_id}/variants.json`,
-        { headers: authHeader },
-        12000
-      );
-
-      const variantsData = await safeJson(variantsResp);
-
-      if (!variantsResp.ok) {
-        return res.status(500).json({
-          ok: false,
-          error: "Variants failed",
-          resp: variantsData
-        });
-      }
+      const variantsData = await loadVariants(blueprint_id, print_provider_id);
 
       return res.status(200).json({
         ok: true,
@@ -181,14 +259,78 @@ export default async function handler(req, res) {
       });
     }
 
+    if (action === "mockchain_catalog") {
+      const blueprints = await loadBlueprints();
+
+      const wanted = blueprints
+        .filter(bp => {
+          const t = String(bp.title || "").toLowerCase();
+          return (
+            t.includes("t-shirt") ||
+            t.includes("shirt") ||
+            t.includes("hoodie") ||
+            t.includes("sweatshirt") ||
+            t.includes("poster") ||
+            t.includes("canvas") ||
+            t.includes("mug") ||
+            t.includes("all over") ||
+            t.includes("aop")
+          );
+        })
+        .slice(0, 14);
+
+      const products = [];
+
+      for (const bp of wanted) {
+        try {
+          const providers = await loadProviders(bp.id);
+          const provider = providers?.[0];
+          if (!provider?.id) continue;
+
+          const variantsData = await loadVariants(bp.id, provider.id);
+          const variants = Array.isArray(variantsData.variants) ? variantsData.variants : [];
+          if (!variants.length) continue;
+
+          const normalizedVariants = variants.slice(0, 250).map(v => {
+            const sp = splitVariantTitle(v.title || "");
+            return {
+              id: v.id,
+              title: v.title || `Variant ${v.id}`,
+              size: sp.size,
+              color: sp.color,
+              is_enabled: v.is_enabled !== false
+            };
+          });
+
+          products.push({
+            key: `${bp.id}_${provider.id}`,
+            mode: detectMode(bp.title),
+            label: bp.title || `Blueprint ${bp.id}`,
+            blueprint_id: bp.id,
+            blueprint_title: bp.title || `Blueprint ${bp.id}`,
+            print_provider_id: provider.id,
+            print_provider_title: provider.title || provider.name || `Provider ${provider.id}`,
+            variants: normalizedVariants,
+            sizes: uniqueClean(normalizedVariants.map(v => v.size)),
+            colors: uniqueClean(normalizedVariants.map(v => v.color)),
+            fits: uniqueClean([detectFit(bp.title), "Regular"]),
+            placements: detectPlacements(variantsData.print_areas || [])
+          });
+        } catch (e) {}
+      }
+
+      return res.status(200).json({
+        ok: true,
+        products,
+        count: products.length
+      });
+    }
+
     if (action === "preview_status") {
       const { product_id } = body;
 
       if (!product_id) {
-        return res.status(400).json({
-          ok: false,
-          error: "Missing product_id"
-        });
+        return res.status(400).json({ ok: false, error: "Missing product_id" });
       }
 
       const shopId = await getShopId();
@@ -202,11 +344,7 @@ export default async function handler(req, res) {
       const product = await safeJson(productResp);
 
       if (!productResp.ok || !product?.id) {
-        return res.status(500).json({
-          ok: false,
-          error: "Product fetch failed",
-          resp: product
-        });
+        return res.status(500).json({ ok: false, error: "Product fetch failed", resp: product });
       }
 
       const preview = extractPreview(product);
@@ -214,6 +352,7 @@ export default async function handler(req, res) {
       return res.status(200).json({
         ok: true,
         product,
+        product_id: product.id,
         preview,
         preview_url: preview,
         mockup_pending: !preview,
@@ -230,29 +369,24 @@ export default async function handler(req, res) {
       variant_id,
       product_mode,
       product_type,
+      variant_size,
+      variant_color,
       size,
       color,
       fit,
       placement,
+      customer_note,
       note
     } = body;
 
     if (!crop_id || !image_url) {
-      return res.status(400).json({
-        ok: false,
-        error: "Missing crop_id or image_url"
-      });
+      return res.status(400).json({ ok: false, error: "Missing crop_id or image_url" });
     }
 
     const externalId = `chainvers_${crop_id}_${Date.now()}`;
-
     const shopId = await getShopId();
 
-    const imageResp = await fetchWithTimeout(
-      image_url,
-      {},
-      8000
-    );
+    const imageResp = await fetchWithTimeout(image_url, {}, 8000);
 
     if (!imageResp.ok) {
       return res.status(500).json({
@@ -285,42 +419,20 @@ export default async function handler(req, res) {
     const uploadData = await safeJson(uploadResp);
 
     if (!uploadResp.ok || !uploadData.id) {
-      return res.status(500).json({
-        ok: false,
-        error: "Upload failed",
-        resp: uploadData
-      });
+      return res.status(500).json({ ok: false, error: "Upload failed", resp: uploadData });
     }
 
     const finalBlueprintId = Number(blueprint_id || 9);
 
-    const providersResp = await fetchWithTimeout(
-      `https://api.printify.com/v1/catalog/blueprints/${finalBlueprintId}/print_providers.json`,
-      { headers: authHeader },
-      8000
-    );
-
-    const providers = await safeJson(providersResp);
+    const providers = await loadProviders(finalBlueprintId);
     const providerId = Number(print_provider_id || providers?.[0]?.id);
 
     if (!providerId) {
-      return res.status(500).json({
-        ok: false,
-        error: "No provider found",
-        resp: providers
-      });
+      return res.status(500).json({ ok: false, error: "No provider found", resp: providers });
     }
 
-    const variantsResp = await fetchWithTimeout(
-      `https://api.printify.com/v1/catalog/blueprints/${finalBlueprintId}/print_providers/${providerId}/variants.json`,
-      { headers: authHeader },
-      8000
-    );
-
-    const variantsData = await safeJson(variantsResp);
-    const variants = Array.isArray(variantsData.variants)
-      ? variantsData.variants
-      : [];
+    const variantsData = await loadVariants(finalBlueprintId, providerId);
+    const variants = Array.isArray(variantsData.variants) ? variantsData.variants : [];
 
     let variant = null;
 
@@ -328,65 +440,41 @@ export default async function handler(req, res) {
       variant = variants.find(v => String(v.id) === String(variant_id));
     }
 
-    if (!variant && (size || color)) {
-      const s = String(size || "").toLowerCase();
-      const c = String(color || "").toLowerCase();
+    const wantedSize = String(size || variant_size || "").toLowerCase();
+    const wantedColor = String(color || variant_color || "").toLowerCase();
 
+    if (!variant && (wantedSize || wantedColor)) {
       variant = variants.find(v => {
         const title = String(v.title || "").toLowerCase();
-        return (!s || title.includes(s)) && (!c || title.includes(c));
+        return (!wantedSize || title.includes(wantedSize)) && (!wantedColor || title.includes(wantedColor));
       });
     }
 
-    if (!variant) {
-      variant = variants[0] || null;
-    }
+    if (!variant) variant = variants[0] || null;
 
     if (!variant) {
-      return res.status(500).json({
-        ok: false,
-        error: "No variant found",
-        resp: variantsData
-      });
+      return res.status(500).json({ ok: false, error: "No variant found", resp: variantsData });
     }
 
     const variantId = Number(variant.id);
+    const placeholderPosition = placementToPosition(placement, variantsData.print_areas || []);
 
-    let placeholderPosition = "front";
-
-    if (placement === "back") {
-      placeholderPosition = "back";
-    } else if (Array.isArray(variantsData.print_areas)) {
-      const foundPositions = [];
-
-      for (const area of variantsData.print_areas) {
-        if (Array.isArray(area.placeholders)) {
-          for (const placeholder of area.placeholders) {
-            if (placeholder?.position) {
-              foundPositions.push(placeholder.position);
-            }
-          }
-        }
-      }
-
-      placeholderPosition =
-        foundPositions.find(p => p === "front") ||
-        foundPositions.find(p => String(p).includes("front")) ||
-        foundPositions[0] ||
-        "front";
-    }
+    const selectedType = product_type || "Product";
+    const selectedSize = size || variant_size || "";
+    const selectedColor = color || variant_color || "";
+    const selectedNote = note || customer_note || "";
 
     const productPayload = {
-      title: `CHAINVERS ${product_type || "Product"} ${crop_id}`,
+      title: `CHAINVERS ${selectedType} ${crop_id}`,
       description:
         `Unikátny CHAINVERS produkt s panelom ${crop_id}\n\n` +
         `Mode: ${product_mode || ""}\n` +
-        `Typ produktu: ${product_type || ""}\n` +
-        `Veľkosť: ${size || ""}\n` +
-        `Farba: ${color || ""}\n` +
+        `Typ produktu: ${selectedType}\n` +
+        `Veľkosť: ${selectedSize}\n` +
+        `Farba: ${selectedColor}\n` +
         `Fit: ${fit || ""}\n` +
         `Umiestnenie: ${placement || "front"}\n` +
-        `Poznámka: ${note || ""}`,
+        `Poznámka: ${selectedNote}`,
       blueprint_id: finalBlueprintId,
       print_provider_id: providerId,
       variants: [
@@ -428,7 +516,7 @@ export default async function handler(req, res) {
         },
         body: JSON.stringify(productPayload)
       },
-      15000
+      18000
     );
 
     const product = await safeJson(createResp);
@@ -447,6 +535,7 @@ export default async function handler(req, res) {
           duplicate: true,
           mockup_pending: true,
           product: null,
+          product_id: null,
           order: null,
           preview: null,
           preview_url: null,
@@ -456,11 +545,7 @@ export default async function handler(req, res) {
         });
       }
 
-      return res.status(500).json({
-        ok: false,
-        error: "Product creation failed",
-        resp: product
-      });
+      return res.status(500).json({ ok: false, error: "Product creation failed", resp: product });
     }
 
     const preview = extractPreview(product);
@@ -472,6 +557,7 @@ export default async function handler(req, res) {
       order_pending: true,
       mockup_pending: !preview,
       product,
+      product_id: product.id,
       order: null,
       preview,
       preview_url: preview,
@@ -490,15 +576,14 @@ export default async function handler(req, res) {
         variant_title: variant.title || null,
         placeholder: placeholderPosition
       },
-      warning: preview
-        ? null
-        : "Product created. Mockup/order will be available later."
+      selected_variant: {
+        id: variantId,
+        title: variant.title || null
+      },
+      warning: preview ? null : "Product created. Mockup/order will be available later."
     });
 
   } catch (e) {
-    return res.status(500).json({
-      ok: false,
-      error: e.message || String(e)
-    });
+    return res.status(500).json({ ok: false, error: e.message || String(e) });
   }
 }
