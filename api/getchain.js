@@ -17,10 +17,16 @@ export default async function handler(req, res) {
     let body = req.body || {};
 
     if (typeof body === "string") {
-      try { body = JSON.parse(body); } catch { body = {}; }
+      try {
+        body = JSON.parse(body);
+      } catch {
+        body = {};
+      }
     }
 
-    const action = body.action || "create_product";
+    const action =
+      body.action ||
+      ((!body.crop_id && !body.image_url) ? "mockchain_catalog" : "create_product");
 
     const authHeader = {
       Authorization: `Bearer ${PRINTIFY_API_KEY}`
@@ -40,7 +46,11 @@ export default async function handler(req, res) {
       const timer = setTimeout(() => controller.abort(), timeoutMs);
 
       try {
-        const resp = await fetch(url, { ...options, signal: controller.signal });
+        const resp = await fetch(url, {
+          ...options,
+          signal: controller.signal
+        });
+
         clearTimeout(timer);
         return resp;
       } catch (e) {
@@ -79,7 +89,11 @@ export default async function handler(req, res) {
     }
 
     function uniqueClean(arr) {
-      return [...new Set((arr || []).map(v => String(v || "").trim()).filter(Boolean))];
+      return [...new Set(
+        (arr || [])
+          .map(v => String(v || "").trim())
+          .filter(Boolean)
+      )];
     }
 
     function splitVariantTitle(title = "") {
@@ -91,7 +105,8 @@ export default async function handler(req, res) {
       let size = "";
       let color = "";
 
-      const sizeRe = /^(XS|S|M|L|XL|2XL|3XL|4XL|5XL|6XL|7XL|8XL|9XL|10XL|One size|11oz|12oz|15oz|16x24|18x24|24x36)$/i;
+      const sizeRe =
+        /^(XS|S|M|L|XL|2XL|3XL|4XL|5XL|6XL|7XL|8XL|9XL|10XL|One size|11oz|12oz|15oz|16x24|18x24|24x36)$/i;
 
       for (const p of parts) {
         if (!size && sizeRe.test(p)) size = p;
@@ -115,17 +130,26 @@ export default async function handler(req, res) {
 
     function detectMode(title = "") {
       const t = String(title).toLowerCase();
-      if (t.includes("all over") || t.includes("aop") || t.includes("cut & sew") || t.includes("premium")) {
+
+      if (
+        t.includes("all over") ||
+        t.includes("aop") ||
+        t.includes("cut & sew") ||
+        t.includes("premium")
+      ) {
         return "premium";
       }
+
       return "simple";
     }
 
     function detectFit(title = "") {
       const t = String(title).toLowerCase();
+
       if (t.includes("women")) return "Women";
       if (t.includes("men")) return "Men";
       if (t.includes("unisex")) return "Unisex";
+
       return "Regular";
     }
 
@@ -139,9 +163,12 @@ export default async function handler(req, res) {
       }
 
       const out = [];
+
       if (positions.some(p => p.includes("front"))) out.push("Predok stred");
       if (positions.some(p => p.includes("back"))) out.push("Zadná strana");
-      if (positions.some(p => p.includes("all") || p.includes("front") || p.includes("back"))) out.push("All-over / Premium");
+      if (positions.some(p => p.includes("all") || p.includes("front") || p.includes("back"))) {
+        out.push("All-over / Premium");
+      }
 
       return uniqueClean(out.length ? out : ["Predok stred"]);
     }
@@ -157,14 +184,27 @@ export default async function handler(req, res) {
       }
 
       if (wanted.includes("back")) {
-        return positions.find(p => p === "back") || positions.find(p => p.includes("back")) || "back";
+        return (
+          positions.find(p => p === "back") ||
+          positions.find(p => p.includes("back")) ||
+          "back"
+        );
       }
 
       if (wanted.includes("all")) {
-        return positions.find(p => p.includes("front")) || positions[0] || "front";
+        return (
+          positions.find(p => p.includes("front")) ||
+          positions[0] ||
+          "front"
+        );
       }
 
-      return positions.find(p => p === "front") || positions.find(p => p.includes("front")) || positions[0] || "front";
+      return (
+        positions.find(p => p === "front") ||
+        positions.find(p => p.includes("front")) ||
+        positions[0] ||
+        "front"
+      );
     }
 
     async function loadBlueprints() {
@@ -218,7 +258,7 @@ export default async function handler(req, res) {
     if (action === "ping") {
       return res.status(200).json({
         ok: true,
-        version: "chainvers-getchain-mockchain-catalog-v3"
+        version: "chainvers-getchain-mockchain-catalog-v4"
       });
     }
 
@@ -235,19 +275,28 @@ export default async function handler(req, res) {
       const { blueprint_id } = body;
 
       if (!blueprint_id) {
-        return res.status(400).json({ ok: false, error: "Missing blueprint_id" });
+        return res.status(400).json({
+          ok: false,
+          error: "Missing blueprint_id"
+        });
       }
 
       const providers = await loadProviders(blueprint_id);
 
-      return res.status(200).json({ ok: true, providers });
+      return res.status(200).json({
+        ok: true,
+        providers
+      });
     }
 
     if (action === "variants") {
       const { blueprint_id, print_provider_id } = body;
 
       if (!blueprint_id || !print_provider_id) {
-        return res.status(400).json({ ok: false, error: "Missing blueprint_id or print_provider_id" });
+        return res.status(400).json({
+          ok: false,
+          error: "Missing blueprint_id or print_provider_id"
+        });
       }
 
       const variantsData = await loadVariants(blueprint_id, print_provider_id);
@@ -265,6 +314,7 @@ export default async function handler(req, res) {
       const wanted = blueprints
         .filter(bp => {
           const t = String(bp.title || "").toLowerCase();
+
           return (
             t.includes("t-shirt") ||
             t.includes("shirt") ||
@@ -285,14 +335,19 @@ export default async function handler(req, res) {
         try {
           const providers = await loadProviders(bp.id);
           const provider = providers?.[0];
+
           if (!provider?.id) continue;
 
           const variantsData = await loadVariants(bp.id, provider.id);
-          const variants = Array.isArray(variantsData.variants) ? variantsData.variants : [];
+          const variants = Array.isArray(variantsData.variants)
+            ? variantsData.variants
+            : [];
+
           if (!variants.length) continue;
 
           const normalizedVariants = variants.slice(0, 250).map(v => {
             const sp = splitVariantTitle(v.title || "");
+
             return {
               id: v.id,
               title: v.title || `Variant ${v.id}`,
@@ -309,14 +364,19 @@ export default async function handler(req, res) {
             blueprint_id: bp.id,
             blueprint_title: bp.title || `Blueprint ${bp.id}`,
             print_provider_id: provider.id,
-            print_provider_title: provider.title || provider.name || `Provider ${provider.id}`,
+            print_provider_title:
+              provider.title ||
+              provider.name ||
+              `Provider ${provider.id}`,
             variants: normalizedVariants,
             sizes: uniqueClean(normalizedVariants.map(v => v.size)),
             colors: uniqueClean(normalizedVariants.map(v => v.color)),
             fits: uniqueClean([detectFit(bp.title), "Regular"]),
             placements: detectPlacements(variantsData.print_areas || [])
           });
-        } catch (e) {}
+        } catch (e) {
+          continue;
+        }
       }
 
       return res.status(200).json({
@@ -330,7 +390,10 @@ export default async function handler(req, res) {
       const { product_id } = body;
 
       if (!product_id) {
-        return res.status(400).json({ ok: false, error: "Missing product_id" });
+        return res.status(400).json({
+          ok: false,
+          error: "Missing product_id"
+        });
       }
 
       const shopId = await getShopId();
@@ -344,7 +407,11 @@ export default async function handler(req, res) {
       const product = await safeJson(productResp);
 
       if (!productResp.ok || !product?.id) {
-        return res.status(500).json({ ok: false, error: "Product fetch failed", resp: product });
+        return res.status(500).json({
+          ok: false,
+          error: "Product fetch failed",
+          resp: product
+        });
       }
 
       const preview = extractPreview(product);
@@ -380,13 +447,20 @@ export default async function handler(req, res) {
     } = body;
 
     if (!crop_id || !image_url) {
-      return res.status(400).json({ ok: false, error: "Missing crop_id or image_url" });
+      return res.status(400).json({
+        ok: false,
+        error: "Missing crop_id or image_url"
+      });
     }
 
     const externalId = `chainvers_${crop_id}_${Date.now()}`;
     const shopId = await getShopId();
 
-    const imageResp = await fetchWithTimeout(image_url, {}, 8000);
+    const imageResp = await fetchWithTimeout(
+      image_url,
+      {},
+      8000
+    );
 
     if (!imageResp.ok) {
       return res.status(500).json({
@@ -419,7 +493,11 @@ export default async function handler(req, res) {
     const uploadData = await safeJson(uploadResp);
 
     if (!uploadResp.ok || !uploadData.id) {
-      return res.status(500).json({ ok: false, error: "Upload failed", resp: uploadData });
+      return res.status(500).json({
+        ok: false,
+        error: "Upload failed",
+        resp: uploadData
+      });
     }
 
     const finalBlueprintId = Number(blueprint_id || 9);
@@ -428,11 +506,17 @@ export default async function handler(req, res) {
     const providerId = Number(print_provider_id || providers?.[0]?.id);
 
     if (!providerId) {
-      return res.status(500).json({ ok: false, error: "No provider found", resp: providers });
+      return res.status(500).json({
+        ok: false,
+        error: "No provider found",
+        resp: providers
+      });
     }
 
     const variantsData = await loadVariants(finalBlueprintId, providerId);
-    const variants = Array.isArray(variantsData.variants) ? variantsData.variants : [];
+    const variants = Array.isArray(variantsData.variants)
+      ? variantsData.variants
+      : [];
 
     let variant = null;
 
@@ -446,18 +530,31 @@ export default async function handler(req, res) {
     if (!variant && (wantedSize || wantedColor)) {
       variant = variants.find(v => {
         const title = String(v.title || "").toLowerCase();
-        return (!wantedSize || title.includes(wantedSize)) && (!wantedColor || title.includes(wantedColor));
+
+        return (
+          (!wantedSize || title.includes(wantedSize)) &&
+          (!wantedColor || title.includes(wantedColor))
+        );
       });
     }
 
-    if (!variant) variant = variants[0] || null;
+    if (!variant) {
+      variant = variants[0] || null;
+    }
 
     if (!variant) {
-      return res.status(500).json({ ok: false, error: "No variant found", resp: variantsData });
+      return res.status(500).json({
+        ok: false,
+        error: "No variant found",
+        resp: variantsData
+      });
     }
 
     const variantId = Number(variant.id);
-    const placeholderPosition = placementToPosition(placement, variantsData.print_areas || []);
+    const placeholderPosition = placementToPosition(
+      placement,
+      variantsData.print_areas || []
+    );
 
     const selectedType = product_type || "Product";
     const selectedSize = size || variant_size || "";
@@ -523,6 +620,7 @@ export default async function handler(req, res) {
 
     if (!createResp.ok || !product.id) {
       const rawText = JSON.stringify(product);
+
       const duplicate =
         rawText.toLowerCase().includes("already exists") ||
         rawText.includes("8100") ||
@@ -545,7 +643,11 @@ export default async function handler(req, res) {
         });
       }
 
-      return res.status(500).json({ ok: false, error: "Product creation failed", resp: product });
+      return res.status(500).json({
+        ok: false,
+        error: "Product creation failed",
+        resp: product
+      });
     }
 
     const preview = extractPreview(product);
@@ -580,10 +682,15 @@ export default async function handler(req, res) {
         id: variantId,
         title: variant.title || null
       },
-      warning: preview ? null : "Product created. Mockup/order will be available later."
+      warning: preview
+        ? null
+        : "Product created. Mockup/order will be available later."
     });
 
   } catch (e) {
-    return res.status(500).json({ ok: false, error: e.message || String(e) });
+    return res.status(500).json({
+      ok: false,
+      error: e.message || String(e)
+    });
   }
 }
