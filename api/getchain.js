@@ -14,7 +14,16 @@ export default async function handler(req, res) {
   }
 
   try {
-    const body = req.body || {};
+    let body = req.body || {};
+
+    if (typeof body === "string") {
+      try {
+        body = JSON.parse(body);
+      } catch {
+        body = {};
+      }
+    }
+
     const action = body.action || "create_product";
 
     const authHeader = {
@@ -42,17 +51,45 @@ export default async function handler(req, res) {
 
         clearTimeout(timer);
         return resp;
-
       } catch (e) {
         clearTimeout(timer);
         throw new Error(`Timeout/fetch failed: ${url} :: ${e.message}`);
       }
     }
 
+    async function getShopId() {
+      const shopsResp = await fetchWithTimeout(
+        "https://api.printify.com/v1/shops.json",
+        { headers: authHeader },
+        8000
+      );
+
+      const shops = await safeJson(shopsResp);
+      const shopId = shops?.[0]?.id;
+
+      if (!shopId) {
+        throw new Error(`No shop found: ${JSON.stringify(shops)}`);
+      }
+
+      return shopId;
+    }
+
+    function extractPreview(product) {
+      if (Array.isArray(product?.images) && product.images.length) {
+        return product.images[0]?.src || product.images[0]?.url || null;
+      }
+
+      if (Array.isArray(product?.mockups) && product.mockups.length) {
+        return product.mockups[0]?.src || product.mockups[0]?.url || null;
+      }
+
+      return null;
+    }
+
     if (action === "ping") {
       return res.status(200).json({
         ok: true,
-        version: "chainvers-getchain-catalog-v1"
+        version: "chainvers-getchain-catalog-v2"
       });
     }
 
@@ -144,6 +181,46 @@ export default async function handler(req, res) {
       });
     }
 
+    if (action === "preview_status") {
+      const { product_id } = body;
+
+      if (!product_id) {
+        return res.status(400).json({
+          ok: false,
+          error: "Missing product_id"
+        });
+      }
+
+      const shopId = await getShopId();
+
+      const productResp = await fetchWithTimeout(
+        `https://api.printify.com/v1/shops/${shopId}/products/${product_id}.json`,
+        { headers: authHeader },
+        12000
+      );
+
+      const product = await safeJson(productResp);
+
+      if (!productResp.ok || !product?.id) {
+        return res.status(500).json({
+          ok: false,
+          error: "Product fetch failed",
+          resp: product
+        });
+      }
+
+      const preview = extractPreview(product);
+
+      return res.status(200).json({
+        ok: true,
+        product,
+        preview,
+        preview_url: preview,
+        mockup_pending: !preview,
+        printify_status: preview ? "mockup_ready" : "mockup_pending"
+      });
+    }
+
     const {
       crop_id,
       image_url,
@@ -169,22 +246,7 @@ export default async function handler(req, res) {
 
     const externalId = `chainvers_${crop_id}_${Date.now()}`;
 
-    const shopsResp = await fetchWithTimeout(
-      "https://api.printify.com/v1/shops.json",
-      { headers: authHeader },
-      8000
-    );
-
-    const shops = await safeJson(shopsResp);
-    const shopId = shops?.[0]?.id;
-
-    if (!shopId) {
-      return res.status(500).json({
-        ok: false,
-        error: "No shop found",
-        resp: shops
-      });
-    }
+    const shopId = await getShopId();
 
     const imageResp = await fetchWithTimeout(
       image_url,
@@ -401,21 +463,7 @@ export default async function handler(req, res) {
       });
     }
 
-    let preview = null;
-
-    if (Array.isArray(product.images) && product.images.length) {
-      preview =
-        product.images[0]?.src ||
-        product.images[0]?.url ||
-        null;
-    }
-
-    if (!preview && Array.isArray(product.mockups) && product.mockups.length) {
-      preview =
-        product.mockups[0]?.src ||
-        product.mockups[0]?.url ||
-        null;
-    }
+    const preview = extractPreview(product);
 
     return res.status(200).json({
       ok: true,
