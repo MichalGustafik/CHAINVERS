@@ -3,7 +3,6 @@
 export const maxDuration = 60;
 
 export default async function handler(req, res) {
-
   const origin = req.headers.origin || "";
 
   const allowedOrigins = [
@@ -19,8 +18,8 @@ export default async function handler(req, res) {
     res.setHeader("Access-Control-Allow-Origin", "*");
   }
 
-  res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
+  res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Requested-With");
   res.setHeader("Access-Control-Max-Age", "86400");
 
   if (req.method === "OPTIONS") {
@@ -30,11 +29,25 @@ export default async function handler(req, res) {
   const { PRINTIFY_API_KEY } = process.env;
 
   if (!PRINTIFY_API_KEY) {
-    return res.status(500).json({ ok: false, error: "Missing PRINTIFY_API_KEY" });
+    return res.status(500).json({
+      ok: false,
+      error: "Missing PRINTIFY_API_KEY"
+    });
+  }
+
+  if (req.method === "GET") {
+    return res.status(200).json({
+      ok: true,
+      message: "CHAINVERS getchain endpoint is running",
+      version: "chainvers-printify-universal-catalog-v1"
+    });
   }
 
   if (req.method !== "POST") {
-    return res.status(405).json({ ok: false, error: "Method not allowed" });
+    return res.status(405).json({
+      ok: false,
+      error: "Method not allowed"
+    });
   }
 
   try {
@@ -58,6 +71,7 @@ export default async function handler(req, res) {
 
     async function safeJson(resp) {
       const text = await resp.text();
+
       try {
         return JSON.parse(text);
       } catch {
@@ -65,7 +79,7 @@ export default async function handler(req, res) {
       }
     }
 
-    async function fetchWithTimeout(url, options = {}, timeoutMs = 9000) {
+    async function fetchWithTimeout(url, options = {}, timeoutMs = 12000) {
       const controller = new AbortController();
       const timer = setTimeout(() => controller.abort(), timeoutMs);
 
@@ -87,7 +101,7 @@ export default async function handler(req, res) {
       const shopsResp = await fetchWithTimeout(
         "https://api.printify.com/v1/shops.json",
         { headers: authHeader },
-        8000
+        9000
       );
 
       const shops = await safeJson(shopsResp);
@@ -125,11 +139,13 @@ export default async function handler(req, res) {
     }
 
     function uniqueClean(arr) {
-      return [...new Set(
-        (arr || [])
-          .map(v => String(v || "").trim())
-          .filter(Boolean)
-      )];
+      return [
+        ...new Set(
+          (arr || [])
+            .map(v => String(v || "").trim())
+            .filter(Boolean)
+        )
+      ];
     }
 
     function splitVariantTitle(title = "") {
@@ -145,7 +161,9 @@ export default async function handler(req, res) {
         /^(XS|S|M|L|XL|2XL|3XL|4XL|5XL|6XL|7XL|8XL|9XL|10XL|One size|11oz|12oz|15oz|16x24|18x24|24x36)$/i;
 
       for (const p of parts) {
-        if (!size && sizeRe.test(p)) size = p;
+        if (!size && sizeRe.test(p)) {
+          size = p;
+        }
       }
 
       for (const p of parts) {
@@ -179,7 +197,27 @@ export default async function handler(req, res) {
         t.includes("zipper") ||
         t.includes("full zip") ||
         t.includes("full-zip") ||
-        t.includes("zip hoodie")
+        t.includes("hoodie") ||
+        t.includes("hooded") ||
+        t.includes("sweatshirt")
+      );
+    }
+
+    function isAllowedProduct(bp) {
+      const t = String(bp.title || "").toLowerCase();
+
+      if (isBadBlueprint(bp)) {
+        return false;
+      }
+
+      return (
+        t.includes("t-shirt") ||
+        t.includes("shirt") ||
+        t.includes("tee") ||
+        t.includes("tank") ||
+        t.includes("top") ||
+        t.includes("long sleeve") ||
+        t.includes("sleeveless")
       );
     }
 
@@ -189,7 +227,9 @@ export default async function handler(req, res) {
 
       for (const area of printAreas || []) {
         for (const p of area?.placeholders || []) {
-          if (p?.position) positions.push(String(p.position));
+          if (p?.position) {
+            positions.push(String(p.position));
+          }
         }
       }
 
@@ -209,71 +249,11 @@ export default async function handler(req, res) {
       );
     }
 
-    function findBestBlueprint(blueprints, type) {
-      const wanted = String(type || "").toLowerCase();
-      const cleanBlueprints = blueprints.filter(bp => !isBadBlueprint(bp));
-
-      let rules = [];
-
-      if (wanted === "tricko" || wanted === "tričko") {
-        rules = [
-          "unisex garment-dyed t-shirt",
-          "unisex t-shirt",
-          "jersey short sleeve",
-          "cotton t-shirt",
-          "t-shirt"
-        ];
-      }
-
-      if (wanted === "mikina") {
-        rules = [
-          "unisex heavy blend hooded sweatshirt",
-          "unisex hoodie",
-          "hooded sweatshirt",
-          "heavy blend hooded sweatshirt",
-          "hoodie",
-          "sweatshirt"
-        ];
-      }
-
-      if (wanted === "tielko") {
-        rules = [
-          "tank top",
-          "unisex tank",
-          "jersey tank",
-          "men's softstyle tank top",
-          "women's ideal racerback"
-        ];
-      }
-
-      for (const rule of rules) {
-        const found = cleanBlueprints.find(bp =>
-          String(bp.title || "").toLowerCase().includes(rule)
-        );
-
-        if (found) return found;
-      }
-
-      return cleanBlueprints.find(bp => {
-        const t = String(bp.title || "").toLowerCase();
-
-        if (wanted === "mikina") {
-          return t.includes("hoodie") || t.includes("sweatshirt");
-        }
-
-        if (wanted === "tielko") {
-          return t.includes("tank");
-        }
-
-        return t.includes("t-shirt") || t.includes("shirt");
-      }) || cleanBlueprints[0] || blueprints[0] || null;
-    }
-
     async function loadBlueprints() {
       const resp = await fetchWithTimeout(
         "https://api.printify.com/v1/catalog/blueprints.json",
         { headers: authHeader },
-        12000
+        15000
       );
 
       const data = await safeJson(resp);
@@ -317,20 +297,25 @@ export default async function handler(req, res) {
       return data || {};
     }
 
-    async function normalizeProduct(blueprint, forcedLabel) {
+    async function normalizeProduct(blueprint) {
       const providers = await loadProviders(blueprint.id);
       const provider = providers?.[0];
 
-      if (!provider?.id) return null;
+      if (!provider?.id) {
+        return null;
+      }
 
       const variantsData = await loadVariants(blueprint.id, provider.id);
+
       const variants = Array.isArray(variantsData.variants)
         ? variantsData.variants
         : [];
 
-      if (!variants.length) return null;
+      if (!variants.length) {
+        return null;
+      }
 
-      const normalizedVariants = variants.slice(0, 250).map(v => {
+      const normalizedVariants = variants.slice(0, 300).map(v => {
         const sp = splitVariantTitle(v.title || "");
 
         return {
@@ -344,7 +329,7 @@ export default async function handler(req, res) {
 
       return {
         key: `${blueprint.id}_${provider.id}`,
-        label: forcedLabel,
+        label: blueprint.title || `Printify produkt ${blueprint.id}`,
         blueprint_id: blueprint.id,
         blueprint_title: blueprint.title || `Blueprint ${blueprint.id}`,
         print_provider_id: provider.id,
@@ -355,35 +340,82 @@ export default async function handler(req, res) {
         thumbnail: extractBlueprintThumb(blueprint),
         variants: normalizedVariants,
         sizes: uniqueClean(normalizedVariants.map(v => v.size)),
-        colors: uniqueClean(normalizedVariants.map(v => v.color))
+        colors: uniqueClean(normalizedVariants.map(v => v.color)),
+        print_areas: variantsData.print_areas || []
       };
     }
 
     if (action === "ping") {
       return res.status(200).json({
         ok: true,
-        version: "chainvers-getchain-hoodie-no-zip-v1"
+        cors: true,
+        timestamp: Date.now(),
+        version: "chainvers-printify-universal-catalog-v1"
+      });
+    }
+
+    if (action === "catalog") {
+      const blueprints = await loadBlueprints();
+
+      return res.status(200).json({
+        ok: true,
+        blueprints
+      });
+    }
+
+    if (action === "providers") {
+      const { blueprint_id } = body;
+
+      if (!blueprint_id) {
+        return res.status(400).json({
+          ok: false,
+          error: "Missing blueprint_id"
+        });
+      }
+
+      const providers = await loadProviders(blueprint_id);
+
+      return res.status(200).json({
+        ok: true,
+        providers
+      });
+    }
+
+    if (action === "variants") {
+      const { blueprint_id, print_provider_id } = body;
+
+      if (!blueprint_id || !print_provider_id) {
+        return res.status(400).json({
+          ok: false,
+          error: "Missing blueprint_id or print_provider_id"
+        });
+      }
+
+      const variantsData = await loadVariants(blueprint_id, print_provider_id);
+
+      return res.status(200).json({
+        ok: true,
+        variants: variantsData.variants || [],
+        print_areas: variantsData.print_areas || []
       });
     }
 
     if (action === "mockchain_catalog") {
       const blueprints = await loadBlueprints();
 
-      const defs = [
-        { label: "Tričko", type: "tričko" },
-        { label: "Mikina", type: "mikina" },
-        { label: "Tielko", type: "tielko" }
-      ];
+      const wanted = blueprints
+        .filter(bp => isAllowedProduct(bp))
+        .slice(0, 24);
 
       const products = [];
 
-      for (const def of defs) {
+      for (const bp of wanted) {
         try {
-          const bp = findBestBlueprint(blueprints, def.type);
-          if (!bp?.id) continue;
+          const product = await normalizeProduct(bp);
 
-          const product = await normalizeProduct(bp, def.label);
-          if (product) products.push(product);
+          if (product) {
+            products.push(product);
+          }
         } catch (e) {
           continue;
         }
@@ -393,6 +425,47 @@ export default async function handler(req, res) {
         ok: true,
         products,
         count: products.length
+      });
+    }
+
+    if (action === "preview_status") {
+      const { product_id } = body;
+
+      if (!product_id) {
+        return res.status(400).json({
+          ok: false,
+          error: "Missing product_id"
+        });
+      }
+
+      const shopId = await getShopId();
+
+      const productResp = await fetchWithTimeout(
+        `https://api.printify.com/v1/shops/${shopId}/products/${product_id}.json`,
+        { headers: authHeader },
+        12000
+      );
+
+      const product = await safeJson(productResp);
+
+      if (!productResp.ok || !product?.id) {
+        return res.status(500).json({
+          ok: false,
+          error: "Product fetch failed",
+          resp: product
+        });
+      }
+
+      const preview = extractPreview(product);
+
+      return res.status(200).json({
+        ok: true,
+        product,
+        product_id: product.id,
+        preview,
+        preview_url: preview,
+        mockup_pending: !preview,
+        printify_status: preview ? "mockup_ready" : "mockup_pending"
       });
     }
 
@@ -422,7 +495,11 @@ export default async function handler(req, res) {
     const externalId = `chainvers_${crop_id}_${Date.now()}`;
     const shopId = await getShopId();
 
-    const imageResp = await fetchWithTimeout(image_url, {}, 8000);
+    const imageResp = await fetchWithTimeout(
+      image_url,
+      {},
+      10000
+    );
 
     if (!imageResp.ok) {
       return res.status(500).json({
@@ -449,7 +526,7 @@ export default async function handler(req, res) {
           contents: imageBase64
         })
       },
-      15000
+      20000
     );
 
     const uploadData = await safeJson(uploadResp);
@@ -476,6 +553,7 @@ export default async function handler(req, res) {
     }
 
     const variantsData = await loadVariants(finalBlueprintId, providerId);
+
     const variants = Array.isArray(variantsData.variants)
       ? variantsData.variants
       : [];
@@ -513,9 +591,16 @@ export default async function handler(req, res) {
     }
 
     const variantId = Number(variant.id);
-    const placeholderPosition = placementToPosition("front", variantsData.print_areas || []);
+    const placeholderPosition = placementToPosition(
+      "front",
+      variantsData.print_areas || []
+    );
 
-    const selectedType = product_type || "Product";
+    const selectedType =
+      product_type ||
+      body.blueprint_title ||
+      "CHAINVERS Printify produkt";
+
     const selectedSize = size || variant_size || "";
     const selectedColor = color || variant_color || "";
     const selectedNote = note || customer_note || "";
@@ -524,7 +609,7 @@ export default async function handler(req, res) {
       title: `CHAINVERS ${selectedType} ${crop_id}`,
       description:
         `Unikátny CHAINVERS produkt s panelom ${crop_id}\n\n` +
-        `Typ produktu: ${selectedType}\n` +
+        `Printify produkt: ${selectedType}\n` +
         `Veľkosť: ${selectedSize}\n` +
         `Farba: ${selectedColor}\n` +
         `Umiestnenie: Predok stred\n` +
@@ -570,7 +655,7 @@ export default async function handler(req, res) {
         },
         body: JSON.stringify(productPayload)
       },
-      18000
+      22000
     );
 
     const product = await safeJson(createResp);
@@ -600,7 +685,10 @@ export default async function handler(req, res) {
         variant_id: variantId,
         variant_title: variant.title || null,
         placeholder: placeholderPosition
-      }
+      },
+      warning: preview
+        ? null
+        : "Product created. Mockup may need a few seconds to become available."
     });
 
   } catch (e) {
