@@ -1,5 +1,3 @@
-// FILE: /api/getchain.js
-
 export const maxDuration = 60;
 
 export default async function handler(req, res) {
@@ -20,68 +18,45 @@ export default async function handler(req, res) {
   res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
   res.setHeader("Access-Control-Max-Age", "86400");
 
-  if (req.method === "OPTIONS") {
-    return res.status(204).end();
-  }
+  if (req.method === "OPTIONS") return res.status(204).end();
 
   const { PRINTIFY_API_KEY } = process.env;
 
   if (!PRINTIFY_API_KEY) {
-    return res.status(500).json({
-      ok: false,
-      error: "Missing PRINTIFY_API_KEY"
-    });
+    return res.status(500).json({ ok: false, error: "Missing PRINTIFY_API_KEY" });
   }
 
   if (req.method === "GET") {
     return res.status(200).json({
       ok: true,
-      version: "chainvers-getchain-simple-2-products-v1"
+      version: "chainvers-getchain-simple-2-products-v2"
     });
   }
 
   if (req.method !== "POST") {
-    return res.status(405).json({
-      ok: false,
-      error: "Method not allowed"
-    });
+    return res.status(405).json({ ok: false, error: "Method not allowed" });
   }
 
   try {
     let body = req.body || {};
 
     if (typeof body === "string") {
-      try {
-        body = JSON.parse(body);
-      } catch {
-        body = {};
-      }
+      try { body = JSON.parse(body); } catch { body = {}; }
     }
 
     const action = body.action || "create_product";
-
-    const authHeader = {
-      Authorization: `Bearer ${PRINTIFY_API_KEY}`
-    };
+    const authHeader = { Authorization: `Bearer ${PRINTIFY_API_KEY}` };
 
     async function safeJson(resp) {
       const text = await resp.text();
-      try {
-        return JSON.parse(text);
-      } catch {
-        return { raw: text };
-      }
+      try { return JSON.parse(text); } catch { return { raw: text }; }
     }
 
     async function fetchWithTimeout(url, options = {}, timeoutMs = 12000) {
       const controller = new AbortController();
       const timer = setTimeout(() => controller.abort(), timeoutMs);
-
       try {
-        const resp = await fetch(url, {
-          ...options,
-          signal: controller.signal
-        });
+        const resp = await fetch(url, { ...options, signal: controller.signal });
         clearTimeout(timer);
         return resp;
       } catch (e) {
@@ -100,10 +75,7 @@ export default async function handler(req, res) {
       const data = await safeJson(resp);
       const shopId = data?.[0]?.id;
 
-      if (!resp.ok || !shopId) {
-        throw new Error("Printify shop not found");
-      }
-
+      if (!resp.ok || !shopId) throw new Error("Printify shop not found");
       return shopId;
     }
 
@@ -116,10 +88,7 @@ export default async function handler(req, res) {
 
       const data = await safeJson(resp);
 
-      if (!resp.ok || !Array.isArray(data)) {
-        throw new Error("Printify catalog failed");
-      }
-
+      if (!resp.ok || !Array.isArray(data)) throw new Error("Printify catalog failed");
       return data;
     }
 
@@ -132,10 +101,7 @@ export default async function handler(req, res) {
 
       const data = await safeJson(resp);
 
-      if (!resp.ok || !Array.isArray(data)) {
-        throw new Error("Printify providers failed");
-      }
-
+      if (!resp.ok || !Array.isArray(data)) throw new Error("Printify providers failed");
       return data;
     }
 
@@ -148,10 +114,7 @@ export default async function handler(req, res) {
 
       const data = await safeJson(resp);
 
-      if (!resp.ok) {
-        throw new Error("Printify variants failed");
-      }
-
+      if (!resp.ok) throw new Error("Printify variants failed");
       return data || {};
     }
 
@@ -178,10 +141,7 @@ export default async function handler(req, res) {
       return (
         !isBadProduct(t) &&
         t.includes("unisex") &&
-        (
-          t.includes("t-shirt") ||
-          t.includes("tee")
-        )
+        (t.includes("t-shirt") || t.includes("tee"))
       );
     }
 
@@ -191,10 +151,7 @@ export default async function handler(req, res) {
       return (
         !isBadProduct(t) &&
         t.includes("unisex") &&
-        (
-          t.includes("tank") ||
-          t.includes("sleeveless")
-        )
+        (t.includes("tank") || t.includes("sleeveless"))
       );
     }
 
@@ -207,18 +164,11 @@ export default async function handler(req, res) {
     }
 
     function unique(arr) {
-      return [...new Set(
-        (arr || [])
-          .map(v => String(v || "").trim())
-          .filter(Boolean)
-      )];
+      return [...new Set((arr || []).map(v => String(v || "").trim()).filter(Boolean))];
     }
 
     function splitVariant(title = "") {
-      const parts = String(title)
-        .split(/[\/|,]/g)
-        .map(v => v.trim())
-        .filter(Boolean);
+      const parts = String(title).split(/[\/|,]/g).map(v => v.trim()).filter(Boolean);
 
       let size = "";
       let color = "";
@@ -286,7 +236,6 @@ export default async function handler(req, res) {
 
       const normalized = variants.map(v => {
         const split = splitVariant(v.title || "");
-
         return {
           id: v.id,
           title: v.title || `Variant ${v.id}`,
@@ -329,21 +278,14 @@ export default async function handler(req, res) {
         if (product) products.push(product);
       }
 
-      return res.status(200).json({
-        ok: true,
-        products,
-        count: products.length
-      });
+      return res.status(200).json({ ok: true, products, count: products.length });
     }
 
     if (action === "preview_status") {
       const { product_id } = body;
 
       if (!product_id) {
-        return res.status(400).json({
-          ok: false,
-          error: "Missing product_id"
-        });
+        return res.status(400).json({ ok: false, error: "Missing product_id" });
       }
 
       const shopId = await getShopId();
@@ -384,8 +326,7 @@ export default async function handler(req, res) {
       variant_id,
       product_type,
       size,
-      color,
-      note
+      color
     } = body;
 
     if (!crop_id || !image_url) {
@@ -397,11 +338,7 @@ export default async function handler(req, res) {
 
     const shopId = await getShopId();
 
-    const imageResp = await fetchWithTimeout(
-      image_url,
-      {},
-      10000
-    );
+    const imageResp = await fetchWithTimeout(image_url, {}, 10000);
 
     if (!imageResp.ok) {
       return res.status(500).json({
@@ -441,14 +378,8 @@ export default async function handler(req, res) {
       });
     }
 
-    const variantsData = await loadVariants(
-      blueprint_id,
-      print_provider_id
-    );
-
-    const variants = Array.isArray(variantsData.variants)
-      ? variantsData.variants
-      : [];
+    const variantsData = await loadVariants(blueprint_id, print_provider_id);
+    const variants = Array.isArray(variantsData.variants) ? variantsData.variants : [];
 
     const selectedVariant =
       variants.find(v => String(v.id) === String(variant_id)) ||
@@ -462,9 +393,7 @@ export default async function handler(req, res) {
       });
     }
 
-    const placeholder = frontPlaceholder(
-      variantsData.print_areas || []
-    );
+    const placeholder = frontPlaceholder(variantsData.print_areas || []);
 
     const productPayload = {
       title: `CHAINVERS ${product_type || "Printify produkt"} ${crop_id}`,
@@ -472,8 +401,7 @@ export default async function handler(req, res) {
         `CHAINVERS produkt\n\n` +
         `Typ produktu: ${product_type || ""}\n` +
         `Veľkosť: ${size || ""}\n` +
-        `Farba: ${color || ""}\n` +
-        `Poznámka: ${note || ""}`,
+        `Farba: ${color || ""}`,
       blueprint_id: Number(blueprint_id),
       print_provider_id: Number(print_provider_id),
       variants: [
