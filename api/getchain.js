@@ -23,33 +23,50 @@ export default async function handler(req, res) {
   const { PRINTIFY_API_KEY } = process.env;
 
   if (!PRINTIFY_API_KEY) {
-    return res.status(500).json({ ok: false, error: "Missing PRINTIFY_API_KEY" });
+    return res.status(500).json({
+      ok: false,
+      error: "Missing PRINTIFY_API_KEY"
+    });
   }
 
   if (req.method === "GET") {
     return res.status(200).json({
       ok: true,
-      version: "chainvers-getchain-full-catalog-images-v1"
+      version: "chainvers-getchain-full-catalog-images-v2-print-position"
     });
   }
 
   if (req.method !== "POST") {
-    return res.status(405).json({ ok: false, error: "Method not allowed" });
+    return res.status(405).json({
+      ok: false,
+      error: "Method not allowed"
+    });
   }
 
   try {
     let body = req.body || {};
 
     if (typeof body === "string") {
-      try { body = JSON.parse(body); } catch { body = {}; }
+      try {
+        body = JSON.parse(body);
+      } catch {
+        body = {};
+      }
     }
 
     const action = body.action || "create_product";
-    const authHeader = { Authorization: `Bearer ${PRINTIFY_API_KEY}` };
+    const authHeader = {
+      Authorization: `Bearer ${PRINTIFY_API_KEY}`
+    };
 
     async function safeJson(resp) {
       const text = await resp.text();
-      try { return JSON.parse(text); } catch { return { raw: text }; }
+
+      try {
+        return JSON.parse(text);
+      } catch {
+        return { raw: text };
+      }
     }
 
     async function fetchWithTimeout(url, options = {}, timeoutMs = 12000) {
@@ -57,13 +74,25 @@ export default async function handler(req, res) {
       const timer = setTimeout(() => controller.abort(), timeoutMs);
 
       try {
-        const resp = await fetch(url, { ...options, signal: controller.signal });
+        const resp = await fetch(url, {
+          ...options,
+          signal: controller.signal
+        });
+
         clearTimeout(timer);
         return resp;
       } catch (e) {
         clearTimeout(timer);
         throw new Error(`Fetch failed: ${e.message}`);
       }
+    }
+
+    function clampNumber(value, min, max, fallback) {
+      const num = Number(value);
+
+      if (!Number.isFinite(num)) return fallback;
+
+      return Math.max(min, Math.min(max, num));
     }
 
     async function getShopId() {
@@ -76,7 +105,10 @@ export default async function handler(req, res) {
       const data = await safeJson(resp);
       const shopId = data?.[0]?.id;
 
-      if (!resp.ok || !shopId) throw new Error("Printify shop not found");
+      if (!resp.ok || !shopId) {
+        throw new Error("Printify shop not found");
+      }
+
       return shopId;
     }
 
@@ -165,7 +197,13 @@ export default async function handler(req, res) {
     }
 
     function unique(arr) {
-      return [...new Set((arr || []).map(v => String(v || "").trim()).filter(Boolean))];
+      return [
+        ...new Set(
+          (arr || [])
+            .map(v => String(v || "").trim())
+            .filter(Boolean)
+        )
+      ];
     }
 
     function splitVariant(title = "") {
@@ -180,7 +218,9 @@ export default async function handler(req, res) {
       const sizeRe = /^(XS|S|M|L|XL|2XL|3XL|4XL|5XL)$/i;
 
       for (const p of parts) {
-        if (!size && sizeRe.test(p)) size = p;
+        if (!size && sizeRe.test(p)) {
+          size = p;
+        }
       }
 
       for (const p of parts) {
@@ -206,7 +246,9 @@ export default async function handler(req, res) {
 
       for (const area of printAreas || []) {
         for (const p of area?.placeholders || []) {
-          if (p?.position) positions.push(String(p.position));
+          if (p?.position) {
+            positions.push(String(p.position));
+          }
         }
       }
 
@@ -235,8 +277,8 @@ export default async function handler(req, res) {
     if (action === "mockchain_catalog") {
       const blueprints = await loadBlueprints();
 
-      const offset = Number(body.offset || 0);
-      const limit = Number(body.limit || 10);
+      const offset = Math.max(0, Number(body.offset || 0));
+      const limit = Math.max(1, Math.min(9, Number(body.limit || 9)));
 
       const products = [];
       let scanned = 0;
@@ -309,7 +351,10 @@ export default async function handler(req, res) {
           });
         }
 
-        const variantsData = await loadVariants(blueprintId, provider.id);
+        const variantsData = await loadVariants(
+          blueprintId,
+          provider.id
+        );
 
         const variants = Array.isArray(variantsData.variants)
           ? variantsData.variants
@@ -323,7 +368,10 @@ export default async function handler(req, res) {
             title: v.title || `Variant ${v.id}`,
             size: split.size,
             color: split.color,
-            is_enabled: v.is_enabled !== false
+            is_enabled: v.is_enabled !== false,
+
+            // Cena z API
+            price: v.price ?? v.cost ?? v.retail_price ?? null
           };
         });
 
@@ -333,14 +381,16 @@ export default async function handler(req, res) {
           ok: true,
           blueprint_id: blueprintId,
           print_provider_id: provider.id,
-          print_provider_title: provider.title || provider.name || `Provider ${provider.id}`,
+          print_provider_title:
+            provider.title ||
+            provider.name ||
+            `Provider ${provider.id}`,
           colors: unique(normalized.map(v => v.color)),
           sizes: unique(normalized.map(v => v.size)),
           images,
           variants: normalized,
           print_areas: variantsData.print_areas || []
         });
-
       } catch (e) {
         return res.status(200).json({
           ok: true,
@@ -357,7 +407,10 @@ export default async function handler(req, res) {
       const { product_id } = body;
 
       if (!product_id) {
-        return res.status(400).json({ ok: false, error: "Missing product_id" });
+        return res.status(400).json({
+          ok: false,
+          error: "Missing product_id"
+        });
       }
 
       const shopId = await getShopId();
@@ -399,7 +452,13 @@ export default async function handler(req, res) {
       variant_id,
       product_type,
       size,
-      color
+      color,
+
+      // hodnoty z prodchain.php
+      print_x,
+      print_y,
+      print_scale,
+      print_angle
     } = body;
 
     if (!crop_id || !image_url) {
@@ -409,9 +468,20 @@ export default async function handler(req, res) {
       });
     }
 
+    if (!blueprint_id || !print_provider_id) {
+      return res.status(400).json({
+        ok: false,
+        error: "Missing product blueprint or provider"
+      });
+    }
+
     const shopId = await getShopId();
 
-    const imageResp = await fetchWithTimeout(image_url, {}, 10000);
+    const imageResp = await fetchWithTimeout(
+      image_url,
+      {},
+      10000
+    );
 
     if (!imageResp.ok) {
       return res.status(500).json({
@@ -451,8 +521,14 @@ export default async function handler(req, res) {
       });
     }
 
-    const variantsData = await loadVariants(blueprint_id, print_provider_id);
-    const variants = Array.isArray(variantsData.variants) ? variantsData.variants : [];
+    const variantsData = await loadVariants(
+      blueprint_id,
+      print_provider_id
+    );
+
+    const variants = Array.isArray(variantsData.variants)
+      ? variantsData.variants
+      : [];
 
     const selectedVariant =
       variants.find(v => String(v.id) === String(variant_id)) ||
@@ -466,17 +542,33 @@ export default async function handler(req, res) {
       });
     }
 
-    const placeholder = frontPlaceholder(variantsData.print_areas || []);
+    const placeholder = frontPlaceholder(
+      variantsData.print_areas || []
+    );
+
+    /*
+      Hodnoty sa ukladajú z prodchain:
+      x/y = pozícia dizajnu
+      scale = veľkosť
+      angle = otočenie
+    */
+    const finalPrintX = clampNumber(print_x, 0, 1, 0.5);
+    const finalPrintY = clampNumber(print_y, 0, 1, 0.5);
+    const finalPrintScale = clampNumber(print_scale, 0.15, 2, 1);
+    const finalPrintAngle = clampNumber(print_angle, -30, 30, 0);
 
     const productPayload = {
       title: `CHAINVERS ${product_type || "Printify produkt"} ${crop_id}`,
+
       description:
         `CHAINVERS produkt\n\n` +
         `Typ produktu: ${product_type || ""}\n` +
         `Veľkosť: ${size || ""}\n` +
         `Farba: ${color || ""}`,
+
       blueprint_id: Number(blueprint_id),
       print_provider_id: Number(print_provider_id),
+
       variants: [
         {
           id: Number(selectedVariant.id),
@@ -484,25 +576,31 @@ export default async function handler(req, res) {
           is_enabled: true
         }
       ],
+
       print_areas: [
         {
           variant_ids: [Number(selectedVariant.id)],
+
           placeholders: [
             {
               position: placeholder,
+
               images: [
                 {
                   id: uploadData.id,
-                  x: 0.5,
-                  y: 0.5,
-                  scale: 1,
-                  angle: 0
+
+                  // presné nastavenie z PRODCHAIN
+                  x: finalPrintX,
+                  y: finalPrintY,
+                  scale: finalPrintScale,
+                  angle: finalPrintAngle
                 }
               ]
             }
           ]
         }
       ],
+
       external_id: `chainvers_${crop_id}_${Date.now()}`
     };
 
@@ -540,15 +638,20 @@ export default async function handler(req, res) {
       images: unique(collectImages(product)),
       printify_product_id: product.id,
       printify_status: "product_created",
+
       selected: {
         blueprint_id,
         print_provider_id,
         variant_id: selectedVariant.id,
         variant_title: selectedVariant.title || null,
-        placeholder
+        placeholder,
+
+        print_x: finalPrintX,
+        print_y: finalPrintY,
+        print_scale: finalPrintScale,
+        print_angle: finalPrintAngle
       }
     });
-
   } catch (e) {
     return res.status(500).json({
       ok: false,
