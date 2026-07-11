@@ -1,123 +1,55 @@
 /*
 ===============================================================================
-CHAINVERS AI BRIDGE
+CHAINVERS GITHUB ↔ INFINITYFREE AI BRIDGE
 ===============================================================================
 
-Tento súbor slúži ako jednoduchá schránka medzi Codexom / AI a InfinityFree PHP.
+Tento súbor je schránka pre Codex / AI.
 
-NEPOTREBUJE:
-- FTP
-- Vercel
-- ENV
-- token
-- API kľúče
+UMIE:
+- požiadať InfinityFree PHP o načítanie súboru
+- požiadať InfinityFree PHP o prepísanie súboru
 
-Súbory reálne číta a zapisuje PHP súbor:
+AKO TO FUNGUJE:
 
-    ai_apply.php
-
--------------------------------------------------------------------------------
-AKO ČÍTANIE FUNGUJE
--------------------------------------------------------------------------------
-
-1. Codex vloží názov súboru do bloku:
-
-   CHAINVERS_READ_REQUEST_START
-   CHAINVERS_READ_REQUEST_END
-
-2. Otvoríš v prehliadači:
+1. Codex upraví tento súbor na GitHube.
+2. Do CHAINVERS_REQUEST vloží request_id, action, file a prípadne content.
+3. Na InfinityFree sa otvorí:
 
    https://chainvers.free.nf/ai_apply.php
 
-3. PHP načíta požadovaný súbor z /htdocs.
+4. PHP načíta tento JS z GitHub RAW URL.
+5. PHP vykoná akciu.
+6. Výsledok uloží do:
 
-4. PHP vloží celý obsah súboru do bloku:
+   https://chainvers.free.nf/ai_result.json
 
-   CHAINVERS_READ_RESULT_START
-   CHAINVERS_READ_RESULT_END
+7. Codex si načíta ai_result.json a vidí výsledok.
 
-5. Codex si potom z tohto JS súboru prečíta celý kód.
-
--------------------------------------------------------------------------------
-AKO ZÁPIS FUNGUJE
--------------------------------------------------------------------------------
-
-1. Codex vloží názov súboru + celý nový kód do bloku:
-
-   CHAINVERS_WRITE_REQUEST_START
-   CHAINVERS_WRITE_REQUEST_END
-
-2. Otvoríš:
-
-   https://chainvers.free.nf/ai_apply.php
-
-3. PHP:
-   - spraví zálohu pôvodného súboru do _ai_backups
-   - prepíše cieľový súbor
-   - vyčistí WRITE_REQUEST blok
-
--------------------------------------------------------------------------------
-DÔLEŽITÉ
--------------------------------------------------------------------------------
-
-Toto je jednoduchý most pre úpravy kódu.
-Po dokončení úprav odporúčam ai_apply.php zmazať alebo premenovať.
-
+DÔLEŽITÉ:
+- request_id musí byť vždy nový.
+- Ak request_id ostane rovnaký, PHP ho druhýkrát nevykoná.
+- PHP bez GitHub tokenu nevie tento JS súbor automaticky vyčistiť.
 ===============================================================================
 */
 
 
 /*
 ===============================================================================
-READ REQUEST
+CHAINVERS_REQUEST
 
-Sem Codex vloží súbor, ktorý chce načítať.
-
-Príklad:
+Príklad READ:
 
 {
+  "request_id": "read_gallery_001",
+  "action": "read",
   "file": "gallery.php"
 }
 
-===============================================================================
-*/
-
-/* CHAINVERS_READ_REQUEST_START
-{
-  "file": ""
-}
-CHAINVERS_READ_REQUEST_END */
-
-
-/*
-===============================================================================
-READ RESULT
-
-Sem PHP vloží načítaný kód zo súboru.
-
-Codex si odtiaľ vezme celý obsah súboru.
-
-===============================================================================
-*/
-
-/* CHAINVERS_READ_RESULT_START
-{
-  "file": "",
-  "content": "",
-  "loaded_at": ""
-}
-CHAINVERS_READ_RESULT_END */
-
-
-/*
-===============================================================================
-WRITE REQUEST
-
-Sem Codex vloží celý nový kód, ktorý sa má zapísať do súboru.
-
-Príklad:
+Príklad WRITE:
 
 {
+  "request_id": "write_gallery_001",
+  "action": "write",
   "file": "gallery.php",
   "content": "<?php\nsession_start();\n\necho 'Nový kód';\n?>"
 }
@@ -125,27 +57,11 @@ Príklad:
 ===============================================================================
 */
 
-/* CHAINVERS_WRITE_REQUEST_START
+/* CHAINVERS_REQUEST_START
 {
+  "request_id": "",
+  "action": "",
   "file": "",
   "content": ""
 }
-CHAINVERS_WRITE_REQUEST_END */
-
-
-/*
-===============================================================================
-LAST ACTION
-
-Sem PHP zapíše poslednú vykonanú akciu.
-
-===============================================================================
-*/
-
-/* CHAINVERS_LAST_ACTION_START
-{
-  "ok": true,
-  "message": "Bridge pripravený.",
-  "actions": []
-}
-CHAINVERS_LAST_ACTION_END */
+CHAINVERS_REQUEST_END */
