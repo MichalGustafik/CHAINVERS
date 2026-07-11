@@ -1,9 +1,9 @@
 /*
 ===============================================================================
-CHAINVERS GITHUB ↔ INFINITYFREE AI BRIDGE
+CHAINVERS AI BRIDGE
 ===============================================================================
 
-Tento súbor je schránka pre Codex / AI.
+Tento súbor je schránka medzi Codexom / AI a InfinityFree.
 
 UMIE:
 - požiadať InfinityFree PHP o načítanie súboru
@@ -13,39 +13,43 @@ AKO TO FUNGUJE:
 
 1. Codex upraví tento súbor na GitHube.
 2. Do CHAINVERS_REQUEST vloží request_id, action, file a prípadne content.
-3. Na InfinityFree sa otvorí:
+3. Otvoríš na InfinityFree:
 
    https://chainvers.free.nf/ai_apply.php
 
-4. PHP načíta tento JS z GitHub RAW URL.
-5. PHP vykoná akciu.
+4. PHP načíta tento JS súbor z GitHub RAW URL.
+5. PHP vykoná požiadavku:
+   - read = načíta kód zo súboru
+   - write = prepíše súbor novým kódom
+   - tree = načíta strom /htdocs
+
 6. Výsledok uloží do:
 
    https://chainvers.free.nf/ai_result.json
 
-7. Codex si načíta ai_result.json a vidí výsledok.
-
 DÔLEŽITÉ:
 - request_id musí byť vždy nový.
 - Ak request_id ostane rovnaký, PHP ho druhýkrát nevykoná.
-- PHP bez GitHub tokenu nevie tento JS súbor automaticky vyčistiť.
+- Bez GitHub tokenu PHP nevie tento JS automaticky vyčistiť.
 ===============================================================================
 */
 
 
 /*
 ===============================================================================
-CHAINVERS_REQUEST
+PRÍKLADY REQUESTOV
+===============================================================================
 
-Príklad READ:
+READ:
 
 {
   "request_id": "read_gallery_001",
   "action": "read",
-  "file": "gallery.php"
+  "file": "gallery.php",
+  "content": ""
 }
 
-Príklad WRITE:
+WRITE:
 
 {
   "request_id": "write_gallery_001",
@@ -54,8 +58,18 @@ Príklad WRITE:
   "content": "<?php\nsession_start();\n\necho 'Nový kód';\n?>"
 }
 
+TREE:
+
+{
+  "request_id": "tree_001",
+  "action": "tree",
+  "file": ".",
+  "content": ""
+}
+
 ===============================================================================
 */
+
 
 /* CHAINVERS_REQUEST_START
 {
