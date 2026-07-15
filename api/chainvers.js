@@ -485,7 +485,7 @@ async function stripeWebhook(req, res) {
 }
 
 // ======================================================
-//  COINBASE AUTO BUY
+//  COINBASE AUTO BUY (volané z accptpay.php)
 // ======================================================
 async function coinbaseAutoBuy(req, res) {
   try {
@@ -1210,7 +1210,6 @@ async function getChainAction(req, res) {
       });
     }
 
-
     if (action === "get_variants") {
       try {
         const blueprintId = body.blueprint_id;
@@ -1550,10 +1549,9 @@ async function getChainAction(req, res) {
 // ======================================================
 // MERGED ACTION: CHAINGETCASHDRAW
 // URL: /api/chainvers?action=chaingetcashdraw
-// Pôvodne: /api/chaingetcashdraw.js
+// POST JSON action zostáva "withdraw" alebo "initialize".
 // ======================================================
-
-const CHAINGETCASHDRAW_ABI = [
+const CHAIN_GET_CASH_DRAW_ABI = [
   {
     inputs: [],
     name: "owner",
@@ -1591,34 +1589,34 @@ function chainGetCashDrawLogger() {
   const rows = [];
 
   return {
-    push: (...a) => {
-      const m =
+    push: (...args) => {
+      const message =
         `[${new Date().toISOString()}] ` +
-        a.join(" ");
+        args.join(" ");
 
-      console.log(m);
-      rows.push(m);
+      console.log(message);
+      rows.push(message);
     },
     rows
   };
 }
 
-function chainGetCashDrawCleanPk(pk) {
-  pk = String(pk || "").trim();
-  return pk.startsWith("0x") ? pk : "0x" + pk;
+function chainGetCashDrawCleanPk(privateKey) {
+  const value = String(privateKey || "").trim();
+  return value.startsWith("0x") ? value : "0x" + value;
 }
 
 function chainGetCashDrawToWeiSafe(web3, eth) {
-  const n = Number(
-    String(eth).replace(",", ".")
+  const value = Number(
+    String(eth || "0").replace(",", ".")
   );
 
-  if (!Number.isFinite(n) || n <= 0) {
+  if (!Number.isFinite(value) || value <= 0) {
     return null;
   }
 
   return web3.utils.toWei(
-    n.toFixed(18),
+    value.toFixed(18),
     "ether"
   );
 }
@@ -1637,7 +1635,7 @@ async function chainGetCashDrawAction(req, res) {
 
     const body = await readJson(req);
 
-    const action = String(
+    const operation = String(
       body.action || "withdraw"
     ).toLowerCase();
 
@@ -1657,7 +1655,7 @@ async function chainGetCashDrawAction(req, res) {
       body.amount || "0"
     ).replace(",", ".");
 
-    log.push("[ACTION]", action);
+    log.push("[ACTION]", operation);
     log.push("[BODY]", JSON.stringify(body));
 
     if (!process.env.PROVIDER_URL) {
@@ -1688,28 +1686,27 @@ async function chainGetCashDrawAction(req, res) {
       process.env.PROVIDER_URL
     );
 
-    const block =
-      await web3.eth.getBlockNumber();
-
+    const block = await web3.eth.getBlockNumber();
     log.push("[RPC OK] block", String(block));
 
-    const pk = chainGetCashDrawCleanPk(
+    const privateKey = chainGetCashDrawCleanPk(
       process.env.PRIVATE_KEY
     );
 
     const account =
-      web3.eth.accounts.privateKeyToAccount(pk);
+      web3.eth.accounts.privateKeyToAccount(
+        privateKey
+      );
 
     web3.eth.accounts.wallet.add(account);
 
     const contractAddress =
       process.env.CONTRACT_ADDRESS;
 
-    const contract =
-      new web3.eth.Contract(
-        CHAINGETCASHDRAW_ABI,
-        contractAddress
-      );
+    const contract = new web3.eth.Contract(
+      CHAIN_GET_CASH_DRAW_ABI,
+      contractAddress
+    );
 
     log.push("[SENDER]", account.address);
     log.push("[CONTRACT]", contractAddress);
@@ -1717,15 +1714,16 @@ async function chainGetCashDrawAction(req, res) {
     let owner = "unknown";
 
     try {
-      owner =
-        await contract.methods.owner().call();
-
+      owner = await contract.methods.owner().call();
       log.push("[OWNER]", owner);
-    } catch (e) {
-      log.push("[OWNER READ FAIL]", e.message);
+    } catch (error) {
+      log.push(
+        "[OWNER READ FAIL]",
+        error?.message || String(error)
+      );
     }
 
-    if (action === "initialize") {
+    if (operation === "initialize") {
       return res.json({
         ok: false,
         error: "initialize_disabled",
@@ -1752,11 +1750,10 @@ async function chainGetCashDrawAction(req, res) {
       });
     }
 
-    const amountWei =
-      chainGetCashDrawToWeiSafe(
-        web3,
-        amountEth
-      );
+    const amountWei = chainGetCashDrawToWeiSafe(
+      web3,
+      amountEth
+    );
 
     if (!amountWei || BigInt(amountWei) <= 0n) {
       return res.json({
@@ -1767,42 +1764,43 @@ async function chainGetCashDrawAction(req, res) {
       });
     }
 
-    log.push("[TOKEN]", tokenId);
+    log.push("[TOKEN]", String(tokenId));
     log.push("[WITHDRAW TO]", withdrawTo);
     log.push("[AMOUNT ETH]", amountEth);
     log.push("[AMOUNT WEI]", amountWei);
 
-    const ownerBalance =
-      await web3.eth.getBalance(account.address);
+    const ownerBalance = await web3.eth.getBalance(
+      account.address
+    );
 
-    const contractBalance =
-      await web3.eth.getBalance(contractAddress);
+    const contractBalance = await web3.eth.getBalance(
+      contractAddress
+    );
 
     log.push(
       "[OWNER NATIVE BALANCE]",
-      ownerBalance
+      String(ownerBalance)
     );
 
     log.push(
       "[CONTRACT BALANCE BEFORE]",
-      contractBalance
+      String(contractBalance)
     );
 
     if (BigInt(contractBalance) < BigInt(amountWei)) {
       return res.json({
         ok: false,
         error: "contract_native_balance_too_low",
-        contract_balance_wei: contractBalance,
+        contract_balance_wei: String(contractBalance),
         requested_wei: amountWei,
         logs: log.rows
       });
     }
 
-    const method =
-      contract.methods.emergencyWithdraw(
-        withdrawTo,
-        amountWei
-      );
+    const method = contract.methods.emergencyWithdraw(
+      withdrawTo,
+      amountWei
+    );
 
     try {
       await method.call({
@@ -1810,13 +1808,16 @@ async function chainGetCashDrawAction(req, res) {
       });
 
       log.push("[CALL OK] emergencyWithdraw");
-    } catch (e) {
-      log.push("[CALL FAIL]", e.message);
+    } catch (error) {
+      log.push(
+        "[CALL FAIL]",
+        error?.message || String(error)
+      );
 
       return res.json({
         ok: false,
         error: "emergencyWithdraw_call_failed",
-        detail: e.message,
+        detail: error?.message || String(error),
         owner_now: owner,
         sender: account.address,
         logs: log.rows
@@ -1826,38 +1827,35 @@ async function chainGetCashDrawAction(req, res) {
     let gas;
 
     try {
-      const estimatedGas =
-        await method.estimateGas({
-          from: account.address
-        });
+      const estimatedGas = await method.estimateGas({
+        from: account.address
+      });
 
-      gas =
-        Math.ceil(
-          Number(estimatedGas) * 1.25
-        );
+      gas = Math.ceil(
+        Number(estimatedGas) * 1.25
+      );
 
       log.push(
         "[GAS ESTIMATE]",
         String(estimatedGas)
       );
 
+      log.push("[GAS LIMIT]", String(gas));
+    } catch (error) {
       log.push(
-        "[GAS LIMIT]",
-        String(gas)
+        "[GAS FAIL]",
+        error?.message || String(error)
       );
-    } catch (e) {
-      log.push("[GAS FAIL]", e.message);
 
       return res.json({
         ok: false,
         error: "estimate_gas_failed",
-        detail: e.message,
+        detail: error?.message || String(error),
         logs: log.rows
       });
     }
 
-    const gasPrice =
-      await web3.eth.getGasPrice();
+    const gasPrice = await web3.eth.getGasPrice();
 
     const nonce =
       await web3.eth.getTransactionCount(
@@ -1880,7 +1878,7 @@ async function chainGetCashDrawAction(req, res) {
     const signed =
       await web3.eth.accounts.signTransaction(
         tx,
-        pk
+        privateKey
       );
 
     const sent =
@@ -1910,14 +1908,16 @@ async function chainGetCashDrawAction(req, res) {
       amount_wei: amountWei,
       logs: log.rows
     });
-
-  } catch (e) {
-    log.push("[HANDLER ERROR]", e.message);
+  } catch (error) {
+    log.push(
+      "[HANDLER ERROR]",
+      error?.message || String(error)
+    );
 
     return res.json({
       ok: false,
       error: "handler_error",
-      detail: e.message,
+      detail: error?.message || String(error),
       logs: log.rows
     });
   }
@@ -1997,743 +1997,7 @@ async function createWalletAction(req, res) {
 // /api/chainvers?action=rates
 // ======================================================
 
-const CHAINVERS_CLIENT_PLUGIN = `(() => {
-  'use strict';
-
-  if (window.__CHAINVERS_PLUGIN_SETTINGS_V1__) return;
-  window.__CHAINVERS_PLUGIN_SETTINGS_V1__ = true;
-
-  const baseConfig = Object.assign({
-    sourceLanguage: 'sk',
-    defaultCurrency: 'EUR',
-    translate: true,
-    convertCurrency: true,
-    showStatusBar: true,
-    pluginApi: 'https://chainvers.vercel.app/api/chainvers',
-    settingsUrl: '/plugin.php',
-    protectedTerms: [],
-    userContentSelectors: []
-  }, window.CHAINVERS_PLUGIN_CONFIG || {});
-
-  const STORAGE_KEY = 'chainvers_plugin_settings_v1';
-
-  const defaults = {
-    translateEnabled: baseConfig.translate !== false,
-    language: 'auto',
-    currencyEnabled: baseConfig.convertCurrency !== false,
-    currency: 'auto',
-    showStatusBar: baseConfig.showStatusBar !== false
-  };
-
-  function readSettings() {
-    try {
-      return Object.assign(
-        {},
-        defaults,
-        JSON.parse(localStorage.getItem(STORAGE_KEY) || '{}')
-      );
-    } catch (_) {
-      return Object.assign({}, defaults);
-    }
-  }
-
-  let settings = readSettings();
-
-  function normalizeLanguage(value) {
-    let code = String(value || '')
-      .trim()
-      .toLowerCase()
-      .replace('_', '-')
-      .split('-')[0];
-
-    if (code === 'cz') code = 'cs';
-    if (code === 'ua') code = 'uk';
-
-    return /^[a-z]{2,3}$/.test(code) ? code : '';
-  }
-
-  function deviceLanguage() {
-    const candidates = [
-      ...(Array.isArray(navigator.languages) ? navigator.languages : []),
-      navigator.language,
-      navigator.userLanguage,
-      Intl.DateTimeFormat().resolvedOptions().locale
-    ];
-
-    for (const candidate of candidates) {
-      const value = normalizeLanguage(candidate);
-      if (value) return value;
-    }
-
-    return normalizeLanguage(baseConfig.sourceLanguage) || 'sk';
-  }
-
-  function currentLanguage() {
-    return settings.language && settings.language !== 'auto'
-      ? normalizeLanguage(settings.language)
-      : deviceLanguage();
-  }
-
-  function deviceCurrency() {
-    const locale = String(
-      navigator.languages?.[0] ||
-      navigator.language ||
-      Intl.DateTimeFormat().resolvedOptions().locale ||
-      ''
-    ).replace('_', '-');
-
-    const region = locale.split('-')[1]?.toUpperCase() || '';
-
-    const byRegion = {
-      US: 'USD',
-      GB: 'GBP',
-      CZ: 'CZK',
-      PL: 'PLN',
-      HU: 'HUF',
-      CH: 'CHF',
-      SE: 'SEK',
-      NO: 'NOK',
-      DK: 'DKK',
-      RO: 'RON',
-      BG: 'BGN',
-      JP: 'JPY',
-      CA: 'CAD',
-      AU: 'AUD'
-    };
-
-    return byRegion[region] || baseConfig.defaultCurrency || 'EUR';
-  }
-
-  function currentCurrency() {
-    return settings.currency && settings.currency !== 'auto'
-      ? String(settings.currency).toUpperCase()
-      : deviceCurrency();
-  }
-
-  const sourceLanguage = normalizeLanguage(baseConfig.sourceLanguage) || 'sk';
-  const targetLanguage = currentLanguage();
-  const targetCurrency = currentCurrency();
-
-  document.documentElement.lang = targetLanguage;
-  document.documentElement.dir = ['ar', 'fa', 'he', 'ur'].includes(targetLanguage)
-    ? 'rtl'
-    : 'ltr';
-
-  const excludedSelector = [
-    'script',
-    'style',
-    'noscript',
-    'template',
-    'svg',
-    'canvas',
-    'code',
-    'pre',
-    'textarea',
-    'input[type="password"]',
-    'input[type="email"]',
-    'input[type="tel"]',
-    '[data-no-translate]',
-    '[translate="no"]',
-    '.notranslate',
-    ...(Array.isArray(baseConfig.userContentSelectors)
-      ? baseConfig.userContentSelectors
-      : [])
-  ].filter(Boolean).join(',');
-
-  const protectedTerms = Array.isArray(baseConfig.protectedTerms)
-    ? baseConfig.protectedTerms
-    : [];
-
-  const translatedCache = new Map();
-  const activeNodes = new WeakSet();
-  let observer = null;
-  let observerTimer = null;
-  let ratesPromise = null;
-  let rates = null;
-  let statusBar = null;
-
-  const localDictionary = {
-    en: {
-      'Prihlásenie': 'Login',
-      'Registrovať': 'Register',
-      'Registrácia': 'Registration',
-      'Odhlásiť': 'Log out',
-      'Späť': 'Back',
-      'Galéria': 'Gallery',
-      'Môj profil': 'My profile',
-      'Verejný profil': 'Public profile',
-      'Otvoriť verejný profil autora': 'Open the author’s public profile',
-      'Načítavam': 'Loading',
-      'Načítavam...': 'Loading...',
-      'Uložiť': 'Save',
-      'Zrušiť': 'Cancel',
-      'Pokračovať': 'Continue',
-      'Kúpiť': 'Buy',
-      'Zostatok': 'Balance',
-      'Celkový zostatok': 'Total balance',
-      'Sociálne siete': 'Social networks',
-      'CHAINVERS štatistiky': 'CHAINVERS statistics',
-      'O profile': 'About the profile',
-      'Informácie o vlastníkovi': 'Owner information'
-    },
-    cs: {
-      'Prihlásenie': 'Přihlášení',
-      'Registrovať': 'Registrovat',
-      'Registrácia': 'Registrace',
-      'Odhlásiť': 'Odhlásit',
-      'Späť': 'Zpět',
-      'Galéria': 'Galerie',
-      'Môj profil': 'Můj profil',
-      'Verejný profil': 'Veřejný profil',
-      'Načítavam': 'Načítám',
-      'Načítavam...': 'Načítám...',
-      'Uložiť': 'Uložit',
-      'Zrušiť': 'Zrušit',
-      'Pokračovať': 'Pokračovat',
-      'Kúpiť': 'Koupit',
-      'Zostatok': 'Zůstatek',
-      'Celkový zostatok': 'Celkový zůstatek',
-      'Sociálne siete': 'Sociální sítě'
-    }
-  };
-
-  function isExcluded(node) {
-    const element = node?.nodeType === Node.ELEMENT_NODE
-      ? node
-      : node?.parentElement;
-
-    if (!element) return true;
-
-    try {
-      return Boolean(element.closest(excludedSelector));
-    } catch (_) {
-      return false;
-    }
-  }
-
-  function canTranslate(text) {
-    const value = String(text || '').trim();
-
-    if (value.length < 2) return false;
-    if (!/[\\p{L}]/u.test(value)) return false;
-
-    if (
-      /^(https?:\\/\\/|www\\.|0x[a-f0-9]{8,}|[\\w.+-]+@[\\w.-]+\\.[a-z]{2,})/i
-        .test(value)
-    ) {
-      return false;
-    }
-
-    const lower = value.toLowerCase();
-
-    if (
-      protectedTerms.some(term =>
-        term &&
-        lower.includes(String(term).toLowerCase())
-      ) &&
-      value.split(/\\s+/).length <= 2
-    ) {
-      return false;
-    }
-
-    return true;
-  }
-
-  function createStatusBar() {
-    if (!settings.showStatusBar || statusBar) return;
-
-    const style = document.createElement('style');
-    style.id = 'chainvers-plugin-status-style';
-    style.textContent = \`
-      html.chainvers-status-visible body {
-        padding-bottom: calc(27px + env(safe-area-inset-bottom)) !important;
-      }
-
-      #chainversPluginStatus {
-        position: fixed !important;
-        left: 0 !important;
-        bottom: 0 !important;
-        z-index: 2147483000 !important;
-        width: 100% !important;
-        box-sizing: border-box !important;
-        display: flex !important;
-        align-items: center !important;
-        justify-content: center !important;
-        gap: 7px !important;
-        margin: 0 !important;
-        padding: 5px max(10px, env(safe-area-inset-right)) calc(5px + env(safe-area-inset-bottom)) max(10px, env(safe-area-inset-left)) !important;
-        border-top: 1px solid rgba(255, 225, 92, .62) !important;
-        border-radius: 0 !important;
-        background: rgba(5, 8, 16, .94) !important;
-        color: rgba(255, 239, 170, .92) !important;
-        font: 800 10px/1.25 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif !important;
-        letter-spacing: .02em !important;
-        text-align: center !important;
-        text-decoration: none !important;
-        backdrop-filter: blur(10px) !important;
-        -webkit-backdrop-filter: blur(10px) !important;
-        cursor: pointer !important;
-        pointer-events: auto !important;
-      }
-
-      #chainversPluginStatus::before {
-        content: "" !important;
-        flex: 0 0 auto !important;
-        width: 5px !important;
-        height: 5px !important;
-        border-radius: 50% !important;
-        background: #ffe15c !important;
-        animation: chainversPluginPulse 1.25s ease-in-out infinite !important;
-      }
-
-      #chainversPluginStatus.is-ready::before {
-        animation: none !important;
-        background: #58f29a !important;
-      }
-
-      @keyframes chainversPluginPulse {
-        0%, 100% { opacity: .42; }
-        50% { opacity: 1; }
-      }
-
-      @media (max-width: 480px) {
-        #chainversPluginStatus {
-          padding: 5px 7px !important;
-          font-size: 9px !important;
-        }
-      }
-    \`;
-
-    document.head.appendChild(style);
-
-    statusBar = document.createElement('a');
-    statusBar.id = 'chainversPluginStatus';
-    statusBar.href = baseConfig.settingsUrl || '/plugin.php';
-    statusBar.setAttribute('aria-label', 'CHAINVERS plugin settings');
-    statusBar.textContent = 'Načítavajú sa CHAINVERS pluginy…';
-
-    document.body.appendChild(statusBar);
-    document.documentElement.classList.add('chainvers-status-visible');
-  }
-
-  function setStatus(message, ready = false) {
-    if (!statusBar) return;
-
-    statusBar.textContent = message;
-    statusBar.classList.toggle('is-ready', ready);
-  }
-
-  async function apiRequest(params) {
-    const url = new URL(baseConfig.pluginApi);
-
-    Object.entries(params).forEach(([key, value]) => {
-      url.searchParams.set(key, String(value));
-    });
-
-    const response = await fetch(url.toString(), {
-      method: 'GET',
-      mode: 'cors',
-      credentials: 'omit',
-      cache: 'no-store'
-    });
-
-    if (!response.ok) {
-      throw new Error(\`HTTP \${response.status}\`);
-    }
-
-    return response.json();
-  }
-
-  async function translateText(text) {
-    const value = String(text || '').trim();
-    const key = \`\${sourceLanguage}>\${targetLanguage}:\${value}\`;
-
-    if (translatedCache.has(key)) {
-      return translatedCache.get(key);
-    }
-
-    const local = localDictionary[targetLanguage]?.[value];
-
-    if (local) {
-      translatedCache.set(key, local);
-      return local;
-    }
-
-    try {
-      const data = await apiRequest({
-        action: 'translate',
-        q: value,
-        source: sourceLanguage,
-        target: targetLanguage
-      });
-
-      const translated = String(data?.translatedText || '').trim() || value;
-      translatedCache.set(key, translated);
-
-      return translated;
-    } catch (_) {
-      translatedCache.set(key, value);
-      return value;
-    }
-  }
-
-  async function translateTextNode(node) {
-    if (
-      !node ||
-      node.nodeType !== Node.TEXT_NODE ||
-      isExcluded(node)
-    ) {
-      return;
-    }
-
-    const original = node.nodeValue || '';
-    const trimmed = original.trim();
-
-    if (!canTranslate(trimmed)) return;
-
-    activeNodes.add(node);
-
-    const leading = original.match(/^\\s*/)?.[0] || '';
-    const trailing = original.match(/\\s*$/)?.[0] || '';
-    const translated = await translateText(trimmed);
-
-    if (
-      document.contains(node) &&
-      node.nodeValue === original &&
-      translated
-    ) {
-      node.nodeValue = leading + translated + trailing;
-    }
-
-    queueMicrotask(() => activeNodes.delete(node));
-  }
-
-  async function translateAttributes(element) {
-    if (
-      !element ||
-      element.nodeType !== Node.ELEMENT_NODE ||
-      isExcluded(element)
-    ) {
-      return;
-    }
-
-    const attrs = ['placeholder', 'title', 'aria-label'];
-
-    if (
-      element.tagName === 'INPUT' &&
-      ['button', 'submit', 'reset'].includes(element.type)
-    ) {
-      attrs.push('value');
-    }
-
-    for (const attr of attrs) {
-      if (!element.hasAttribute(attr)) continue;
-
-      const original = element.getAttribute(attr) || '';
-      if (!canTranslate(original)) continue;
-
-      const translated = await translateText(original);
-
-      if (
-        translated &&
-        element.getAttribute(attr) === original
-      ) {
-        element.setAttribute(attr, translated);
-      }
-    }
-  }
-
-  function collectTextNodes(root) {
-    const nodes = [];
-
-    if (!root || isExcluded(root)) return nodes;
-
-    if (root.nodeType === Node.TEXT_NODE) {
-      if (canTranslate(root.nodeValue)) nodes.push(root);
-      return nodes;
-    }
-
-    const walker = document.createTreeWalker(
-      root,
-      NodeFilter.SHOW_TEXT,
-      {
-        acceptNode(node) {
-          return !isExcluded(node) && canTranslate(node.nodeValue)
-            ? NodeFilter.FILTER_ACCEPT
-            : NodeFilter.FILTER_REJECT;
-        }
-      }
-    );
-
-    while (walker.nextNode()) {
-      nodes.push(walker.currentNode);
-    }
-
-    return nodes;
-  }
-
-  async function translateRoot(root = document.body) {
-    if (
-      !settings.translateEnabled ||
-      targetLanguage === sourceLanguage ||
-      !root
-    ) {
-      return;
-    }
-
-    const nodes = collectTextNodes(root).slice(0, 500);
-
-    for (const node of nodes) {
-      await translateTextNode(node);
-    }
-
-    const elements = root.nodeType === Node.ELEMENT_NODE
-      ? [root, ...root.querySelectorAll('*')]
-      : [];
-
-    for (const element of elements.slice(0, 800)) {
-      await translateAttributes(element);
-    }
-  }
-
-  async function getRates() {
-    if (rates) return rates;
-    if (ratesPromise) return ratesPromise;
-
-    ratesPromise = apiRequest({
-      action: 'rates',
-      base: 'EUR'
-    })
-      .then(data => {
-        rates = Object.assign({ EUR: 1 }, data?.rates || {});
-        return rates;
-      })
-      .catch(() => null)
-      .finally(() => {
-        ratesPromise = null;
-      });
-
-    return ratesPromise;
-  }
-
-  function parseNumber(value) {
-    let normalized = String(value).replace(/\\s/g, '');
-    const lastComma = normalized.lastIndexOf(',');
-    const lastDot = normalized.lastIndexOf('.');
-
-    if (lastComma > lastDot) {
-      normalized = normalized.replace(/\\./g, '').replace(',', '.');
-    } else {
-      normalized = normalized.replace(/,/g, '');
-    }
-
-    return Number(normalized);
-  }
-
-  async function convertCurrencyNode(node) {
-    if (
-      !node ||
-      node.nodeType !== Node.TEXT_NODE ||
-      isExcluded(node)
-    ) {
-      return;
-    }
-
-    const original = node.nodeValue || '';
-    const pattern =
-      /(?:([€$£])\\s*([0-9][0-9\\s.,]*))|(?:([0-9][0-9\\s.,]*)\\s*(EUR|USD|GBP|CZK|Kč|PLN|HUF|CHF|SEK|NOK|DKK|RON|BGN|JPY|CAD|AUD)\\b)/gi;
-
-    if (!pattern.test(original)) return;
-    pattern.lastIndex = 0;
-
-    const exchange = await getRates();
-
-    if (!exchange || !exchange[targetCurrency]) return;
-
-    const currencyMap = {
-      '€': 'EUR',
-      '$': 'USD',
-      '£': 'GBP',
-      'KČ': 'CZK',
-      EUR: 'EUR',
-      USD: 'USD',
-      GBP: 'GBP',
-      CZK: 'CZK',
-      PLN: 'PLN',
-      HUF: 'HUF',
-      CHF: 'CHF',
-      SEK: 'SEK',
-      NOK: 'NOK',
-      DKK: 'DKK',
-      RON: 'RON',
-      BGN: 'BGN',
-      JPY: 'JPY',
-      CAD: 'CAD',
-      AUD: 'AUD'
-    };
-
-    const replaced = original.replace(
-      pattern,
-      (full, symbol, numberOne, numberTwo, code) => {
-        const source = currencyMap[
-          String(symbol || code || '').toUpperCase()
-        ];
-
-        const amount = parseNumber(numberOne || numberTwo);
-
-        if (
-          !source ||
-          !Number.isFinite(amount) ||
-          !exchange[source] ||
-          source === targetCurrency
-        ) {
-          return full;
-        }
-
-        const converted =
-          (amount / exchange[source]) *
-          exchange[targetCurrency];
-
-        try {
-          return new Intl.NumberFormat(
-            navigator.languages?.[0] ||
-            navigator.language ||
-            'sk-SK',
-            {
-              style: 'currency',
-              currency: targetCurrency,
-              maximumFractionDigits: 2
-            }
-          ).format(converted);
-        } catch (_) {
-          return `${converted.toFixed(2)} ${targetCurrency}`;
-        }
-      }
-    );
-
-    if (replaced !== original) {
-      node.nodeValue = replaced;
-    }
-  }
-
-  async function convertRoot(root = document.body) {
-    if (!settings.currencyEnabled || !root) return;
-
-    const nodes = collectTextNodes(root).slice(0, 700);
-
-    for (const node of nodes) {
-      await convertCurrencyNode(node);
-    }
-  }
-
-  async function processRoot(root) {
-    await translateRoot(root);
-    await convertRoot(root);
-  }
-
-  function scheduleProcess(root) {
-    clearTimeout(observerTimer);
-
-    observerTimer = setTimeout(() => {
-      processRoot(root || document.body);
-    }, 140);
-  }
-
-  function startObserver() {
-    if (observer || !document.body) return;
-
-    observer = new MutationObserver(mutations => {
-      let root = null;
-
-      for (const mutation of mutations) {
-        if (
-          mutation.type === 'characterData' &&
-          activeNodes.has(mutation.target)
-        ) {
-          continue;
-        }
-
-        if (mutation.type === 'characterData') {
-          root = mutation.target.parentElement || root;
-        }
-
-        for (const node of mutation.addedNodes) {
-          if (
-            node.nodeType === Node.ELEMENT_NODE ||
-            node.nodeType === Node.TEXT_NODE
-          ) {
-            root = node.nodeType === Node.ELEMENT_NODE
-              ? node
-              : node.parentElement;
-          }
-        }
-      }
-
-      if (root) scheduleProcess(root);
-    });
-
-    observer.observe(document.body, {
-      subtree: true,
-      childList: true,
-      characterData: true
-    });
-  }
-
-  async function init() {
-    createStatusBar();
-
-    setStatus('Rozpoznávam jazyk a región zariadenia…');
-
-    await new Promise(resolve => setTimeout(resolve, 180));
-
-    if (settings.translateEnabled && targetLanguage !== sourceLanguage) {
-      setStatus(`Prekladám CHAINVERS do jazyka ${targetLanguage.toUpperCase()}…`);
-    } else if (!settings.translateEnabled) {
-      setStatus('Automatický preklad je vypnutý.');
-    } else {
-      setStatus('Jazyk CHAINVERS zodpovedá zariadeniu.');
-    }
-
-    await translateRoot(document.body);
-
-    if (settings.currencyEnabled) {
-      setStatus(`Prispôsobujem menu na ${targetCurrency}…`);
-      await convertRoot(document.body);
-    }
-
-    startObserver();
-
-    document.documentElement.dataset.chainversPlugin = 'ready';
-    document.documentElement.dataset.chainversLanguage = targetLanguage;
-    document.documentElement.dataset.chainversCurrency = targetCurrency;
-
-    setStatus('CHAINVERS je pripravený ✓', true);
-
-    window.dispatchEvent(
-      new CustomEvent('chainvers:plugin-ready', {
-        detail: {
-          language: targetLanguage,
-          sourceLanguage,
-          currency: targetCurrency,
-          settings
-        }
-      })
-    );
-  }
-
-  window.addEventListener('chainvers:settings-saved', event => {
-    try {
-      const next = Object.assign({}, defaults, event.detail || {});
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(next));
-    } catch (_) {}
-  });
-
-  if (document.readyState === 'loading') {
-    document.addEventListener('DOMContentLoaded', init, { once: true });
-  } else {
-    init();
-  }
-})();`;
+const CHAINVERS_CLIENT_PLUGIN = "(() => {\n  'use strict';\n\n  if (window.__CHAINVERS_PLUGIN_SETTINGS_V1__) return;\n  window.__CHAINVERS_PLUGIN_SETTINGS_V1__ = true;\n\n  const baseConfig = Object.assign({\n    sourceLanguage: 'sk',\n    defaultCurrency: 'EUR',\n    translate: true,\n    convertCurrency: true,\n    showStatusBar: true,\n    pluginApi: 'https://chainvers.vercel.app/api/chainvers',\n    settingsUrl: '/plugin.php',\n    protectedTerms: [],\n    userContentSelectors: []\n  }, window.CHAINVERS_PLUGIN_CONFIG || {});\n\n  const STORAGE_KEY = 'chainvers_plugin_settings_v1';\n\n  const defaults = {\n    translateEnabled: baseConfig.translate !== false,\n    language: 'auto',\n    currencyEnabled: baseConfig.convertCurrency !== false,\n    currency: 'auto',\n    showStatusBar: baseConfig.showStatusBar !== false\n  };\n\n  function readSettings() {\n    try {\n      return Object.assign(\n        {},\n        defaults,\n        JSON.parse(localStorage.getItem(STORAGE_KEY) || '{}')\n      );\n    } catch (_) {\n      return Object.assign({}, defaults);\n    }\n  }\n\n  let settings = readSettings();\n\n  function normalizeLanguage(value) {\n    let code = String(value || '')\n      .trim()\n      .toLowerCase()\n      .replace('_', '-')\n      .split('-')[0];\n\n    if (code === 'cz') code = 'cs';\n    if (code === 'ua') code = 'uk';\n\n    return /^[a-z]{2,3}$/.test(code) ? code : '';\n  }\n\n  function deviceLanguage() {\n    const candidates = [\n      ...(Array.isArray(navigator.languages) ? navigator.languages : []),\n      navigator.language,\n      navigator.userLanguage,\n      Intl.DateTimeFormat().resolvedOptions().locale\n    ];\n\n    for (const candidate of candidates) {\n      const value = normalizeLanguage(candidate);\n      if (value) return value;\n    }\n\n    return normalizeLanguage(baseConfig.sourceLanguage) || 'sk';\n  }\n\n  function currentLanguage() {\n    return settings.language && settings.language !== 'auto'\n      ? normalizeLanguage(settings.language)\n      : deviceLanguage();\n  }\n\n  function deviceCurrency() {\n    const locale = String(\n      navigator.languages?.[0] ||\n      navigator.language ||\n      Intl.DateTimeFormat().resolvedOptions().locale ||\n      ''\n    ).replace('_', '-');\n\n    const region = locale.split('-')[1]?.toUpperCase() || '';\n\n    const byRegion = {\n      US: 'USD',\n      GB: 'GBP',\n      CZ: 'CZK',\n      PL: 'PLN',\n      HU: 'HUF',\n      CH: 'CHF',\n      SE: 'SEK',\n      NO: 'NOK',\n      DK: 'DKK',\n      RO: 'RON',\n      BG: 'BGN',\n      JP: 'JPY',\n      CA: 'CAD',\n      AU: 'AUD'\n    };\n\n    return byRegion[region] || baseConfig.defaultCurrency || 'EUR';\n  }\n\n  function currentCurrency() {\n    return settings.currency && settings.currency !== 'auto'\n      ? String(settings.currency).toUpperCase()\n      : deviceCurrency();\n  }\n\n  const sourceLanguage = normalizeLanguage(baseConfig.sourceLanguage) || 'sk';\n  const targetLanguage = currentLanguage();\n  const targetCurrency = currentCurrency();\n\n  document.documentElement.lang = targetLanguage;\n  document.documentElement.dir = ['ar', 'fa', 'he', 'ur'].includes(targetLanguage)\n    ? 'rtl'\n    : 'ltr';\n\n  const excludedSelector = [\n    'script',\n    'style',\n    'noscript',\n    'template',\n    'svg',\n    'canvas',\n    'code',\n    'pre',\n    'textarea',\n    'input[type=\"password\"]',\n    'input[type=\"email\"]',\n    'input[type=\"tel\"]',\n    '[data-no-translate]',\n    '[translate=\"no\"]',\n    '.notranslate',\n    ...(Array.isArray(baseConfig.userContentSelectors)\n      ? baseConfig.userContentSelectors\n      : [])\n  ].filter(Boolean).join(',');\n\n  const protectedTerms = Array.isArray(baseConfig.protectedTerms)\n    ? baseConfig.protectedTerms\n    : [];\n\n  const translatedCache = new Map();\n  const activeNodes = new WeakSet();\n  let observer = null;\n  let observerTimer = null;\n  let ratesPromise = null;\n  let rates = null;\n  let statusBar = null;\n\n  const localDictionary = {\n    en: {\n      'Prihlásenie': 'Login',\n      'Registrovať': 'Register',\n      'Registrácia': 'Registration',\n      'Odhlásiť': 'Log out',\n      'Späť': 'Back',\n      'Galéria': 'Gallery',\n      'Môj profil': 'My profile',\n      'Verejný profil': 'Public profile',\n      'Otvoriť verejný profil autora': 'Open the author’s public profile',\n      'Načítavam': 'Loading',\n      'Načítavam...': 'Loading...',\n      'Uložiť': 'Save',\n      'Zrušiť': 'Cancel',\n      'Pokračovať': 'Continue',\n      'Kúpiť': 'Buy',\n      'Zostatok': 'Balance',\n      'Celkový zostatok': 'Total balance',\n      'Sociálne siete': 'Social networks',\n      'CHAINVERS štatistiky': 'CHAINVERS statistics',\n      'O profile': 'About the profile',\n      'Informácie o vlastníkovi': 'Owner information'\n    },\n    cs: {\n      'Prihlásenie': 'Přihlášení',\n      'Registrovať': 'Registrovat',\n      'Registrácia': 'Registrace',\n      'Odhlásiť': 'Odhlásit',\n      'Späť': 'Zpět',\n      'Galéria': 'Galerie',\n      'Môj profil': 'Můj profil',\n      'Verejný profil': 'Veřejný profil',\n      'Načítavam': 'Načítám',\n      'Načítavam...': 'Načítám...',\n      'Uložiť': 'Uložit',\n      'Zrušiť': 'Zrušit',\n      'Pokračovať': 'Pokračovat',\n      'Kúpiť': 'Koupit',\n      'Zostatok': 'Zůstatek',\n      'Celkový zostatok': 'Celkový zůstatek',\n      'Sociálne siete': 'Sociální sítě'\n    }\n  };\n\n  function isExcluded(node) {\n    const element = node?.nodeType === Node.ELEMENT_NODE\n      ? node\n      : node?.parentElement;\n\n    if (!element) return true;\n\n    try {\n      return Boolean(element.closest(excludedSelector));\n    } catch (_) {\n      return false;\n    }\n  }\n\n  function canTranslate(text) {\n    const value = String(text || '').trim();\n\n    if (value.length < 2) return false;\n    if (!/[\\p{L}]/u.test(value)) return false;\n\n    if (\n      /^(https?:\\/\\/|www\\.|0x[a-f0-9]{8,}|[\\w.+-]+@[\\w.-]+\\.[a-z]{2,})/i\n        .test(value)\n    ) {\n      return false;\n    }\n\n    const lower = value.toLowerCase();\n\n    if (\n      protectedTerms.some(term =>\n        term &&\n        lower.includes(String(term).toLowerCase())\n      ) &&\n      value.split(/\\s+/).length <= 2\n    ) {\n      return false;\n    }\n\n    return true;\n  }\n\n  function createStatusBar() {\n    if (!settings.showStatusBar || statusBar) return;\n\n    const style = document.createElement('style');\n    style.id = 'chainvers-plugin-status-style';\n    style.textContent = `\n      html.chainvers-status-visible body {\n        padding-bottom: calc(27px + env(safe-area-inset-bottom)) !important;\n      }\n      #chainversPluginStatus {\n        position: fixed !important;\n        left: 0 !important;\n        bottom: 0 !important;\n        z-index: 2147483000 !important;\n        width: 100% !important;\n        min-height: 0 !important;\n        box-sizing: border-box !important;\n        display: flex !important;\n        align-items: center !important;\n        justify-content: center !important;\n        gap: 7px !important;\n        margin: 0 !important;\n        padding: 5px max(10px, env(safe-area-inset-right)) calc(5px + env(safe-area-inset-bottom)) max(10px, env(safe-area-inset-left)) !important;\n        border-top: 1px solid rgba(255, 225, 92, .62) !important;\n        border-bottom: 1px solid rgba(255, 225, 92, .18) !important;\n        border-left: 0 !important;\n        border-right: 0 !important;\n        border-radius: 0 !important;\n        background: rgba(5, 8, 16, .94) !important;\n        color: rgba(255, 239, 170, .92) !important;\n        box-shadow: none !important;\n        font: 800 10px/1.25 -apple-system, BlinkMacSystemFont, \"Segoe UI\", sans-serif !important;\n        letter-spacing: .02em !important;\n        text-align: center !important;\n        text-decoration: none !important;\n        transform: none !important;\n        backdrop-filter: blur(10px) !important;\n        -webkit-backdrop-filter: blur(10px) !important;\n        transition: opacity .2s ease !important;\n        cursor: pointer !important;\n        pointer-events: auto !important;\n      }\n      #chainversPluginStatus::before {\n        content: \"\" !important;\n        flex: 0 0 auto !important;\n        width: 5px !important;\n        height: 5px !important;\n        border-radius: 50% !important;\n        background: #ffe15c !important;\n        box-shadow: none !important;\n        animation: chainversPluginPulse 1.25s ease-in-out infinite !important;\n      }\n      #chainversPluginStatus.is-ready::before {\n        animation: none !important;\n        background: #58f29a !important;\n      }\n      #chainversPluginStatus.is-hidden {\n        opacity: 0 !important;\n        pointer-events: none !important;\n      }\n      @keyframes chainversPluginPulse {\n        0%, 100% { opacity: .42; }\n        50% { opacity: 1; }\n      }\n      @media (max-width: 480px) {\n        #chainversPluginStatus {\n          width: 100% !important;\n          margin-top: 0 !important;\n          padding: 5px 7px !important;\n          font-size: 9px !important;\n        }\n      }\n    `;\n\n    document.head.appendChild(style);\n\n    statusBar = document.createElement('a');\n    statusBar.id = 'chainversPluginStatus';\n    statusBar.href = baseConfig.settingsUrl || '/plugin.php';\n    statusBar.setAttribute('aria-label', 'CHAINVERS plugin settings');\n    statusBar.textContent = 'Načítavajú sa CHAINVERS pluginy…';\n\n    document.body.appendChild(statusBar);\n    document.documentElement.classList.add('chainvers-status-visible');\n\n  }\n\n  function setStatus(message, ready = false) {\n    if (!statusBar) return;\n\n    statusBar.textContent = message;\n    statusBar.classList.toggle('is-ready', ready);\n  }\n\n  async function apiRequest(params) {\n    const url = new URL(baseConfig.pluginApi);\n\n    Object.entries(params).forEach(([key, value]) => {\n      url.searchParams.set(key, String(value));\n    });\n\n    const response = await fetch(url.toString(), {\n      method: 'GET',\n      mode: 'cors',\n      credentials: 'omit',\n      cache: 'no-store'\n    });\n\n    if (!response.ok) {\n      throw new Error(`HTTP ${response.status}`);\n    }\n\n    return response.json();\n  }\n\n  async function translateText(text) {\n    const value = String(text || '').trim();\n    const key = `${sourceLanguage}>${targetLanguage}:${value}`;\n\n    if (translatedCache.has(key)) {\n      return translatedCache.get(key);\n    }\n\n    const local = localDictionary[targetLanguage]?.[value];\n\n    if (local) {\n      translatedCache.set(key, local);\n      return local;\n    }\n\n    try {\n      const data = await apiRequest({\n        action: 'translate',\n        q: value,\n        source: sourceLanguage,\n        target: targetLanguage\n      });\n\n      const translated = String(data?.translatedText || '').trim() || value;\n      translatedCache.set(key, translated);\n\n      return translated;\n    } catch (_) {\n      translatedCache.set(key, value);\n      return value;\n    }\n  }\n\n  async function translateTextNode(node) {\n    if (\n      !node ||\n      node.nodeType !== Node.TEXT_NODE ||\n      isExcluded(node)\n    ) {\n      return;\n    }\n\n    const original = node.nodeValue || '';\n    const trimmed = original.trim();\n\n    if (!canTranslate(trimmed)) return;\n\n    activeNodes.add(node);\n\n    const leading = original.match(/^\\s*/)?.[0] || '';\n    const trailing = original.match(/\\s*$/)?.[0] || '';\n    const translated = await translateText(trimmed);\n\n    if (\n      document.contains(node) &&\n      node.nodeValue === original &&\n      translated\n    ) {\n      node.nodeValue = leading + translated + trailing;\n    }\n\n    queueMicrotask(() => activeNodes.delete(node));\n  }\n\n  async function translateAttributes(element) {\n    if (\n      !element ||\n      element.nodeType !== Node.ELEMENT_NODE ||\n      isExcluded(element)\n    ) {\n      return;\n    }\n\n    const attrs = ['placeholder', 'title', 'aria-label'];\n\n    if (\n      element.tagName === 'INPUT' &&\n      ['button', 'submit', 'reset'].includes(element.type)\n    ) {\n      attrs.push('value');\n    }\n\n    for (const attr of attrs) {\n      if (!element.hasAttribute(attr)) continue;\n\n      const original = element.getAttribute(attr) || '';\n      if (!canTranslate(original)) continue;\n\n      const translated = await translateText(original);\n\n      if (\n        translated &&\n        element.getAttribute(attr) === original\n      ) {\n        element.setAttribute(attr, translated);\n      }\n    }\n  }\n\n  function collectTextNodes(root) {\n    const nodes = [];\n\n    if (!root || isExcluded(root)) return nodes;\n\n    if (root.nodeType === Node.TEXT_NODE) {\n      if (canTranslate(root.nodeValue)) nodes.push(root);\n      return nodes;\n    }\n\n    const walker = document.createTreeWalker(\n      root,\n      NodeFilter.SHOW_TEXT,\n      {\n        acceptNode(node) {\n          return !isExcluded(node) && canTranslate(node.nodeValue)\n            ? NodeFilter.FILTER_ACCEPT\n            : NodeFilter.FILTER_REJECT;\n        }\n      }\n    );\n\n    while (walker.nextNode()) {\n      nodes.push(walker.currentNode);\n    }\n\n    return nodes;\n  }\n\n  async function translateRoot(root = document.body) {\n    if (\n      !settings.translateEnabled ||\n      targetLanguage === sourceLanguage ||\n      !root\n    ) {\n      return;\n    }\n\n    const nodes = collectTextNodes(root).slice(0, 500);\n\n    for (const node of nodes) {\n      await translateTextNode(node);\n    }\n\n    const elements = root.nodeType === Node.ELEMENT_NODE\n      ? [root, ...root.querySelectorAll('*')]\n      : [];\n\n    for (const element of elements.slice(0, 800)) {\n      await translateAttributes(element);\n    }\n  }\n\n  async function getRates() {\n    if (rates) return rates;\n    if (ratesPromise) return ratesPromise;\n\n    ratesPromise = apiRequest({\n      action: 'rates',\n      base: 'EUR'\n    })\n      .then(data => {\n        rates = Object.assign({ EUR: 1 }, data?.rates || {});\n        return rates;\n      })\n      .catch(() => null)\n      .finally(() => {\n        ratesPromise = null;\n      });\n\n    return ratesPromise;\n  }\n\n  function parseNumber(value) {\n    let normalized = String(value).replace(/\\s/g, '');\n    const lastComma = normalized.lastIndexOf(',');\n    const lastDot = normalized.lastIndexOf('.');\n\n    if (lastComma > lastDot) {\n      normalized = normalized.replace(/\\./g, '').replace(',', '.');\n    } else {\n      normalized = normalized.replace(/,/g, '');\n    }\n\n    return Number(normalized);\n  }\n\n  async function convertCurrencyNode(node) {\n    if (\n      !node ||\n      node.nodeType !== Node.TEXT_NODE ||\n      isExcluded(node)\n    ) {\n      return;\n    }\n\n    const original = node.nodeValue || '';\n    const pattern =\n      /(?:([€$£])\\s*([0-9][0-9\\s.,]*))|(?:([0-9][0-9\\s.,]*)\\s*(EUR|USD|GBP|CZK|Kč|PLN|HUF|CHF|SEK|NOK|DKK|RON|BGN|JPY|CAD|AUD)\\b)/gi;\n\n    if (!pattern.test(original)) return;\n    pattern.lastIndex = 0;\n\n    const exchange = await getRates();\n\n    if (!exchange || !exchange[targetCurrency]) return;\n\n    const currencyMap = {\n      '€': 'EUR',\n      '$': 'USD',\n      '£': 'GBP',\n      'KČ': 'CZK',\n      EUR: 'EUR',\n      USD: 'USD',\n      GBP: 'GBP',\n      CZK: 'CZK',\n      PLN: 'PLN',\n      HUF: 'HUF',\n      CHF: 'CHF',\n      SEK: 'SEK',\n      NOK: 'NOK',\n      DKK: 'DKK',\n      RON: 'RON',\n      BGN: 'BGN',\n      JPY: 'JPY',\n      CAD: 'CAD',\n      AUD: 'AUD'\n    };\n\n    const replaced = original.replace(\n      pattern,\n      (full, symbol, numberOne, numberTwo, code) => {\n        const source = currencyMap[\n          String(symbol || code || '').toUpperCase()\n        ];\n\n        const amount = parseNumber(numberOne || numberTwo);\n\n        if (\n          !source ||\n          !Number.isFinite(amount) ||\n          !exchange[source] ||\n          source === targetCurrency\n        ) {\n          return full;\n        }\n\n        const converted =\n          (amount / exchange[source]) *\n          exchange[targetCurrency];\n\n        try {\n          return new Intl.NumberFormat(\n            navigator.languages?.[0] ||\n            navigator.language ||\n            'sk-SK',\n            {\n              style: 'currency',\n              currency: targetCurrency,\n              maximumFractionDigits: 2\n            }\n          ).format(converted);\n        } catch (_) {\n          return `${converted.toFixed(2)} ${targetCurrency}`;\n        }\n      }\n    );\n\n    if (replaced !== original) {\n      node.nodeValue = replaced;\n    }\n  }\n\n  async function convertRoot(root = document.body) {\n    if (!settings.currencyEnabled || !root) return;\n\n    const nodes = collectTextNodes(root).slice(0, 700);\n\n    for (const node of nodes) {\n      await convertCurrencyNode(node);\n    }\n  }\n\n  async function processRoot(root) {\n    await translateRoot(root);\n    await convertRoot(root);\n  }\n\n  function scheduleProcess(root) {\n    clearTimeout(observerTimer);\n\n    observerTimer = setTimeout(() => {\n      processRoot(root || document.body);\n    }, 140);\n  }\n\n  function startObserver() {\n    if (observer || !document.body) return;\n\n    observer = new MutationObserver(mutations => {\n      let root = null;\n\n      for (const mutation of mutations) {\n        if (\n          mutation.type === 'characterData' &&\n          activeNodes.has(mutation.target)\n        ) {\n          continue;\n        }\n\n        if (mutation.type === 'characterData') {\n          root = mutation.target.parentElement || root;\n        }\n\n        for (const node of mutation.addedNodes) {\n          if (\n            node.nodeType === Node.ELEMENT_NODE ||\n            node.nodeType === Node.TEXT_NODE\n          ) {\n            root = node.nodeType === Node.ELEMENT_NODE\n              ? node\n              : node.parentElement;\n          }\n        }\n      }\n\n      if (root) scheduleProcess(root);\n    });\n\n    observer.observe(document.body, {\n      subtree: true,\n      childList: true,\n      characterData: true\n    });\n  }\n\n  async function init() {\n    createStatusBar();\n\n    setStatus('Rozpoznávam jazyk a región zariadenia…');\n\n    await new Promise(resolve => setTimeout(resolve, 180));\n\n    if (settings.translateEnabled && targetLanguage !== sourceLanguage) {\n      setStatus(`Prekladám CHAINVERS do jazyka ${targetLanguage.toUpperCase()}…`);\n    } else if (!settings.translateEnabled) {\n      setStatus('Automatický preklad je vypnutý.');\n    } else {\n      setStatus('Jazyk CHAINVERS zodpovedá zariadeniu.');\n    }\n\n    await translateRoot(document.body);\n\n    if (settings.currencyEnabled) {\n      setStatus(`Prispôsobujem menu na ${targetCurrency}…`);\n      await convertRoot(document.body);\n    }\n\n    startObserver();\n\n    document.documentElement.dataset.chainversPlugin = 'ready';\n    document.documentElement.dataset.chainversLanguage = targetLanguage;\n    document.documentElement.dataset.chainversCurrency = targetCurrency;\n\n    setStatus('CHAINVERS je pripravený ✓', true);\n\n    window.dispatchEvent(\n      new CustomEvent('chainvers:plugin-ready', {\n        detail: {\n          language: targetLanguage,\n          sourceLanguage,\n          currency: targetCurrency,\n          settings\n        }\n      })\n    );\n  }\n\n  window.addEventListener('chainvers:settings-saved', event => {\n    try {\n      const next = Object.assign({}, defaults, event.detail || {});\n      localStorage.setItem(STORAGE_KEY, JSON.stringify(next));\n    } catch (_) {}\n  });\n\n  if (document.readyState === 'loading') {\n    document.addEventListener('DOMContentLoaded', init, { once: true });\n  } else {\n    init();\n  }\n})();";
 
 function chainversPluginScript(req, res) {
   res.setHeader("Content-Type", "application/javascript; charset=utf-8");
@@ -2834,8 +2098,4 @@ async function chainversRates(req, res) {
     });
   }
 }
-
-
-
-
 
