@@ -709,11 +709,378 @@ function mintExtractTokenIdFromReceipt(web3, receipt, contractAddress) {
   return null;
 }
 
-async function mintChainAction(req, res) {
-  const logs = [];
+// Pomocná funkcia: čistí base64 obrázok z PHP / JS requestu
+function mintNormalizeBase64Image(imageBase64) {
+  const raw = String(imageBase64 || "").trim();
+
+  if (!raw) {
+    return null;
+  }
+
+  const match = raw.match(/^data:([^;]+);base64,(.+)$/);
+
+  const mime = match
+    ? match[1]
+    : "image/png";
+
+  const base64 = match
+    ? match[2]
+    : raw;
+
+  const ext =
+    mime.includes("jpeg") || mime.includes("jpg")
+      ? "jpg"
+      : mime.includes("webp")
+        ? "webp"
+        : "png";
+
+  return {
+    buffer: Buffer.from(base64, "base64"),
+    mime,
+    ext
+  };
+}
+
+// Pomocná funkcia: bezpečné čítanie JSON odpovede z fetch()
+async function mintReadFetchJson(resp) {
+  const text = await resp.text();
 
   try {
-    mintLog("REQUEST_START", { method: req.method });
+    return JSON.parse(text);
+  } catch {
+    return {
+      raw: text
+    };
+  }
+}
+
+// Pomocná funkcia: nahratie súboru na Pinata IPFS
+async function mintUploadFileToIPFS(buffer, fileName, mime) {
+  const jwt =
+    process.env.PINATA_JWT ||
+    process.env.PINATA_API_JWT ||
+    process.env.IPFS_JWT ||
+    "";
+
+  const apiKey =
+    process.env.PINATA_API_KEY ||
+    "";
+
+  const apiSecret =
+    process.env.PINATA_SECRET_API_KEY ||
+    process.env.PINATA_API_SECRET ||
+    "";
+
+  if (!jwt && (!apiKey || !apiSecret)) {
+    throw new Error(
+      "Missing IPFS credentials: set PINATA_JWT or PINATA_API_KEY + PINATA_SECRET_API_KEY"
+    );
+  }
+
+  const form = new FormData();
+
+  const blob = new Blob(
+    [buffer],
+    {
+      type: mime || "application/octet-stream"
+    }
+  );
+
+  form.append(
+    "file",
+    blob,
+    fileName
+  );
+
+  form.append(
+    "pinataMetadata",
+    JSON.stringify({
+      name: fileName
+    })
+  );
+
+  const headers = jwt
+    ? {
+        Authorization: `Bearer ${jwt}`
+      }
+    : {
+        pinata_api_key: apiKey,
+        pinata_secret_api_key: apiSecret
+      };
+
+  const resp = await fetch(
+    "https://api.pinata.cloud/pinning/pinFileToIPFS",
+    {
+      method: "POST",
+      headers,
+      body: form
+    }
+  );
+
+  const data = await mintReadFetchJson(resp);
+
+  if (!resp.ok) {
+    throw new Error(
+      "IPFS image upload failed: " +
+        (
+          data?.error?.details ||
+          data?.error ||
+          data?.message ||
+          data?.raw ||
+          `HTTP ${resp.status}`
+        )
+    );
+  }
+
+  const cid =
+    data.IpfsHash ||
+    data.cid ||
+    data.CID ||
+    "";
+
+  if (!cid) {
+    throw new Error("IPFS image upload failed: CID missing");
+  }
+
+  return {
+    cid,
+    uri: `https://ipfs.io/ipfs/${cid}`,
+    raw: data
+  };
+}
+
+// Pomocná funkcia: nahratie metadata JSON na Pinata IPFS
+async function mintUploadJsonToIPFS(json, name = "chainvers-metadata.json") {
+  const jwt =
+    process.env.PINATA_JWT ||
+    process.env.PINATA_API_JWT ||
+    process.env.IPFS_JWT ||
+    "";
+
+  const apiKey =
+    process.env.PINATA_API_KEY ||
+    "";
+
+  const apiSecret =
+    process.env.PINATA_SECRET_API_KEY ||
+    process.env.PINATA_API_SECRET ||
+    "";
+
+  if (!jwt && (!apiKey || !apiSecret)) {
+    throw new Error(
+      "Missing IPFS credentials: set PINATA_JWT or PINATA_API_KEY + PINATA_SECRET_API_KEY"
+    );
+  }
+
+  const headers = {
+    "Content-Type": "application/json"
+  };
+
+  if (jwt) {
+    headers.Authorization = `Bearer ${jwt}`;
+  } else {
+    headers.pinata_api_key = apiKey;
+    headers.pinata_secret_api_key = apiSecret;
+  }
+
+  const resp = await fetch(
+    "https://api.pinata.cloud/pinning/pinJSONToIPFS",
+    {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        pinataMetadata: {
+          name
+        },
+        pinataContent: json
+      })
+    }
+  );
+
+  const data = await mintReadFetchJson(resp);
+
+  if (!resp.ok) {
+    throw new Error(
+      "IPFS metadata upload failed: " +
+        (
+          data?.error?.details ||
+          data?.error ||
+          data?.message ||
+          data?.raw ||
+          `HTTP ${resp.status}`
+        )
+    );
+  }
+
+  const cid =
+    data.IpfsHash ||
+    data.cid ||
+    data.CID ||
+    "";
+
+  if (!cid) {
+    throw new Error("IPFS metadata upload failed: CID missing");
+  }
+
+  return {
+    cid,
+    uri: `ipfs://${cid}`,
+    gateway: `https://ipfs.io/ipfs/${cid}`,
+    raw: data
+  };
+}
+
+// Pomocná funkcia: samotné mintovanie do smart kontraktu
+async function mintExecuteOnChain({
+  metadataURI,
+  crop_id,
+  toWallet
+}) {
+  const rpc = process.env.PROVIDER_URL;
+  const contractAddress = process.env.CONTRACT_ADDRESS;
+  const privateKey = process.env.PRIVATE_KEY;
+
+  if (!rpc) throw new Error("Missing PROVIDER_URL");
+  if (!contractAddress) throw new Error("Missing CONTRACT_ADDRESS");
+  if (!privateKey) throw new Error("Missing PRIVATE_KEY");
+
+  const web3 = new Web3(rpc);
+  const abi = mintLoadAbi();
+
+  const account = web3.eth.accounts.privateKeyToAccount(
+    privateKey.startsWith("0x") ? privateKey : "0x" + privateKey
+  );
+
+  web3.eth.accounts.wallet.add(account);
+
+  const contract = new web3.eth.Contract(
+    abi,
+    contractAddress
+  );
+
+  mintLog("OWNER_WALLET", account.address);
+
+  let mintFee = "0";
+
+  try {
+    mintFee = await contract.methods.mintFee().call();
+  } catch (e) {
+    mintLog("MINT_FEE_READ_FAIL", mintParseErr(e));
+  }
+
+  mintLog("MINT_FEE", {
+    wei: mintFee,
+    eth: web3.utils.fromWei(mintFee, "ether")
+  });
+
+  let method;
+
+  if (contract.methods.createOriginal) {
+    method = contract.methods.createOriginal(
+      metadataURI,
+      metadataURI,
+      500,
+      1000
+    );
+  } else if (contract.methods.mintOriginal) {
+    method = contract.methods.mintOriginal(
+      toWallet,
+      metadataURI
+    );
+  } else if (contract.methods.mintNFT) {
+    method = contract.methods.mintNFT(
+      toWallet,
+      metadataURI
+    );
+  } else {
+    throw new Error("ABI neobsahuje createOriginal/mintOriginal/mintNFT");
+  }
+
+  const gas = await method.estimateGas({
+    from: account.address,
+    value: mintFee
+  });
+
+  const gasPrice = await web3.eth.getGasPrice();
+
+  mintLog("GAS", {
+    gas: gas.toString(),
+    gasPrice: gasPrice.toString()
+  });
+
+  const tx = {
+    from: account.address,
+    to: contractAddress,
+    data: method.encodeABI(),
+    gas: Math.ceil(Number(gas) * 1.25),
+    gasPrice,
+    value: mintFee
+  };
+
+  const signed = await web3.eth.accounts.signTransaction(
+    tx,
+    account.privateKey
+  );
+
+  const receipt = await web3.eth.sendSignedTransaction(
+    signed.rawTransaction
+  );
+
+  const tokenId = mintExtractTokenIdFromReceipt(
+    web3,
+    receipt,
+    contractAddress
+  );
+
+  mintLog("MINT_OK", {
+    txHash: receipt.transactionHash,
+    blockNumber: receipt.blockNumber,
+    tokenId
+  });
+
+  if (!tokenId) {
+    const err = new Error(
+      "Mint OK, but tokenId was not found in Transfer event"
+    );
+
+    err.extra = {
+      txHash: receipt.transactionHash,
+      contractAddress,
+      cropId: crop_id,
+      metadataURI
+    };
+
+    throw err;
+  }
+
+  return {
+    txHash: receipt.transactionHash,
+    contractAddress,
+    tokenId,
+    token_id: tokenId,
+    cropId: crop_id,
+    crop_id,
+    metadataURI,
+    openseaUrl: `https://opensea.io/assets/base/${contractAddress}/${tokenId}`
+  };
+}
+
+// ======================================================
+// MERGED ACTION: MINTCHAIN
+// URL: /api/chainvers?action=mintchain
+//
+// Podporuje 2 režimy:
+// 1) metadataURI už existuje -> rovno mintuje
+// 2) image_base64 / image_url -> nahrá IPFS obrázok + metadata a potom mintuje
+//
+// Dôležité:
+// Táto verzia už nikdy nevolá staré /api/mintchain.
+// ======================================================
+async function mintChainAction(req, res) {
+  try {
+    mintLog("REQUEST_START", {
+      method: req.method
+    });
 
     if (req.method !== "POST") {
       return res.status(405).json({
@@ -725,157 +1092,180 @@ async function mintChainAction(req, res) {
 
     const requestBody = await readJson(req);
 
-    const {
+    mintLog(
+      "BODY_KEYS",
+      Object.keys(requestBody || {})
+    );
+
+    let {
       metadataURI,
+      metadata_uri,
       crop_id,
       walletAddress,
-      wallet
+      wallet,
+      image_base64,
+      imageBase64,
+      image_url,
+      imageURI,
+      image_uri,
+      name,
+      description,
+      crop_data,
+      metadata
     } = requestBody || {};
 
-    const toWallet = walletAddress || wallet;
+    metadataURI =
+      metadataURI ||
+      metadata_uri ||
+      "";
 
-    mintLog("BODY", {
-      metadataURI,
-      crop_id,
-      walletAddress: toWallet
-    });
+    const toWallet =
+      walletAddress ||
+      wallet ||
+      "";
 
-    if (!metadataURI || !crop_id || !toWallet) {
+    crop_id =
+      crop_id ||
+      requestBody?.cropId ||
+      requestBody?.id ||
+      "";
+
+    if (!crop_id || !toWallet) {
       return res.status(400).json({
         ok: false,
         success: false,
-        error: "Missing metadataURI, crop_id or walletAddress"
+        error: "Missing crop_id or walletAddress"
       });
     }
 
-    const rpc = process.env.PROVIDER_URL;
-    const contractAddress = process.env.CONTRACT_ADDRESS;
-    const privateKey = process.env.PRIVATE_KEY;
+    // Režim 2: ak neexistuje metadataURI, vytvorí sa z obrázka
+    if (!metadataURI) {
+      let finalImageURI =
+        imageURI ||
+        image_uri ||
+        image_url ||
+        "";
 
-    if (!rpc) throw new Error("Missing PROVIDER_URL");
-    if (!contractAddress) throw new Error("Missing CONTRACT_ADDRESS");
-    if (!privateKey) throw new Error("Missing PRIVATE_KEY");
+      if (!finalImageURI) {
+        const normalizedImage =
+          mintNormalizeBase64Image(
+            image_base64 ||
+            imageBase64 ||
+            ""
+          );
 
-    const web3 = new Web3(rpc);
-    const abi = mintLoadAbi();
+        if (!normalizedImage) {
+          return res.status(400).json({
+            ok: false,
+            success: false,
+            error: "Missing metadataURI or image_base64/image_url"
+          });
+        }
 
-    const account = web3.eth.accounts.privateKeyToAccount(
-      privateKey.startsWith("0x") ? privateKey : "0x" + privateKey
-    );
+        mintLog("STEP_1_UPLOAD_IMAGE_START");
 
-    web3.eth.accounts.wallet.add(account);
+        const uploadedImage =
+          await mintUploadFileToIPFS(
+            normalizedImage.buffer,
+            `${crop_id}.${normalizedImage.ext}`,
+            normalizedImage.mime
+          );
 
-    const contract = new web3.eth.Contract(abi, contractAddress);
+        finalImageURI = uploadedImage.uri;
 
-    mintLog("OWNER_WALLET", account.address);
+        mintLog("IMAGE_UPLOADED", {
+          imageCID: uploadedImage.cid,
+          imageURI: uploadedImage.uri
+        });
+      }
 
-    let mintFee = "0";
+      mintLog("STEP_2_UPLOAD_METADATA_START");
 
-    try {
-      mintFee = await contract.methods.mintFee().call();
-    } catch (e) {
-      mintLog("MINT_FEE_READ_FAIL", mintParseErr(e));
-    }
+      const finalMetadata =
+        metadata && typeof metadata === "object"
+          ? {
+              ...metadata
+            }
+          : {
+              name: name || `CHAINVERS ${crop_id}`,
+              description:
+                description ||
+                "CHAINVERS originálny digitálny chain.",
+              image: finalImageURI,
+              external_url:
+                process.env.INF_FREE_URL ||
+                "https://chainvers.free.nf",
+              attributes: [
+                {
+                  trait_type: "Platform",
+                  value: "CHAINVERS"
+                },
+                {
+                  trait_type: "Crop ID",
+                  value: String(crop_id)
+                },
+                {
+                  trait_type: "Owner wallet",
+                  value: String(toWallet)
+                }
+              ]
+            };
 
-    mintLog("MINT_FEE", {
-      wei: mintFee,
-      eth: web3.utils.fromWei(mintFee, "ether")
-    });
+      if (!finalMetadata.image) {
+        finalMetadata.image = finalImageURI;
+      }
 
-    let method;
+      if (crop_data && !finalMetadata.crop_data) {
+        finalMetadata.crop_data = crop_data;
+      }
 
-    if (contract.methods.createOriginal) {
-      method = contract.methods.createOriginal(
-        metadataURI,
-        metadataURI,
-        500,
-        1000
-      );
-    } else if (contract.methods.mintOriginal) {
-      method = contract.methods.mintOriginal(
-        toWallet,
-        metadataURI
-      );
-    } else if (contract.methods.mintNFT) {
-      method = contract.methods.mintNFT(
-        toWallet,
-        metadataURI
-      );
-    } else {
-      throw new Error("ABI neobsahuje createOriginal/mintOriginal/mintNFT");
-    }
+      const uploadedMetadata =
+        await mintUploadJsonToIPFS(
+          finalMetadata,
+          `${crop_id}-metadata.json`
+        );
 
-    const gas = await method.estimateGas({
-      from: account.address,
-      value: mintFee
-    });
+      metadataURI = uploadedMetadata.uri;
 
-    const gasPrice = await web3.eth.getGasPrice();
-
-    mintLog("GAS", {
-      gas: gas.toString(),
-      gasPrice: gasPrice.toString()
-    });
-
-    const tx = {
-      from: account.address,
-      to: contractAddress,
-      data: method.encodeABI(),
-      gas: Math.ceil(Number(gas) * 1.25),
-      gasPrice,
-      value: mintFee
-    };
-
-    const signed = await web3.eth.accounts.signTransaction(
-      tx,
-      account.privateKey
-    );
-
-    const receipt = await web3.eth.sendSignedTransaction(
-      signed.rawTransaction
-    );
-
-    const tokenId = mintExtractTokenIdFromReceipt(web3, receipt, contractAddress);
-
-    mintLog("MINT_OK", {
-      txHash: receipt.transactionHash,
-      blockNumber: receipt.blockNumber,
-      tokenId
-    });
-
-    if (!tokenId) {
-      return res.status(500).json({
-        ok: false,
-        success: false,
-        error: "Mint OK, but tokenId was not found in Transfer event",
-        txHash: receipt.transactionHash,
-        contractAddress,
-        cropId: crop_id,
+      mintLog("METADATA_UPLOADED", {
+        metadataCID: uploadedMetadata.cid,
         metadataURI
       });
     }
+
+    mintLog("STEP_3_MINT_START", {
+      url: "INTERNAL_DIRECT_MINT_NO_OLD_API",
+      crop_id,
+      walletAddress: toWallet,
+      metadataURI
+    });
+
+    const minted = await mintExecuteOnChain({
+      metadataURI,
+      crop_id,
+      toWallet
+    });
 
     return res.status(200).json({
       ok: true,
       success: true,
       message: "Mint OK",
-      txHash: receipt.transactionHash,
-      contractAddress,
-      tokenId,
-      token_id: tokenId,
-      cropId: crop_id,
-      crop_id,
-      metadataURI,
-      openseaUrl: `https://opensea.io/assets/base/${contractAddress}/${tokenId}`
+      ...minted
     });
 
   } catch (e) {
-    mintLog("HANDLER_FATAL", mintParseErr(e));
+    const extra = e?.extra || null;
+
+    mintLog(
+      "HANDLER_FATAL",
+      mintParseErr(e)
+    );
 
     return res.status(500).json({
       ok: false,
       success: false,
       error: mintParseErr(e),
+      ...(extra || {}),
       stack: e?.stack || null
     });
   }
