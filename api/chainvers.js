@@ -1053,6 +1053,39 @@ async function mintExecuteOnChain({
     throw err;
   }
 
+  // Auto-transfer freshly minted NFT to the user's wallet when minted by owner
+  if (
+    tokenId &&
+    account.address.toLowerCase() !== String(toWallet).toLowerCase() &&
+    contract.methods.safeTransferFrom
+  ) {
+    const transferMethod = contract.methods.safeTransferFrom(
+      account.address,
+      toWallet,
+      tokenId
+    );
+    const transferGas = await transferMethod.estimateGas({ from: account.address });
+    const transferTx = {
+      from: account.address,
+      to: contractAddress,
+      data: transferMethod.encodeABI(),
+      gas: Math.ceil(Number(transferGas) * 1.25),
+      gasPrice
+    };
+    const signedTransfer = await web3.eth.accounts.signTransaction(
+      transferTx,
+      account.privateKey
+    );
+    const transferReceipt = await web3.eth.sendSignedTransaction(
+      signedTransfer.rawTransaction
+    );
+    mintLog("TRANSFER_OK", {
+      txHash: transferReceipt.transactionHash,
+      to: toWallet,
+      tokenId
+    });
+  }
+
   return {
     txHash: receipt.transactionHash,
     contractAddress,
