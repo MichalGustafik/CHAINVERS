@@ -87,46 +87,133 @@ function isAddress(addr) {
   return ethers.utils && ethers.utils.isAddress(addr);
 }
 
-function ipfsToHttp(uri) {
-  if (!uri) return "";
-  if (uri.startsWith("ipfs://")) {
-    return "https://ipfs.io/ipfs/" + uri.replace("ipfs://", "").replace(/^ipfs\//, "");
+function unique(values) {
+  return [...new Set((values || []).filter(Boolean))];
+}
+
+function decodeDataJson(uri) {
+  const value = String(uri || "").trim();
+  if (!/^data:application\/json/i.test(value)) return null;
+  try {
+    const comma = value.indexOf(",");
+    if (comma < 0) return null;
+    const header = value.slice(0, comma);
+    const payload = value.slice(comma + 1);
+    const text = /;base64/i.test(header)
+      ? Buffer.from(payload, "base64").toString("utf8")
+      : decodeURIComponent(payload);
+    return JSON.parse(text);
+  } catch {
+    return null;
   }
-  return uri;
+}
+
+function resourceCandidates(uri, baseUrl = "") {
+  const raw = String(uri || "").trim();
+  if (!raw) return [];
+  if (/^data:/i.test(raw) || /^blob:/i.test(raw)) return [raw];
+  if (/^ar:\/\//i.test(raw)) return ["https://arweave.net/" + raw.replace(/^ar:\/\//i, "")];
+
+  if (/^ipfs:\/\//i.test(raw)) {
+    const cidPath = raw.replace(/^ipfs:\/\//i, "").replace(/^ipfs\//i, "");
+    return unique([
+      `https://gateway.pinata.cloud/ipfs/${cidPath}`,
+      `https://cloudflare-ipfs.com/ipfs/${cidPath}`,
+      `https://ipfs.io/ipfs/${cidPath}`
+    ]);
+  }
+
+  if (/^https?:\/\//i.test(raw)) {
+    const out = [raw];
+    try {
+      const u = new URL(raw);
+      const marker = "/ipfs/";
+      const idx = u.pathname.indexOf(marker);
+      if (idx >= 0) {
+        const cidPath = u.pathname.slice(idx + marker.length) + u.search;
+        out.push(
+          `https://gateway.pinata.cloud/ipfs/${cidPath}`,
+          `https://cloudflare-ipfs.com/ipfs/${cidPath}`,
+          `https://ipfs.io/ipfs/${cidPath}`
+        );
+      }
+    } catch {}
+    return unique(out);
+  }
+
+  if (baseUrl && /^https?:\/\//i.test(baseUrl)) {
+    try { return [new URL(raw, baseUrl).toString()]; } catch {}
+  }
+  return [raw];
+}
+
+async function fetchWithTimeout(url, options = {}, timeoutMs = 7000) {
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+  try { return await fetch(url, { ...options, signal: ctrl.signal }); }
+  finally { clearTimeout(timer); }
 }
 
 async function fetchMetadata(tokenURI, logs) {
-  try {
-    const url = ipfsToHttp(tokenURI);
-    logPush(logs, "FETCH_METADATA_URL", { url });
-
-    if (!/^https?:\/\//i.test(url)) return null;
-
-    const ctrl = new AbortController();
-    const timeout = setTimeout(() => ctrl.abort(), 8000);
-
-    const r = await fetch(url, {
-      signal: ctrl.signal,
-      headers: { Accept: "application/json,text/plain,*/*" }
-    });
-
-    clearTimeout(timeout);
-
-    logPush(logs, "METADATA_HTTP", { status: r.status, ok: r.ok });
-
-    if (!r.ok) return null;
-
-    const txt = await r.text();
-
-    try {
-      return JSON.parse(txt);
-    } catch {
-      return { raw: txt.slice(0, 500) };
-    }
-  } catch (e) {
-    logPush(logs, "METADATA_ERROR", { error: e.message });
-    return null;
+  const inline = decodeDataJson(tokenURI);
+  if (inline) {
+    logPush(logs, "METADATA_INLINE_JSON");
+    return { metadata: inline, metadataUrl: String(tokenURI || ""), tried: [String(tokenURI || "")] };
   }
+
+  const tried = [];
+  for (const url of resourceCandidates(tokenURI)) {
+    if (!/^https?:\/\//i.test(url)) continue;
+    tried.push(url);
+    try {
+      logPush(logs, "FETCH_METADATA_URL", { url });
+      const r = await fetchWithTimeout(url, {
+        headers: { Accept: "application/json,text/plain,*/*", "User-Agent": "CHAINVERS/1.0" },
+        cache: "no-store"
+      });
+      logPush(logs, "METADATA_HTTP", { url, status: r.status, ok: r.ok });
+      if (!r.ok) continue;
+      const txt = await r.text();
+      try {
+        return { metadata: JSON.parse(txt), metadataUrl: url, tried };
+      } catch {
+        logPush(logs, "METADATA_BAD_JSON", { url });
+      }
+    } catch (e) {
+      logPush(logs, "METADATA_ERROR", { url, error: e.message });
+    }
+  }
+  return { metadata: null, metadataUrl: "", tried };
+}
+
+function collectImageValues(metadata) {
+  if (!metadata || typeof metadata !== "object") return [];
+  const values = [];
+  const add = value => { if (typeof value === "string" && value.trim()) values.push(value.trim()); };
+  add(metadata.image);
+  add(metadata.image_url);
+  add(metadata.imageUrl);
+  add(metadata.imageURI);
+  add(metadata.image_uri);
+  add(metadata.animation_url);
+  add(metadata.animationUrl);
+  add(metadata.thumbnail);
+  add(metadata.thumbnail_url);
+  add(metadata?.properties?.image);
+  add(metadata?.properties?.image_url);
+  add(metadata?.properties?.files?.[0]?.uri);
+  add(metadata?.properties?.files?.[0]?.url);
+  add(metadata?.media?.[0]?.uri);
+  add(metadata?.media?.[0]?.url);
+  add(metadata?.files?.[0]?.uri);
+  add(metadata?.files?.[0]?.url);
+  return unique(values);
+}
+
+function imageCandidatesFromMetadata(metadata, metadataUrl = "") {
+  const out = [];
+  for (const value of collectImageValues(metadata)) out.push(...resourceCandidates(value, metadataUrl));
+  return unique(out);
 }
 
 async function getProvider(logs) {
@@ -295,12 +382,17 @@ export default async function handler(req, res) {
 
     let tokenURI = "";
     let metadata = null;
+    let metadataResolvedUrl = "";
+    let metadataTried = [];
 
     try {
       logPush(logs, "CALL_TOKEN_URI", { tokenId });
       tokenURI = await nft.tokenURI(tokenId);
       logPush(logs, "TOKEN_URI_OK", { tokenURI });
-      metadata = await fetchMetadata(tokenURI, logs);
+      const fetched = await fetchMetadata(tokenURI, logs);
+      metadata = fetched.metadata;
+      metadataResolvedUrl = fetched.metadataUrl || "";
+      metadataTried = fetched.tried || [];
     } catch (e) {
       logPush(logs, "TOKEN_URI_FAIL", { error: e.message });
     }
@@ -337,12 +429,8 @@ export default async function handler(req, res) {
       logPush(logs, "SKIP_HAS_COPY_NO_VALID_WALLET");
     }
 
-    const image = ipfsToHttp(
-      metadata?.image ||
-      metadata?.image_url ||
-      metadata?.animation_url ||
-      ""
-    );
+    const imageCandidates = imageCandidatesFromMetadata(metadata, metadataResolvedUrl);
+    const image = imageCandidates[0] || "";
 
     return response(res, 200, {
       ok: true,
@@ -354,7 +442,10 @@ export default async function handler(req, res) {
       owner,
       token_uri: tokenURI,
       metadata,
+      metadata_resolved_url: metadataResolvedUrl,
+      metadata_candidates_tried: metadataTried,
       image,
+      image_candidates: imageCandidates,
       type,
       original_of: originalOf,
       can_copymint: type === "origin" && !userHasCopy,

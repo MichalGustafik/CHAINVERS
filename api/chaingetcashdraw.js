@@ -1,4 +1,4 @@
-console.log("=== BOOT: CHAINVERS chaingetcashdraw.js EMERGENCY WITHDRAW FINAL ===");
+console.log("=== BOOT: CHAINVERS chaingetcashdraw.js TOKEN-SAFE WITHDRAW ===");
 
 import Web3 from "web3";
 
@@ -13,252 +13,217 @@ const ABI = [
     type: "function"
   },
   {
+    inputs: [{ internalType: "uint256", name: "tokenId", type: "uint256" }],
+    name: "ownerOf",
+    outputs: [{ internalType: "address", name: "", type: "address" }],
+    stateMutability: "view",
+    type: "function"
+  },
+  {
+    inputs: [{ internalType: "uint256", name: "id", type: "uint256" }],
+    name: "tokenAvailableForWithdraw",
+    outputs: [{ internalType: "uint256", name: "", type: "uint256" }],
+    stateMutability: "view",
+    type: "function"
+  },
+  {
+    inputs: [{ internalType: "uint256", name: "id", type: "uint256" }],
+    name: "isOriginalToken",
+    outputs: [{ internalType: "bool", name: "", type: "bool" }],
+    stateMutability: "view",
+    type: "function"
+  },
+  {
     inputs: [
+      { internalType: "uint256", name: "id", type: "uint256" },
       { internalType: "address", name: "to", type: "address" },
       { internalType: "uint256", name: "amount", type: "uint256" }
     ],
-    name: "emergencyWithdraw",
+    name: "backendWithdrawToken",
     outputs: [],
     stateMutability: "nonpayable",
     type: "function"
   }
 ];
 
-async function parseBody(req) {
-  return new Promise(resolve => {
-    let raw = "";
-    req.on("data", c => raw += c);
-    req.on("end", () => {
-      try {
-        resolve(JSON.parse(raw || "{}"));
-      } catch {
-        resolve({});
-      }
-    });
-  });
-}
-
-function logger() {
-  const rows = [];
-  return {
-    push: (...a) => {
-      const m = `[${new Date().toISOString()}] ` + a.join(" ");
-      console.log(m);
-      rows.push(m);
-    },
-    rows
-  };
-}
-
 function cleanPk(pk) {
-  pk = String(pk || "").trim();
-  return pk.startsWith("0x") ? pk : "0x" + pk;
+  const value = String(pk || "").trim();
+  return value.startsWith("0x") ? value : "0x" + value;
+}
+
+function lower(v) {
+  return String(v || "").trim().toLowerCase();
 }
 
 function toWeiSafe(web3, eth) {
-  const n = Number(String(eth).replace(",", "."));
-  if (!Number.isFinite(n) || n <= 0) return null;
-  return web3.utils.toWei(n.toFixed(18), "ether");
+  const value = String(eth ?? "").replace(",", ".").trim();
+  if (!/^\d+(?:\.\d+)?$/.test(value)) return null;
+  try {
+    const wei = web3.utils.toWei(value, "ether");
+    return BigInt(wei) > 0n ? wei : null;
+  } catch {
+    return null;
+  }
+}
+
+async function sendMethod(web3, account, pk, contractAddress, method) {
+  const gasPrice = await web3.eth.getGasPrice();
+  const estimated = await method.estimateGas({ from: account.address });
+  const gas = Math.ceil(Number(estimated) * 1.25);
+  const nonce = await web3.eth.getTransactionCount(account.address, "pending");
+  const signed = await web3.eth.accounts.signTransaction({
+    from: account.address,
+    to: contractAddress,
+    data: method.encodeABI(),
+    gas,
+    gasPrice,
+    nonce,
+    chainId: 8453
+  }, pk);
+  return await web3.eth.sendSignedTransaction(signed.rawTransaction);
 }
 
 export default async function handler(req, res) {
-  const log = logger();
+  res.setHeader("Access-Control-Allow-Origin", "*");
+  res.setHeader("Access-Control-Allow-Methods", "POST,OPTIONS");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+
+  if (req.method === "OPTIONS") return res.status(200).end();
+  if (req.method !== "POST") {
+    return res.status(405).json({ ok: false, error: "method_not_allowed" });
+  }
 
   try {
-    if (req.method !== "POST") {
-      return res.status(405).json({
-        ok: false,
-        error: "method_not_allowed",
-        logs: log.rows
-      });
-    }
-
-    const body = await parseBody(req);
-
+    const body = req.body || {};
     const action = String(body.action || "withdraw").toLowerCase();
-    const user = String(body.user || "").toLowerCase().trim();
-    const withdrawTo = String(body.withdraw_to || user).toLowerCase().trim();
-    const tokenId = Number(body.token_id || 0);
-    const amountEth = String(body.amount || "0").replace(",", ".");
 
-    log.push("[ACTION]", action);
-    log.push("[BODY]", JSON.stringify(body));
-
-    if (!process.env.PROVIDER_URL) {
-      return res.json({ ok: false, error: "missing_PROVIDER_URL", logs: log.rows });
-    }
-
-    if (!process.env.CONTRACT_ADDRESS) {
-      return res.json({ ok: false, error: "missing_CONTRACT_ADDRESS", logs: log.rows });
-    }
-
-    if (!process.env.PRIVATE_KEY) {
-      return res.json({ ok: false, error: "missing_PRIVATE_KEY", logs: log.rows });
-    }
+    if (!process.env.PROVIDER_URL) return res.status(500).json({ ok:false, error:"missing_PROVIDER_URL" });
+    if (!process.env.CONTRACT_ADDRESS) return res.status(500).json({ ok:false, error:"missing_CONTRACT_ADDRESS" });
+    if (!process.env.PRIVATE_KEY) return res.status(500).json({ ok:false, error:"missing_PRIVATE_KEY" });
 
     const web3 = new Web3(process.env.PROVIDER_URL);
-    const block = await web3.eth.getBlockNumber();
-    log.push("[RPC OK] block", String(block));
-
+    const contractAddress = process.env.CONTRACT_ADDRESS;
     const pk = cleanPk(process.env.PRIVATE_KEY);
     const account = web3.eth.accounts.privateKeyToAccount(pk);
     web3.eth.accounts.wallet.add(account);
-
-    const contractAddress = process.env.CONTRACT_ADDRESS;
     const contract = new web3.eth.Contract(ABI, contractAddress);
 
-    log.push("[SENDER]", account.address);
-    log.push("[CONTRACT]", contractAddress);
+    if (action === "balances") {
+      const rawIds = Array.isArray(body.token_ids) ? body.token_ids : [];
+      const tokenIds = [...new Set(rawIds.map(v => String(v || "").trim()).filter(v => /^\d+$/.test(v) && Number(v) > 0))].slice(0, 100);
+      const balances = {};
 
-    let owner = "unknown";
-    try {
-      owner = await contract.methods.owner().call();
-      log.push("[OWNER]", owner);
-    } catch (e) {
-      log.push("[OWNER READ FAIL]", e.message);
+      for (const id of tokenIds) {
+        try {
+          const [available, owner, isOriginal] = await Promise.all([
+            contract.methods.tokenAvailableForWithdraw(id).call(),
+            contract.methods.ownerOf(id).call(),
+            contract.methods.isOriginalToken(id).call()
+          ]);
+          balances[id] = {
+            ok: true,
+            available_wei: String(available),
+            available_eth: web3.utils.fromWei(String(available), "ether"),
+            owner: String(owner),
+            token_type: isOriginal ? "origin" : "copy"
+          };
+        } catch (e) {
+          balances[id] = { ok: false, error: e.message || String(e) };
+        }
+      }
+
+      return res.json({ ok: true, action: "balances", balances });
+    }
+
+    if (action === "balance") {
+      const tokenId = String(body.token_id || "").trim();
+      if (!/^\d+$/.test(tokenId) || Number(tokenId) <= 0) {
+        return res.status(400).json({ ok:false, error:"bad_token_id" });
+      }
+      const [available, owner, isOriginal] = await Promise.all([
+        contract.methods.tokenAvailableForWithdraw(tokenId).call(),
+        contract.methods.ownerOf(tokenId).call(),
+        contract.methods.isOriginalToken(tokenId).call()
+      ]);
+      return res.json({
+        ok: true,
+        action: "balance",
+        token_id: tokenId,
+        available_wei: String(available),
+        available_eth: web3.utils.fromWei(String(available), "ether"),
+        owner: String(owner),
+        token_type: isOriginal ? "origin" : "copy"
+      });
     }
 
     if (action === "initialize") {
-      return res.json({
-        ok: false,
-        error: "initialize_disabled",
-        detail: "Bez proxy initialize nepoužívame.",
-        owner_now: owner,
-        logs: log.rows
+      return res.status(400).json({ ok:false, error:"initialize_disabled" });
+    }
+
+    const user = lower(body.user);
+    const withdrawTo = lower(body.withdraw_to || user);
+    const tokenId = String(body.token_id || "").trim();
+    const amountWei = toWeiSafe(web3, body.amount);
+
+    if (!web3.utils.isAddress(user) || !web3.utils.isAddress(withdrawTo)) {
+      return res.status(400).json({ ok:false, error:"bad_withdraw_to" });
+    }
+    if (user !== withdrawTo) {
+      return res.status(400).json({ ok:false, error:"withdraw_to_must_equal_user" });
+    }
+    if (!/^\d+$/.test(tokenId) || Number(tokenId) <= 0) {
+      return res.status(400).json({ ok:false, error:"bad_token_id" });
+    }
+    if (!amountWei) {
+      return res.status(400).json({ ok:false, error:"bad_amount" });
+    }
+
+    const [owner, available] = await Promise.all([
+      contract.methods.ownerOf(tokenId).call(),
+      contract.methods.tokenAvailableForWithdraw(tokenId).call()
+    ]);
+
+    if (lower(owner) !== user) {
+      return res.status(403).json({
+        ok:false,
+        error:"not_token_owner",
+        owner: String(owner),
+        user
       });
     }
 
-    if (!web3.utils.isAddress(withdrawTo)) {
-      return res.json({
-        ok: false,
-        error: "bad_withdraw_to",
-        withdraw_to: withdrawTo,
-        logs: log.rows
+    if (BigInt(available) < BigInt(amountWei)) {
+      return res.status(400).json({
+        ok:false,
+        error:"exceeds_onchain_balance",
+        available_eth: web3.utils.fromWei(String(available), "ether")
       });
     }
 
-    if (!tokenId || tokenId <= 0) {
-      return res.json({
-        ok: false,
-        error: "bad_token_id",
-        logs: log.rows
+    const contractNative = await web3.eth.getBalance(contractAddress);
+    if (BigInt(contractNative) < BigInt(amountWei)) {
+      return res.status(400).json({
+        ok:false,
+        error:"contract_native_balance_too_low",
+        contract_balance_eth: web3.utils.fromWei(contractNative, "ether")
       });
     }
 
-    const amountWei = toWeiSafe(web3, amountEth);
-
-    if (!amountWei || BigInt(amountWei) <= 0n) {
-      return res.json({
-        ok: false,
-        error: "bad_amount",
-        amount: amountEth,
-        logs: log.rows
-      });
-    }
-
-    log.push("[TOKEN]", tokenId);
-    log.push("[WITHDRAW TO]", withdrawTo);
-    log.push("[AMOUNT ETH]", amountEth);
-    log.push("[AMOUNT WEI]", amountWei);
-
-    const ownerBalance = await web3.eth.getBalance(account.address);
-    const contractBalance = await web3.eth.getBalance(contractAddress);
-
-    log.push("[OWNER NATIVE BALANCE]", ownerBalance);
-    log.push("[CONTRACT BALANCE BEFORE]", contractBalance);
-
-    if (BigInt(contractBalance) < BigInt(amountWei)) {
-      return res.json({
-        ok: false,
-        error: "contract_native_balance_too_low",
-        contract_balance_wei: contractBalance,
-        requested_wei: amountWei,
-        logs: log.rows
-      });
-    }
-
-    const method = contract.methods.emergencyWithdraw(withdrawTo, amountWei);
-
-    try {
-      await method.call({ from: account.address });
-      log.push("[CALL OK] emergencyWithdraw");
-    } catch (e) {
-      log.push("[CALL FAIL]", e.message);
-      return res.json({
-        ok: false,
-        error: "emergencyWithdraw_call_failed",
-        detail: e.message,
-        owner_now: owner,
-        sender: account.address,
-        logs: log.rows
-      });
-    }
-
-    let gas;
-    try {
-      const estimatedGas = await method.estimateGas({ from: account.address });
-      gas = Math.ceil(Number(estimatedGas) * 1.25);
-      log.push("[GAS ESTIMATE]", String(estimatedGas));
-      log.push("[GAS LIMIT]", String(gas));
-    } catch (e) {
-      log.push("[GAS FAIL]", e.message);
-      return res.json({
-        ok: false,
-        error: "estimate_gas_failed",
-        detail: e.message,
-        logs: log.rows
-      });
-    }
-
-    const gasPrice = await web3.eth.getGasPrice();
-    const nonce = await web3.eth.getTransactionCount(account.address, "pending");
-
-    log.push("[GAS PRICE]", String(gasPrice));
-    log.push("[NONCE]", String(nonce));
-
-    const tx = {
-      from: account.address,
-      to: contractAddress,
-      gas,
-      gasPrice,
-      nonce,
-      data: method.encodeABI()
-    };
-
-    const signed = await web3.eth.accounts.signTransaction(tx, pk);
-    const sent = await web3.eth.sendSignedTransaction(signed.rawTransaction);
-
-    log.push("[TX OK]", sent.transactionHash);
-    log.push("[RECEIPT STATUS]", String(sent.status));
-
-    if (String(sent.status) !== "true") {
-      return res.json({
-        ok: false,
-        error: "tx_failed_status_false",
-        tx: sent.transactionHash,
-        logs: log.rows
-      });
-    }
+    const method = contract.methods.backendWithdrawToken(tokenId, withdrawTo, amountWei);
+    const sent = await sendMethod(web3, account, pk, contractAddress, method);
+    const remaining = await contract.methods.tokenAvailableForWithdraw(tokenId).call();
 
     return res.json({
       ok: true,
-      action: "emergencyWithdraw",
+      action: "withdraw",
       tx: sent.transactionHash,
       token_id: tokenId,
       withdraw_to: withdrawTo,
-      amount_eth: amountEth,
-      amount_wei: amountWei,
-      logs: log.rows
+      amount_eth: web3.utils.fromWei(amountWei, "ether"),
+      remaining_eth: web3.utils.fromWei(String(remaining), "ether")
     });
-
   } catch (e) {
-    log.push("[HANDLER ERROR]", e.message);
-
-    return res.json({
-      ok: false,
-      error: "handler_error",
-      detail: e.message,
-      logs: log.rows
-    });
+    console.error("chaingetcashdraw error", e);
+    return res.status(500).json({ ok:false, error:"handler_error", detail:e.message || String(e) });
   }
 }
