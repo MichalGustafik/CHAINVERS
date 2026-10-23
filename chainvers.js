@@ -1,3 +1,4 @@
+import { rejectChainversDemo } from './chainvers_demo_guard.js';
 // pages/api/chainvers.js
 import Stripe from "stripe";
 import crypto from "crypto";
@@ -37,6 +38,7 @@ function mask(v) {
 //  MAIN HANDLER
 // ======================================================
 export default async function handler(req, res) {
+  if (rejectChainversDemo(req, res)) return;
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "POST, GET, OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type, Stripe-Signature");
