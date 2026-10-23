@@ -1,3 +1,4 @@
+import { rejectChainversDemo } from '../chainvers_demo_guard.js';
 console.log("=== BOOT: CHAINVERS /api/chainscan DEBUG ETHERS V5 ===");
 
 import { ethers } from "ethers";
@@ -239,6 +240,7 @@ async function getProvider(logs) {
 }
 
 export default async function handler(req, res) {
+  if (rejectChainversDemo(req, res)) return;
   const logs = [];
 
   res.setHeader("Access-Control-Allow-Origin", "*");

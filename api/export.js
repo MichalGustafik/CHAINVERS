@@ -1,3 +1,4 @@
+import { rejectChainversDemo } from '../chainvers_demo_guard.js';
 import fs from "fs";
 import path from "path";
 import JSZip from "jszip";
@@ -29,6 +30,7 @@ function scanAllFiles(dir, base = process.cwd()) {
 }
 
 export default async function handler(req, res) {
+  if (rejectChainversDemo(req, res)) return;
   const root = process.cwd();
   const files = scanAllFiles(root);
 

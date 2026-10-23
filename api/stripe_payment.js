@@ -1,6 +1,8 @@
+import { rejectChainversDemo } from '../chainvers_demo_guard.js';
 import Stripe from "stripe";
 
 export default async function handler(req, res) {
+  if (rejectChainversDemo(req, res)) return;
   if (req.method !== "POST") {
     return res.status(405).json({ error: "Method not allowed" });
   }

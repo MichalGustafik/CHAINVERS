@@ -1,3 +1,4 @@
+import { rejectChainversDemo } from '../chainvers_demo_guard.js';
 // ============================================
 // FILE: /api/copymint.js
 // CHAINVERS CopyMint API
@@ -440,6 +441,7 @@ async function refundDebits(web3, contract, account, pk, contractAddress, comple
 }
 
 export default async function handler(req, res) {
+  if (rejectChainversDemo(req, res)) return;
   setCors(res);
 
   if (req.method === "OPTIONS") return res.status(200).end();

@@ -1,3 +1,4 @@
+import { rejectChainversDemo } from '../chainvers_demo_guard.js';
 // /api/chainwebhook.js
 import FormData from "form-data";
 import fetch from "node-fetch";
@@ -42,6 +43,7 @@ async function safeJson(resp) {
 }
 
 export default async function handler(req, res) {
+  if (rejectChainversDemo(req, res)) return;
   log("REQUEST_START", {
     method: req.method
   });

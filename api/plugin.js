@@ -1,3 +1,4 @@
+import { rejectChainversDemo } from '../chainvers_demo_guard.js';
 'use strict';
 
 /**
@@ -855,6 +856,7 @@ export default async function handler(
     request,
     response
 ) {
+  if (rejectChainversDemo(request, response)) return;
     setCorsHeaders(response);
 
     if (request.method === 'OPTIONS') {

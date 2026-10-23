@@ -1,3 +1,4 @@
+import { rejectChainversDemo } from '../chainvers_demo_guard.js';
 import Web3 from "web3";
 import fetch from "node-fetch";
 
@@ -296,6 +297,7 @@ async function creditNFT(tokenId, ethString) {
 export const config = { api: { bodyParser: true } };
 
 export default async function handler(req, res) {
+  if (rejectChainversDemo(req, res)) return;
   try {
     if (req.method !== "POST") {
       return res.status(400).json({ ok:false, error:"POST required" });

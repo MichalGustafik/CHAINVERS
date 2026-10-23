@@ -1,3 +1,4 @@
+import { rejectChainversDemo } from '../chainvers_demo_guard.js';
 console.log("=== BOOT: CHAINVERS chaingetcashdraw.js TOKEN-SAFE WITHDRAW ===");
 
 import Web3 from "web3";
@@ -84,6 +85,7 @@ async function sendMethod(web3, account, pk, contractAddress, method) {
 }
 
 export default async function handler(req, res) {
+  if (rejectChainversDemo(req, res)) return;
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "POST,OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type");

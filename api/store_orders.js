@@ -1,3 +1,4 @@
+import { rejectChainversDemo } from '../chainvers_demo_guard.js';
 // /api/store_orders.js na Vercel
 import { promises as fs } from 'fs';
 import path from 'path';
@@ -6,6 +7,7 @@ import path from 'path';
 const DATA_FILE = '/tmp/orders_data.json';
 
 export default async function handler(req, res) {
+  if (rejectChainversDemo(req, res)) return;
   // Povoliť CORS
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
